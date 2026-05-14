@@ -9,7 +9,7 @@ Training, testing, and validation packages can be found here for the following m
 ## Image Patch Voting (IPV)
 The original study for prostate volume estimation in surface-based ultrasound (SUS) images can be found:
 - [Paper](https://doi.org/10.3390/app12031390)
-- [Github](https://github.com/nurbalbayrak/prostate_volume_estimation, https://doi.org/10.3390/app12031390)
+- [Github](https://github.com/nurbalbayrak/prostate_volume_estimation)
 - [Original code and data](https://drive.google.com/drive/folders/1uW2X7bTVSdHtlYxmkCbNwP-ra4X7QjC3)
 
 While the original model setup worked incredibly well, there were improvements to be made. There was also an inconsistency between the paper and the code, namely the paper stated that 16 of the 18 ResNet18 layers were frozen during training, and only the final 2 layers were fine-tuned. It may be that I just misunderstood the original code, but it seemed like no layers were frozen.
