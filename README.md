@@ -12,7 +12,12 @@ The original study for prostate volume estimation in surface-based ultrasound (S
 - [Github](https://github.com/nurbalbayrak/prostate_volume_estimation)
 - [Original code and data](https://drive.google.com/drive/folders/1uW2X7bTVSdHtlYxmkCbNwP-ra4X7QjC3)
 
-While the original model setup worked incredibly well, there were improvements to be made. There was also an inconsistency between the paper and the code, namely the paper stated that 16 of the 18 ResNet18 layers were frozen during training, and only the final 2 layers were fine-tuned. It may be that I just misunderstood the original code, but it seemed like no layers were frozen.
+While the original model setup worked incredibly well, there were improvements to be made:
+- Paper and code inconsistency;
+- Result generation was slow;
+- 
+- 
+- There was also an inconsistency between the paper and the code, namely the paper stated that 16 of the 18 ResNet18 layers were frozen during training, and only the final 2 layers were fine-tuned. It may be that I just misunderstood the original code, but it seemed like no layers were frozen.
 
 Beside that, the code worked as expected but needed updating.
 
@@ -24,3 +29,5 @@ One of the primary drawbacks of the original IPV model was the amount of time it
 - ResNet34 (larger than the original, included out of interest).
 
 However, during testing it was found that most of the time was spent generating the dataset and accummulating patch votes, and not on inference. Substantial speed gains were made using multiprocessing, but the grid-like nature of patch centre selection limited how much time-savings could be made; a grid step size of 10 just results in too many patches. It is for this reason that the other model types were investigated.  
+
+
