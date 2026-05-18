@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "landmark-identification"
+version = "0.1.0"
+description = "Dataset creation and quadruplet model training tools for IPV experiments"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [
+    { name = "Rory Bennett" }
+]
+dependencies = [
+    "numpy",
+    "pandas",
+    "torch",
+    "torchvision",
+    "scikit-image",
+    "opencv-python",
+    "scipy",
+    "numba",
+    "matplotlib"
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest"
+]
+
+[tool.setuptools.packages.find]
+include = ["IPV*"]
+
+[project.scripts]
+ipv-train = "IPV.create_dataset_and_train_model:main"

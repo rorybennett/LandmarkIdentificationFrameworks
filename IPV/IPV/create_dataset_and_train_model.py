@@ -1,0 +1,677 @@
+"""
+Create train/validation fold data, train a model, copy outputs, and optionally delete temporary fold data.
+"""
+import argparse
+import csv
+import datetime as dt
+import json
+import re
+import shutil
+from dataclasses import asdict, dataclass
+from pathlib import Path
+
+from . import parameters as pms
+from .data_creator import DataCreator, discover_fold_numbers
+from .model_registry import get_available_model_names
+from .train_model import TrainModel, TrainConfig, QuadrupletConfig
+
+MIN_POINTS_PER_IMAGE = 1
+MAX_POINTS_PER_IMAGE = 30
+BASE_CSV_COLUMNS = 5
+
+
+@dataclass
+class DataCreationConfig:
+    distance_intervals: list
+    angle_intervals: list
+    num_of_folds: int
+    sub_patch_scales: list
+    patches_per_training_sample: int
+    test_data_step: int
+    phase: str
+    fold_lists_path: Path
+    mark_list_file: Path
+    image_data_dir: Path
+    sampling_variances: tuple
+    num_workers: int
+    random_seed: int
+    keep_part_csvs: bool
+
+    @property
+    def tasks_classes(self):
+        """Return task classes in the order expected by the model."""
+        return [self.distance_intervals, self.angle_intervals]
+
+
+@dataclass
+class RunConfig:
+    fold: int
+    task_name: str
+    num_of_points: int
+    phase: str
+    create_data: bool
+    train_model: bool
+    copy_files: bool
+    delete_files: bool
+    scratch_dir: Path
+    results_dir: Path
+    run_name: str
+
+
+class CreateTrain:
+    def __init__(self, run_config, data_config, train_config, quadruplet_config):
+        self.run_config = run_config
+        self.data_config = data_config
+        self.train_config = train_config
+        self.quadruplet_config = quadruplet_config
+
+        self.fold = run_config.fold
+        self.task_name = run_config.task_name
+        self.num_of_points = run_config.num_of_points
+
+        self.code_data_dir = self.build_code_data_dir()
+        self.data_save_path = self.build_data_save_path()
+
+    def create_data(self):
+        """Create fold data for the requested task."""
+        self.print_section_start(f'Fold {self.fold} {self.task_name} data creation')
+        start_time = dt.datetime.now()
+
+        data_creator = DataCreator(
+            distance_intervals=self.data_config.distance_intervals,
+            angle_intervals=self.data_config.angle_intervals,
+            subpatch_scales=self.data_config.sub_patch_scales,
+            task_name=self.task_name,
+            data_save_path=self.data_save_path,
+            num_of_points=self.num_of_points,
+            patches_per_training_sample=self.data_config.patches_per_training_sample,
+            fold_lists_path=self.data_config.fold_lists_path,
+            mark_list_path=self.data_config.mark_list_file,
+            image_data_path=self.data_config.image_data_dir,
+            sampling_variances=self.data_config.sampling_variances,
+            num_workers=self.data_config.num_workers,
+            random_seed=self.data_config.random_seed,
+            keep_part_csvs=self.data_config.keep_part_csvs
+        )
+
+        data_creator.create(step=self.data_config.test_data_step, phase=self.data_config.phase, current_fold=self.fold)
+        self.write_metadata()
+
+        end_time = dt.datetime.now()
+        print(f'\tFold {self.fold} {self.task_name} data created in {self.format_runtime(start_time, end_time)}.', flush=True)
+        print(f'\tRaw elapsed time: {end_time - start_time}', flush=True)
+        self.print_section_end()
+
+    def train_model(self):
+        """Validate the generated data and train the model."""
+        self.print_section_start(f'Fold {self.fold} {self.task_name} training')
+        start_time = dt.datetime.now()
+
+        self.validate_training_data_point_count()
+
+        trainer = TrainModel(
+            current_fold=self.fold,
+            data_save_path=self.data_save_path,
+            num_of_points=self.num_of_points,
+            tasks_classes=self.data_config.tasks_classes,
+            train_config=self.train_config,
+            quadruplet_config=self.quadruplet_config
+        )
+
+        trainer.train()
+
+        end_time = dt.datetime.now()
+        print(f'\tFold {self.fold} {self.task_name} training complete in {self.format_runtime(start_time, end_time)}.', flush=True)
+        print(f'\tRaw elapsed time: {end_time - start_time}', flush=True)
+        self.print_section_end()
+
+    def validate_training_data_point_count(self):
+        """Check that train and validation CSV files match the requested point count."""
+        tasks_per_point = len(self.data_config.tasks_classes)
+        train_csv_path = self.data_save_path / f'Train_f{self.fold}.csv'
+        val_csv_path = self.data_save_path / f'Val_f{self.fold}.csv'
+
+        train_points = infer_num_points_from_csv(csv_path=train_csv_path, tasks_per_point=tasks_per_point)
+        val_points = infer_num_points_from_csv(csv_path=val_csv_path, tasks_per_point=tasks_per_point)
+
+        if train_points != val_points:
+            raise ValueError(f'Train data has {train_points} points but validation data has {val_points} points.')
+
+        if train_points != self.num_of_points:
+            raise ValueError(f'Model requested {self.num_of_points} points but generated data contains {train_points} points.')
+
+        self.validate_run_metadata_point_count()
+
+    def validate_run_metadata_point_count(self):
+        """Check data creation metadata when it is available."""
+        metadata_path = self.data_save_path / f'run_info_{self.task_name}_{self.data_config.phase}_f{self.fold}.json'
+
+        if not metadata_path.is_file():
+            return
+
+        with open(metadata_path, 'r', encoding='utf-8') as metadata_file:
+            metadata = json.load(metadata_file)
+
+        created_points = int(metadata.get('num_of_points', self.num_of_points))
+
+        if created_points != self.num_of_points:
+            raise ValueError(f'Model requested {self.num_of_points} points but metadata says data was created with {created_points} points.')
+
+    def copy_files(self):
+        """Copy fold output files to the results directory."""
+        self.print_section_start(f'Fold {self.fold} {self.task_name} copying outputs')
+        start_time = dt.datetime.now()
+
+        save_path = self.get_results_save_path()
+        save_path.mkdir(exist_ok=True, parents=True)
+
+        files = [file_path for file_path in self.data_save_path.iterdir() if file_path.is_file()]
+        print(f'\tCopying {len(files)} files from {self.data_save_path}...', flush=True)
+
+        for file_path in files:
+            shutil.copy(file_path, save_path / file_path.name)
+
+        end_time = dt.datetime.now()
+        print(f'\tFold {self.fold} {self.task_name} outputs copied in {self.format_runtime(start_time, end_time)}.', flush=True)
+        print(f'\tRaw elapsed time: {end_time - start_time}', flush=True)
+        self.print_section_end()
+
+    def delete_files(self):
+        """Delete the temporary fold data directory."""
+        self.print_section_start(f'Fold {self.fold} {self.task_name} deleting data')
+        start_time = dt.datetime.now()
+
+        target = self.code_data_dir.resolve()
+        scratch_root = self.run_config.scratch_dir.resolve()
+
+        if not target.exists():
+            print(f'\tNothing to delete: {target}', flush=True)
+            return
+
+        if scratch_root not in target.parents:
+            raise ValueError(f'Refusing to delete {target}; it is not inside scratch_dir={scratch_root}.')
+
+        shutil.rmtree(target)
+
+        end_time = dt.datetime.now()
+        print(f'\tFold {self.fold} {self.task_name} data deleted in {self.format_runtime(start_time, end_time)}.', flush=True)
+        print(f'\tRaw elapsed time: {end_time - start_time}', flush=True)
+        self.print_section_end()
+
+    def run(self):
+        """Run the requested pipeline stages."""
+        total_start_time = dt.datetime.now()
+
+        self.print_inputs()
+        self.write_run_info()
+
+        if self.run_config.create_data:
+            self.create_data()
+
+        if self.run_config.train_model:
+            self.train_model()
+
+        if self.run_config.copy_files:
+            self.copy_files()
+
+        if self.run_config.delete_files:
+            self.delete_files()
+
+        total_end_time = dt.datetime.now()
+        self.print_section_start('Create and train workflow complete')
+        print(f'\tTotal runtime: {self.format_runtime(total_start_time, total_end_time)}.', flush=True)
+        print(f'\tRaw total elapsed time: {total_end_time - total_start_time}', flush=True)
+        self.print_section_end()
+
+    def write_data_info(self):
+        """Write fold data creation metadata."""
+        self.data_save_path.mkdir(exist_ok=True, parents=True)
+        info_path = self.data_save_path / f'data_info_{self.data_config.phase}_f{self.fold}.csv'
+
+        with open(info_path, 'w', newline='', encoding='utf-8') as info_csv:
+            writer = csv.writer(info_csv)
+            writer.writerow([
+                'DISTANCE_INTERVALS',
+                'ANGLE_INTERVALS',
+                'FOLD_NUMBER',
+                'TASK_NAME',
+                'NUM_OF_POINTS',
+                'SUB_PATCH_SCALES',
+                'PATCH_SIZE',
+                'PATCHES_PER_TRAINING_SAMPLE',
+                'GRID_DATA_STEP',
+                'PHASE',
+                'SAMPLING_VARIANCES',
+                'NUM_WORKERS',
+                'RANDOM_SEED',
+                'MARK_LIST_FILE',
+                'IMAGE_DATA_DIR'
+            ])
+            writer.writerow([
+                str(self.data_config.distance_intervals),
+                str(self.data_config.angle_intervals),
+                self.fold,
+                self.task_name,
+                self.num_of_points,
+                self.data_config.sub_patch_scales,
+                self.data_config.sub_patch_scales[0],
+                self.data_config.patches_per_training_sample,
+                self.data_config.test_data_step,
+                self.data_config.phase,
+                self.data_config.sampling_variances,
+                self.data_config.num_workers,
+                self.data_config.random_seed,
+                self.data_config.mark_list_file,
+                self.data_config.image_data_dir
+            ])
+
+    def write_run_info(self):
+        """Write full run, data, training, and model metadata."""
+        self.data_save_path.mkdir(exist_ok=True, parents=True)
+
+        run_info_path = self.data_save_path / f'run_info_{self.task_name}_{self.data_config.phase}_f{self.fold}.json'
+
+        run_info = {
+            'created_at': dt.datetime.now().isoformat(),
+            'fold': self.fold,
+            'task_name': self.task_name,
+            'num_of_points': self.num_of_points,
+            'code_data_dir': self.code_data_dir,
+            'data_save_path': self.data_save_path,
+            'results_save_path': self.get_results_save_path(),
+            'mark_list_file': self.data_config.mark_list_file,
+            'image_data_dir': self.data_config.image_data_dir,
+            'run_config': asdict(self.run_config),
+            'data_config': asdict(self.data_config),
+            'train_config': asdict(self.train_config),
+            'quadruplet_config': asdict(self.quadruplet_config)
+        }
+
+        with open(run_info_path, 'w', encoding='utf-8') as run_info_file:
+            json.dump(run_info, run_info_file, indent=4, default=str)
+
+    def write_metadata(self):
+        """Write compact CSV metadata and full JSON metadata."""
+        self.write_data_info()
+        self.write_run_info()
+
+    def get_results_save_path(self):
+        """Return the final output directory for this run and task."""
+        return self.run_config.results_dir / self.run_config.run_name / self.task_name
+
+    def build_code_data_dir(self):
+        """Build the scratch directory used for generated fold data."""
+        return self.run_config.scratch_dir / f'Data_F{self.fold}_{self.task_name}'
+
+    def build_data_save_path(self):
+        """Build the folder containing generated train, validation, and test CSVs."""
+        return self.code_data_dir / f'{self.data_config.num_of_folds}_FOLDS' / self.task_name / f'{self.data_config.sub_patch_scales}_{self.num_of_points}points_{self.data_config.patches_per_training_sample}pertrainingsample'
+
+    def print_inputs(self):
+        """Print the resolved pipeline settings."""
+        self.print_section_start('Input arguments')
+        print(f'\t\tFold: {self.fold}', flush=True)
+        print(f'\t\tTask name: {self.task_name}', flush=True)
+        print(f'\t\tNumber of landmark points: {self.run_config.num_of_points}', flush=True)
+        print(f'\t\tPhase: {self.data_config.phase}', flush=True)
+        print(f'\t\tCreate data: {self.run_config.create_data}', flush=True)
+        print(f'\t\tTrain model: {self.run_config.train_model}', flush=True)
+        print(f'\t\tCopy files: {self.run_config.copy_files}', flush=True)
+        print(f'\t\tDelete files: {self.run_config.delete_files}', flush=True)
+        print(f'\t\tNumber of folds: {self.data_config.num_of_folds}', flush=True)
+        print(f'\t\tSub-patch scales: {self.data_config.sub_patch_scales}', flush=True)
+        print(f'\t\tPatches per training sample: {self.data_config.patches_per_training_sample}', flush=True)
+        print(f'\t\tGrid data step: {self.data_config.test_data_step}', flush=True)
+        print(f'\t\tSampling variances: {self.data_config.sampling_variances}', flush=True)
+        print(f'\t\tData workers: {self.data_config.num_workers}', flush=True)
+        print(f'\t\tTraining workers: {self.train_config.num_workers}', flush=True)
+        print(f'\t\tBatch size: {self.train_config.batch_size}', flush=True)
+        print(f'\t\tValidation/logging interval: {self.train_config.loss_print_interval} batches', flush=True)
+        print(f'\t\tRandom seed: {self.data_config.random_seed}', flush=True)
+        print(f'\t\tNetwork: {self.quadruplet_config.network_name}', flush=True)
+        print(f'\t\tBranch features: {self.quadruplet_config.branch_features}', flush=True)
+        print(f'\t\tFrozen stages: {self.quadruplet_config.frozen_stages}', flush=True)
+        print(f'\t\tSmall input stem: {self.quadruplet_config.small_input_stem}', flush=True)
+        print(f'\t\tScratch dir: {self.run_config.scratch_dir}', flush=True)
+        print(f'\t\tResults dir: {self.run_config.results_dir}', flush=True)
+        print(f'\t\tRun name: {self.run_config.run_name}', flush=True)
+        print(f'\t\tResults save path: {self.get_results_save_path()}', flush=True)
+        print(f'\t\tFold lists path: {self.data_config.fold_lists_path}', flush=True)
+        print(f'\t\tMark list file: {self.data_config.mark_list_file}', flush=True)
+        print(f'\t\tImage data dir: {self.data_config.image_data_dir}', flush=True)
+        print(f'\t\tData save path: {self.data_save_path}', flush=True)
+        self.print_section_end()
+
+    @staticmethod
+    def print_section_start(message):
+        """Print a section heading."""
+        print('======================================================================================', flush=True)
+        print(f"\t{dt.datetime.now().strftime('%d %m %Y %H:%M:%S')} - {message}...", flush=True)
+
+    @staticmethod
+    def print_section_end():
+        """Print a section divider."""
+        print('======================================================================================', flush=True)
+
+    @staticmethod
+    def format_runtime(start_time, end_time):
+        """Format elapsed runtime as hours, minutes, and seconds."""
+        elapsed = end_time - start_time
+        total_seconds = int(elapsed.total_seconds())
+
+        hours, remainder = divmod(total_seconds, 3600)
+        minutes, seconds = divmod(remainder, 60)
+
+        return f'{hours:02d}:{minutes:02d}:{seconds:02d}'
+
+
+def str_to_bool(value):
+    """Convert command-line strings to booleans."""
+    value = str(value).lower().strip()
+
+    if value in ('true', 't', 'yes', 'y', '1'):
+        return True
+
+    if value in ('false', 'f', 'no', 'n', '0'):
+        return False
+
+    raise argparse.ArgumentTypeError(f'Invalid boolean value: {value}')
+
+
+def parse_args():
+    """Parse terminal arguments."""
+    parser = argparse.ArgumentParser(description='Create train/validation fold data, train a model, copy results, and delete temporary files.')
+
+    parser.add_argument('fold', type=int)
+    parser.add_argument('task_name', type=validate_task_name)
+    parser.add_argument('phase', choices=['Train', 'Val', 'both'])
+    parser.add_argument('create_data', type=str_to_bool)
+    parser.add_argument('train_model', type=str_to_bool)
+    parser.add_argument('copy_files', type=str_to_bool)
+    parser.add_argument('delete_files', type=str_to_bool)
+
+    parser.add_argument('--scratch-dir', type=Path, required=True)
+    parser.add_argument('--results-dir', type=Path, required=True)
+    parser.add_argument('--num-points', type=validate_num_points, required=True)
+    parser.add_argument('--fold-lists-path', type=Path, required=True)
+    parser.add_argument('--mark-list-file', type=Path, required=True)
+    parser.add_argument('--image-data-dir', type=Path, required=True)
+    parser.add_argument('--data-creation-workers', type=int, required=True)
+    parser.add_argument('--train-workers', type=int, required=True)
+    parser.add_argument('--random-seed', type=int, required=True)
+    parser.add_argument('--keep-part-csvs', type=str_to_bool, required=True)
+    parser.add_argument('--batch-size', type=int, required=True)
+    parser.add_argument('--max-training-epochs', type=int, required=True)
+    parser.add_argument('--learning-rate', type=float, required=True)
+    parser.add_argument('--lr-schedule', type=str_to_bool, required=True)
+    parser.add_argument('--loss-print-samples', type=int, required=True)
+    parser.add_argument('--patches-per-training-sample', type=int, required=True)
+    parser.add_argument('--test-data-step', type=int, required=True)
+    parser.add_argument('--run-name', type=str, default=None)
+
+    parser.add_argument('--network-name', type=str, choices=get_available_model_names(), required=True)
+    parser.add_argument('--branch-features', type=int, required=True)
+    parser.add_argument('--frozen-stages', type=int, required=True)
+    parser.add_argument('--small-input-stem', type=str_to_bool, required=True)
+
+    return parser.parse_args()
+
+
+def validate_args(args, num_of_folds):
+    """Validate numeric terminal arguments."""
+    if args.batch_size < 1:
+        raise ValueError('--batch-size must be at least 1.')
+
+    if args.max_training_epochs < 1:
+        raise ValueError('--max-training-epochs must be at least 1.')
+
+    if args.learning_rate <= 0:
+        raise ValueError('--learning-rate must be greater than 0.')
+
+    if args.loss_print_samples < 1:
+        raise ValueError('--loss-print-samples must be at least 1.')
+
+    if args.patches_per_training_sample < 1:
+        raise ValueError('--patches-per-training-sample must be at least 1.')
+
+    if args.test_data_step < 1:
+        raise ValueError('--test-data-step must be at least 1.')
+
+    if num_of_folds < 2:
+        raise ValueError(f'At least 2 fold files are required. Found {num_of_folds}.')
+
+    if args.fold < 1 or args.fold > num_of_folds:
+        raise ValueError(f'fold must be between 1 and {num_of_folds}. Got fold={args.fold}.')
+
+    if len(pms.sub_patch_scales) != 4:
+        raise ValueError(f'Quadruplet requires exactly 4 sub-patch scales, got {len(pms.sub_patch_scales)}: {pms.sub_patch_scales}')
+
+    if any(scale <= 0 for scale in pms.sub_patch_scales):
+        raise ValueError(f'sub_patch_scales must contain positive integers. Got: {pms.sub_patch_scales}')
+
+    if sorted(pms.sub_patch_scales) != list(pms.sub_patch_scales):
+        raise ValueError(f'sub_patch_scales should be in ascending order because the first value is used as the output patch size. Got: {pms.sub_patch_scales}')
+
+    validate_intervals(name='distance_intervals', intervals=pms.distance_intervals, expected_start=0)
+    validate_intervals(name='angle_intervals', intervals=pms.angle_intervals, expected_start=0, expected_end=360)
+    validate_sampling_variances(pms.sampling_variances)
+
+    minimum_patches = args.num_points * len(pms.sampling_variances)
+
+    if args.patches_per_training_sample < minimum_patches:
+        raise ValueError(
+            f'--patches-per-training-sample must be at least {minimum_patches} '
+            f'for {args.num_points} points and {len(pms.sampling_variances)} sampling variances.'
+        )
+
+    if not args.mark_list_file.is_file():
+        raise ValueError(f'--mark-list-file does not exist or is not a file: {args.mark_list_file}')
+
+    if not args.image_data_dir.is_dir():
+        raise ValueError(f'--image-data-dir does not exist or is not a directory: {args.image_data_dir}')
+
+
+def validate_num_points(value):
+    """Validate the number of landmark points for each image."""
+    value = int(value)
+
+    if value < MIN_POINTS_PER_IMAGE or value > MAX_POINTS_PER_IMAGE:
+        raise argparse.ArgumentTypeError(f'num-points must be between {MIN_POINTS_PER_IMAGE} and {MAX_POINTS_PER_IMAGE}.')
+
+    return value
+
+
+def validate_task_name(value):
+    """Validate and clean the task name used in output paths."""
+    value = clean_run_name(value)
+
+    if not value:
+        raise argparse.ArgumentTypeError('task_name cannot be empty after cleaning.')
+
+    if value in ('.', '..'):
+        raise argparse.ArgumentTypeError('task_name cannot be "." or "..".')
+
+    return value
+
+
+def validate_sampling_variances(values):
+    """Validate sampling variances used for training-centre generation."""
+    if not values:
+        raise ValueError('sampling_variances must contain at least one value.')
+
+    for index, value in enumerate(values):
+        if not isinstance(value, (int, float)):
+            raise ValueError(f'sampling_variances[{index}] must be numeric. Got: {value}')
+
+        if value <= 0:
+            raise ValueError(f'sampling_variances[{index}] must be greater than 0. Got: {value}')
+
+
+def validate_intervals(name, intervals, expected_start=None, expected_end=None):
+    """Validate class interval boundaries."""
+    if not intervals:
+        raise ValueError(f'{name} must contain at least one interval.')
+
+    previous_upper = None
+
+    for index, interval in enumerate(intervals):
+        if len(interval) != 2:
+            raise ValueError(f'{name}[{index}] must contain exactly two values: (lower_bound, upper_bound). Got: {interval}')
+
+        lower_bound, upper_bound = interval
+
+        if lower_bound >= upper_bound:
+            raise ValueError(f'{name}[{index}] has lower_bound >= upper_bound. Got: {interval}')
+
+        if previous_upper is not None and lower_bound != previous_upper:
+            raise ValueError(
+                f'{name} intervals must be contiguous with no gaps or overlaps. Previous upper bound was {previous_upper}, but interval {index} starts at {lower_bound}.')
+
+        previous_upper = upper_bound
+
+    if expected_start is not None and intervals[0][0] != expected_start:
+        raise ValueError(f'{name} must start at {expected_start}. Got first interval: {intervals[0]}')
+
+    if expected_end is not None and intervals[-1][1] != expected_end:
+        raise ValueError(f'{name} must end at {expected_end}. Got final interval: {intervals[-1]}')
+
+
+def infer_num_points_from_csv(csv_path, tasks_per_point):
+    """Infer the point count from the first valid row in a generated patch CSV."""
+    csv_path = Path(csv_path)
+
+    if not csv_path.is_file():
+        raise ValueError(f'Generated data CSV does not exist: {csv_path}')
+
+    with open(csv_path, 'r', newline='', encoding='utf-8') as csv_file:
+        reader = csv.reader(csv_file)
+
+        for row in reader:
+            if not row:
+                continue
+
+            label_count = len(row) - BASE_CSV_COLUMNS
+
+            if label_count < tasks_per_point:
+                raise ValueError(f'{csv_path} has {label_count} label columns, expected at least {tasks_per_point}.')
+
+            if label_count % tasks_per_point != 0:
+                raise ValueError(f'{csv_path} has {label_count} label columns, which is incompatible with {tasks_per_point} tasks per point.')
+
+            return label_count // tasks_per_point
+
+    raise ValueError(f'{csv_path} is empty.')
+
+
+def build_run_name(args, num_of_folds):
+    """Build a deterministic folder name shared by every fold in the same experiment."""
+    parts = [
+        'ipv',
+        f'{num_of_folds}fold',
+        args.phase.lower(),
+        f'patch{format_scales(pms.sub_patch_scales)}',
+        f'sv{format_scales(pms.sampling_variances)}',
+        f'points{args.num_points}',
+        f'ppts{args.patches_per_training_sample}',
+        f'step{args.test_data_step}',
+        args.network_name,
+        f'bf{args.branch_features}',
+        f'fs{args.frozen_stages}',
+        f'stem{int(args.small_input_stem)}',
+        f'bs{args.batch_size}',
+        f'lr{format_number(args.learning_rate)}',
+        f'ep{args.max_training_epochs}',
+        f'seed{args.random_seed}'
+    ]
+
+    return clean_run_name('_'.join(parts))
+
+
+def clean_run_name(value):
+    """Remove characters that are awkward in shared HPC paths."""
+    return re.sub(r'[^A-Za-z0-9._-]+', '_', str(value)).strip('_')
+
+
+def format_scales(values):
+    """Format numeric lists for run folders."""
+    return '-'.join(str(value) for value in values)
+
+
+def format_number(value):
+    """Format numeric values safely for file names."""
+    return f'{value:g}'.replace('-', 'm').replace('.', 'p')
+
+
+def build_configs(args):
+    """Build run, data, training, and model configs."""
+    fold_numbers = discover_fold_numbers(args.fold_lists_path)
+    num_of_folds = len(fold_numbers)
+
+    validate_args(args, num_of_folds)
+    loss_print_interval = max(1, args.loss_print_samples // args.batch_size)
+    run_name = clean_run_name(args.run_name) if args.run_name else build_run_name(args, num_of_folds)
+
+    if not run_name:
+        raise ValueError('--run-name cannot be empty after cleaning.')
+
+    run_config = RunConfig(
+        fold=args.fold,
+        task_name=args.task_name,
+        num_of_points=args.num_points,
+        phase=args.phase,
+        create_data=args.create_data,
+        train_model=args.train_model,
+        copy_files=args.copy_files,
+        delete_files=args.delete_files,
+        scratch_dir=args.scratch_dir,
+        results_dir=args.results_dir,
+        run_name=run_name
+    )
+
+    data_config = DataCreationConfig(
+        distance_intervals=pms.distance_intervals,
+        angle_intervals=pms.angle_intervals,
+        num_of_folds=num_of_folds,
+        sub_patch_scales=pms.sub_patch_scales,
+        patches_per_training_sample=args.patches_per_training_sample,
+        test_data_step=args.test_data_step,
+        phase=args.phase,
+        fold_lists_path=args.fold_lists_path,
+        mark_list_file=args.mark_list_file,
+        image_data_dir=args.image_data_dir,
+        sampling_variances=pms.sampling_variances,
+        num_workers=args.data_creation_workers,
+        random_seed=args.random_seed,
+        keep_part_csvs=args.keep_part_csvs
+    )
+
+    train_config = TrainConfig(
+        batch_size=args.batch_size,
+        learning_rate=args.learning_rate,
+        max_training_epochs=args.max_training_epochs,
+        loss_print_interval=loss_print_interval,
+        num_workers=args.train_workers,
+        lr_schedule=args.lr_schedule
+    )
+
+    quadruplet_config = QuadrupletConfig(
+        network_name=args.network_name,
+        branch_features=args.branch_features,
+        frozen_stages=args.frozen_stages,
+        small_input_stem=args.small_input_stem,
+        num_sub_patches=len(pms.sub_patch_scales)
+    )
+
+    return run_config, data_config, train_config, quadruplet_config
+
+
+def main():
+    """Run the fold creation and training workflow."""
+    args = parse_args()
+    run_config, data_config, train_config, quadruplet_config = build_configs(args)
+    create_train = CreateTrain(run_config, data_config, train_config, quadruplet_config)
+    create_train.run()
+
+
+if __name__ == '__main__':
+    main()
