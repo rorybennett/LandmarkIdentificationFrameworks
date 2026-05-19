@@ -509,13 +509,16 @@ class DataCreator:
         """Create and save patches and labels for one phase."""
         self.read_points(phase)
 
-        patch_save_path = self.data_save_path / f'{phase}_f{self.current_fold}'
-        image_save_path = self.data_save_path / f'{phase}_images'
-        part_csv_dir = self.data_save_path / f'{phase}_csv_parts_f{self.current_fold}'
+        patch_save_path = self.data_save_path / f'{phase}_Patches_F{self.current_fold}'
+        image_save_path = self.data_save_path / f'{phase}_Images_F{self.current_fold}'
+        part_csv_dir = self.data_save_path / f'{phase}_csv_parts_F{self.current_fold}'
         csv_path = self.data_save_path / f'{phase}_f{self.current_fold}.csv'
 
-        patch_save_path.mkdir(exist_ok=True, parents=True)
-        image_save_path.mkdir(exist_ok=True, parents=True)
+        for output_dir in (patch_save_path, image_save_path):
+            if output_dir.exists():
+                shutil.rmtree(output_dir)
+
+            output_dir.mkdir(exist_ok=True, parents=True)
 
         if part_csv_dir.exists():
             shutil.rmtree(part_csv_dir)

@@ -22,6 +22,18 @@ TRAINING_DATA_DIR_NAME = 'TRAINING_DATA'
 RESULTS_DIR_NAME = 'TRAINING_RESULTS'
 
 
+def format_fold_collection_name(num_of_folds):
+    """Return the shared fold collection directory name."""
+    return f'{num_of_folds}_Folds'
+
+
+def format_training_sample_dir_name(sub_patch_scales, num_of_points, patches_per_training_sample):
+    """Return the shared data directory name for one task and sampling setup."""
+    scale_label = '-'.join(str(scale) for scale in sub_patch_scales)
+
+    return f'{scale_label}_{num_of_points}points_{patches_per_training_sample}pertrainingsample'
+
+
 @dataclass
 class DataCreationConfig:
     distance_intervals: list
@@ -80,8 +92,10 @@ class CreateTrain:
         self.print_section_start(f'Fold {self.fold} {self.task_name} data creation')
         start_time = dt.datetime.now()
 
-        if self.data_save_path.exists():
-            print(f"\t'{self.data_save_path.name}' exists, and it will be used instead of creating a new training set.", flush=True)
+        self.validate_no_partial_fold_data()
+
+        if self.fold_data_exists():
+            print(f"\tExisting fold data found in '{self.data_save_path}', and it will be used instead of creating a new training set.", flush=True)
             self.validate_training_data_point_count()
             self.write_run_info(write_to_data_dir=True)
             end_time = dt.datetime.now()
@@ -144,8 +158,8 @@ class CreateTrain:
     def validate_training_data_point_count(self):
         """Check that train and validation CSV files match the requested point count."""
         tasks_per_point = len(self.data_config.tasks_classes)
-        train_csv_path = self.data_save_path / f'Train_f{self.fold}.csv'
-        val_csv_path = self.data_save_path / f'Val_f{self.fold}.csv'
+        train_csv_path = self.get_phase_csv_path('Train')
+        val_csv_path = self.get_phase_csv_path('Val')
 
         train_points = infer_num_points_from_csv(csv_path=train_csv_path, tasks_per_point=tasks_per_point)
         val_points = infer_num_points_from_csv(csv_path=val_csv_path, tasks_per_point=tasks_per_point)
@@ -201,22 +215,32 @@ class CreateTrain:
         self.print_section_end()
 
     def delete_files(self):
-        """Delete only the generated training data folder for this fold and task."""
+        """Delete only generated training-data artefacts for this fold."""
         self.print_section_start(f'Fold {self.fold} {self.task_name} deleting training data')
         start_time = dt.datetime.now()
 
-        target = self.fold_training_data_dir.resolve()
         training_root = self.run_training_root.resolve()
+        deleted_count = 0
 
-        if not target.exists():
-            print(f'\tNothing to delete: {target}', flush=True)
-            self.print_section_end()
-            return
+        for target in self.get_fold_data_paths(include_metadata=True):
+            resolved_target = target.resolve()
 
-        if target == training_root or training_root not in target.parents:
-            raise ValueError(f'Refusing to delete {target}; it is not a fold training data directory inside run training root={training_root}.')
+            if not target.exists():
+                continue
 
-        shutil.rmtree(target)
+            if resolved_target == training_root or training_root not in resolved_target.parents:
+                raise ValueError(f'Refusing to delete {resolved_target}; it is not inside run training root={training_root}.')
+
+            if target.is_dir():
+                shutil.rmtree(target)
+            else:
+                target.unlink()
+
+            deleted_count += 1
+            print(f'\tDeleted {target}', flush=True)
+
+        if deleted_count == 0:
+            print(f'\tNothing to delete for fold {self.fold} in {self.data_save_path}', flush=True)
 
         end_time = dt.datetime.now()
         print(f'\tFold {self.fold} {self.task_name} training data deleted in {self.format_runtime(start_time, end_time)}.', flush=True)
@@ -248,6 +272,60 @@ class CreateTrain:
         print(f'\tTotal runtime: {self.format_runtime(total_start_time, total_end_time)}.', flush=True)
         print(f'\tRaw total elapsed time: {total_end_time - total_start_time}', flush=True)
         self.print_section_end()
+
+    def fold_data_exists(self):
+        """Return True when all required fold-specific generated data exists."""
+        return all(path.exists() for path in self.get_fold_data_paths(include_metadata=False))
+
+    def validate_no_partial_fold_data(self):
+        """Prevent accidental reuse of partially generated fold data."""
+        expected_paths = self.get_fold_data_paths(include_metadata=False)
+        existing_paths = [path for path in expected_paths if path.exists()]
+
+        if existing_paths and len(existing_paths) != len(expected_paths):
+            missing_paths = [path for path in expected_paths if not path.exists()]
+            missing_text = '\n'.join(str(path) for path in missing_paths)
+            existing_text = '\n'.join(str(path) for path in existing_paths)
+
+            raise ValueError(
+                f'Partial fold data found for fold {self.fold} in {self.data_save_path}.\n'
+                f'Existing paths:\n{existing_text}\n'
+                f'Missing paths:\n{missing_text}\n'
+                'Delete the partial fold data or regenerate it before training.'
+            )
+
+    def get_fold_data_paths(self, include_metadata=False):
+        """Return fold-specific generated data paths inside the shared data directory."""
+        paths = [
+            self.get_phase_csv_path('Train'),
+            self.get_phase_csv_path('Val'),
+            self.get_phase_patch_dir('Train'),
+            self.get_phase_patch_dir('Val'),
+            self.get_phase_image_dir('Train'),
+            self.get_phase_image_dir('Val')
+        ]
+
+        if include_metadata:
+            paths.extend([
+                self.data_save_path / f'data_info_f{self.fold}.csv',
+                self.data_save_path / f'run_info_{self.task_name}_f{self.fold}.json',
+                self.data_save_path / f'Train_csv_parts_F{self.fold}',
+                self.data_save_path / f'Val_csv_parts_F{self.fold}'
+            ])
+
+        return paths
+
+    def get_phase_csv_path(self, phase):
+        """Return the generated phase CSV path for this fold."""
+        return self.data_save_path / f'{phase}_f{self.fold}.csv'
+
+    def get_phase_patch_dir(self, phase):
+        """Return the generated phase patch directory for this fold."""
+        return self.data_save_path / f'{phase}_Patches_F{self.fold}'
+
+    def get_phase_image_dir(self, phase):
+        """Return the generated phase image-overlay directory for this fold."""
+        return self.data_save_path / f'{phase}_Images_F{self.fold}'
 
     def prepare_run_directories(self):
         """Create the two required high-level run directories."""
@@ -355,16 +433,22 @@ class CreateTrain:
         return self.run_config.run_dir / RESULTS_DIR_NAME
 
     def build_fold_training_data_dir(self):
-        """Build the fold/task training-data directory."""
-        return self.run_training_root / f'Data_F{self.fold}_{self.task_name}'
+        """Build the shared task-level training-data directory."""
+        return self.run_training_root / format_fold_collection_name(self.data_config.num_of_folds) / self.task_name
 
     def build_run_results_path(self):
         """Build the folder containing model checkpoints, logs, plots, and metadata."""
         return self.run_results_root / self.run_config.run_name / self.task_name
 
     def build_data_save_path(self):
-        """Build the folder containing generated train, validation, and test CSVs."""
-        return self.fold_training_data_dir / f'{self.data_config.num_of_folds}_FOLDS' / self.task_name / f'{self.data_config.sub_patch_scales}_{self.num_of_points}points_{self.data_config.patches_per_training_sample}pertrainingsample'
+        """Build the shared folder containing generated fold CSVs, images, and patches."""
+        sample_dir_name = format_training_sample_dir_name(
+            sub_patch_scales=self.data_config.sub_patch_scales,
+            num_of_points=self.num_of_points,
+            patches_per_training_sample=self.data_config.patches_per_training_sample
+        )
+
+        return self.fold_training_data_dir / sample_dir_name
 
     def print_inputs(self):
         """Print the resolved pipeline settings."""
@@ -393,6 +477,7 @@ class CreateTrain:
         print(f'\t\tRun dir: {self.run_config.run_dir}', flush=True)
         print(f'\t\tSave dir: {self.run_config.save_dir}', flush=True)
         print(f'\t\tTraining root dir: {self.run_training_root}', flush=True)
+        print(f'\t\tTask training data dir: {self.fold_training_data_dir}', flush=True)
         print(f'\t\tTraining results dir: {self.run_results_root}', flush=True)
         print(f'\t\tRun name: {self.run_config.run_name}', flush=True)
         print(f'\t\tRun results path: {self.run_results_path}', flush=True)
