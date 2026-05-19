@@ -19,7 +19,7 @@ MIN_POINTS_PER_IMAGE = 1
 MAX_POINTS_PER_IMAGE = 30
 BASE_CSV_COLUMNS = 5
 TRAINING_DATA_DIR_NAME = 'TRAINING_DATA'
-RESULTS_DIR_NAME = 'RESULTS'
+RESULTS_DIR_NAME = 'TRAINING_RESULTS'
 
 
 @dataclass
@@ -322,8 +322,11 @@ class CreateTrain:
 
     def get_save_copy_path(self):
         """Return the optional external save path for copied result files."""
-        if self.run_config.save_dir is None:
+        if not self.run_config.copy_files:
             return None
+
+        if self.run_config.save_dir is None:
+            raise ValueError('save_dir must be supplied when copy_files is True.')
 
         return self.run_config.save_dir / self.run_config.run_name / self.task_name
 
@@ -433,6 +436,16 @@ def optional_path(value):
     return Path(value)
 
 
+def normalise_save_dir(args):
+    """Enforce save-dir behaviour from the copy-files switch."""
+    if not args.copy_files:
+        args.save_dir = None
+        return
+
+    if args.save_dir is None:
+        raise ValueError('--save-dir must be supplied when COPY_FILES is true.')
+
+
 def parse_args():
     """Parse terminal arguments."""
     parser = argparse.ArgumentParser(description='Create train/validation fold data, train a model, copy selected outputs, and delete generated training data.')
@@ -473,6 +486,8 @@ def parse_args():
 
 def validate_args(args, num_of_folds):
     """Validate numeric and path terminal arguments."""
+    normalise_save_dir(args)
+
     if args.batch_size < 1:
         raise ValueError('--batch-size must be at least 1.')
 
