@@ -272,7 +272,7 @@ def create_patch_job(job):
     patch_creator = PatchCreator(image, sub_patch_scales=job.sub_patch_scales)
 
     if job.phase in GRID_PHASES:
-        centres = create_grid_centres(image_shape=image.shape, step=job.step)
+        centres = create_grid_centres(image_shape=image.shape, step=job.grid_spacing)
     elif job.phase in SAMPLED_PHASES:
         centres = create_training_centres(points=job.points, image_shape=image.shape, patches_per_training_sample=job.patches_per_training_sample,
                                           sampling_variances=job.sampling_variances, rng=rng)

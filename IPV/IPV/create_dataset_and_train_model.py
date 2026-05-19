@@ -632,7 +632,7 @@ def build_run_name(args, num_of_folds):
         f'sv{format_scales(pms.sampling_variances)}',
         f'points{args.num_points}',
         f'ppts{args.patches_per_training_sample}',
-        f'step{args.grid_spacing}',
+        f'gs{args.grid_spacing}',
         args.network_name,
         f'bf{args.branch_features}',
         f'fs{args.frozen_stages}',
