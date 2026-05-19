@@ -238,70 +238,6 @@ Important options:
 | `--patches-per-training-sample` | Number of sampled patch centres per training image. Must be at least `num_points * len(sampling_variances)`. |
 | `--test-data-step` | Grid stride for validation patch-centre creation. |
 
-### Prostate transverse example
-
-```bash
-ipv-train 1 transverse both true true true false \
-    --run-dir "$HOME/IPV_RUNS/prostate_ipv" \
-    --save-dir "$HOME/IPV_SAVED/prostate_ipv" \
-    --num-points 4 \
-    --fold-lists-path "$HOME/IPV_DATA/folds" \
-    --mark-list-file "$HOME/IPV_DATA/doctors_resampled_transverseMarkList.txt" \
-    --image-data-dir "$HOME/IPV_DATA/transverse" \
-    --data-creation-workers 8 \
-    --train-workers 8 \
-    --random-seed 42 \
-    --keep-part-csvs false \
-    --batch-size 64 \
-    --max-training-epochs 15 \
-    --learning-rate 0.01 \
-    --lr-schedule true \
-    --loss-print-samples 1600 \
-    --patches-per-training-sample 200 \
-    --test-data-step 10 \
-    --run-name prostate_transverse_fold1 \
-    --network-name small_cnn \
-    --branch-features 128 \
-    --frozen-stages 0 \
-    --small-input-stem false
-```
-
-### Prostate sagittal example
-
-Change the task, point count, mark list and image directory:
-
-```bash
-ipv-train 1 sagittal both true true true false \
-    --run-dir "$HOME/IPV_RUNS/prostate_ipv" \
-    --save-dir "$HOME/IPV_SAVED/prostate_ipv" \
-    --num-points 2 \
-    --fold-lists-path "$HOME/IPV_DATA/folds" \
-    --mark-list-file "$HOME/IPV_DATA/doctors_resampled_sagittalMarkList.txt" \
-    --image-data-dir "$HOME/IPV_DATA/sagittal" \
-    --data-creation-workers 8 \
-    --train-workers 8 \
-    --random-seed 42 \
-    --keep-part-csvs false \
-    --batch-size 64 \
-    --max-training-epochs 15 \
-    --learning-rate 0.01 \
-    --lr-schedule true \
-    --loss-print-samples 1600 \
-    --patches-per-training-sample 200 \
-    --test-data-step 10 \
-    --run-name prostate_sagittal_fold1 \
-    --network-name small_cnn \
-    --branch-features 128 \
-    --frozen-stages 0 \
-    --small-input-stem false
-```
-
-You can also run the module directly:
-
-```bash
-python -m IPV.create_dataset_and_train_model 1 transverse both true true true false [OPTIONS]
-```
-
 ## Ubuntu example script
 
 Save as `run_prostate_transverse_ubuntu.sh`, edit the paths at the top, then run with `bash run_prostate_transverse_ubuntu.sh`.
@@ -310,19 +246,18 @@ Save as `run_prostate_transverse_ubuntu.sh`, edit the paths at the top, then run
 #!/usr/bin/env bash
 set -euo pipefail
 
-PROJECT_DIR="$HOME/Coding/Python/IPV"
-RUN_DIR="$HOME/IPV_RUNS/prostate_ipv"
-SAVE_DIR="$HOME/IPV_SAVED/prostate_ipv"
-DATA_DIR="$HOME/IPV_DATA"
-FOLD_LISTS_PATH="$DATA_DIR/folds"
+PROJECT_DIR="$HOME/LandmarkIdentificationFrameworks/IPV"
+RUN_DIR="$HOME/IPV_TRAINING"
+SAVE_DIR="$HOME/IPV_SAVING"
+
+FOLD_LISTS_PATH="$HOME/DATA/folds"
+MARK_LIST_FILE="$HOME/DATA/transverse_points_list.txt"
+IMAGE_DATA_DIR="$HOME/DATA/transverse"
 
 FOLD=1
 TASK_NAME="transverse"
 PHASE="both"
 NUM_POINTS=4
-
-MARK_LIST_FILE="$DATA_DIR/doctors_resampled_transverseMarkList.txt"
-IMAGE_DATA_DIR="$DATA_DIR/transverse"
 
 CREATE_DATA="true"
 TRAIN_MODEL="true"
@@ -347,7 +282,7 @@ BRANCH_FEATURES=128
 FROZEN_STAGES=0
 SMALL_INPUT_STEM="false"
 
-RUN_NAME="prostate_${TASK_NAME}_fold${FOLD}_points${NUM_POINTS}_${NETWORK_NAME}_bs${BATCH_SIZE}_epochs${MAX_TRAINING_EPOCHS}_seed${RANDOM_SEED}"
+RUN_NAME="prostate_${TASK_NAME}_fold${FOLD}_points${NUM_POINTS}_${NETWORK_NAME}_sis${SMALL_INPUT_STEM}_bs${BATCH_SIZE}_epochs${MAX_TRAINING_EPOCHS}_seed${RANDOM_SEED}"
 
 cd "$PROJECT_DIR"
 
@@ -382,19 +317,18 @@ python -m IPV.create_dataset_and_train_model \
 Save as `run_prostate_transverse_windows.ps1`, edit the paths at the top, then run from PowerShell.
 
 ```powershell
-$PROJECT_DIR = "D:\Coding\Python\IPV"
-$RUN_DIR = "D:\IPV_RUNS\prostate_ipv"
-$SAVE_DIR = "D:\IPV_SAVED\prostate_ipv"
-$DATA_DIR = "D:\IPV_DATA"
+$PROJECT_DIR = "D:\LandmarkIdentificationFrameworks\IPV"
+$RUN_DIR = "D:\IPV_TRAINING"
+$SAVE_DIR = "D:\IPV_SAVING"
+
+$FOLD_LISTS_PATH = "D:\DATA\folds"
+$MARK_LIST_FILE = "D:\DATA\transverse_points_list.txt"
+$IMAGE_DATA_DIR = "D:\DATA\transverse"
 
 $FOLD = 1
 $TASK_NAME = "transverse"
 $PHASE = "both"
 $NUM_POINTS = 4
-
-$FOLD_LISTS_PATH = "$DATA_DIR\folds"
-$MARK_LIST_FILE = "$DATA_DIR\doctors_resampled_transverseMarkList.txt"
-$IMAGE_DATA_DIR = "$DATA_DIR\transverse"
 
 $CREATE_DATA = "true"
 $TRAIN_MODEL = "true"
@@ -419,7 +353,7 @@ $BRANCH_FEATURES = 128
 $FROZEN_STAGES = 0
 $SMALL_INPUT_STEM = "false"
 
-$RUN_NAME = "prostate_${TASK_NAME}_fold${FOLD}_points${NUM_POINTS}_${NETWORK_NAME}_bs${BATCH_SIZE}_epochs${MAX_TRAINING_EPOCHS}_seed${RANDOM_SEED}"
+$RUN_NAME = "prostate_${TASK_NAME}_fold${FOLD}_points${NUM_POINTS}_${NETWORK_NAME}_sis${SMALL_INPUT_STEM}_bs${BATCH_SIZE}_epochs${MAX_TRAINING_EPOCHS}_seed${RANDOM_SEED}"
 
 Set-Location $PROJECT_DIR
 

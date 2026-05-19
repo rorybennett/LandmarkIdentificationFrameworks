@@ -47,12 +47,9 @@ def update_resnet_for_small_inputs(network, pretrained_stem=False):
     return network
 
 
-def freeze_resnet_stages(network, frozen_stages):
-    """Freeze ResNet stages from the image input side towards the deeper blocks."""
-    if frozen_stages < 0 or frozen_stages > 5:
-        raise ValueError('frozen_stages must be between 0 and 5.')
-
-    stages = [
+def get_resnet_stage_modules(network):
+    """Return ResNet stages in input-to-output order."""
+    return [
         [network.conv1, network.bn1],
         [network.layer1],
         [network.layer2],
@@ -60,11 +57,32 @@ def freeze_resnet_stages(network, frozen_stages):
         [network.layer4]
     ]
 
-    for stage in stages[:frozen_stages]:
+
+def set_frozen_resnet_stages_eval(network):
+    """Keep frozen ResNet stages in eval mode so BatchNorm statistics do not update."""
+    frozen_stages = getattr(network, '_frozen_stages', 0)
+
+    if frozen_stages <= 0:
+        return
+
+    for stage in get_resnet_stage_modules(network)[:frozen_stages]:
         for module in stage:
             module.eval()
+
+
+def freeze_resnet_stages(network, frozen_stages):
+    """Freeze ResNet stages from the image input side towards the deeper blocks."""
+    if frozen_stages < 0 or frozen_stages > 5:
+        raise ValueError('frozen_stages must be between 0 and 5.')
+
+    network._frozen_stages = int(frozen_stages)
+
+    for stage in get_resnet_stage_modules(network)[:frozen_stages]:
+        for module in stage:
             for parameter in module.parameters():
                 parameter.requires_grad = False
+
+    set_frozen_resnet_stages_eval(network)
 
 
 def build_custom_resnet(layer_config, output_features, small_input_stem):
@@ -169,3 +187,17 @@ class Quadruplet(nn.Module):
         outputs = tuple(output_head(net_out) for output_head in self.output_heads)
 
         return outputs
+
+    def train(self, mode=True):
+        """Set training mode while keeping frozen ResNet stages fixed."""
+        super().train(mode)
+
+        if mode:
+            self.set_frozen_stages_eval()
+
+        return self
+
+    def set_frozen_stages_eval(self):
+        """Set frozen stages in each branch to eval mode."""
+        for branch in (self.net1, self.net2, self.net3, self.net4):
+            set_frozen_resnet_stages_eval(branch)

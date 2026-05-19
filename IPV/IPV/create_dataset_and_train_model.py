@@ -349,7 +349,8 @@ class CreateTrain:
 
     def build_data_save_path(self):
         """Build the folder containing generated train, validation, and test CSVs."""
-        return self.fold_training_data_dir / f'{self.data_config.num_of_folds}_FOLDS' / self.task_name / f'{self.data_config.sub_patch_scales}_{self.num_of_points}points_{self.data_config.patches_per_training_sample}pertrainingsample'
+        scale_label = format_scales(self.data_config.sub_patch_scales)
+        return self.fold_training_data_dir / f'{self.data_config.num_of_folds}_FOLDS' / self.task_name / f'patch{scale_label}_{self.num_of_points}points_{self.data_config.patches_per_training_sample}pertrainingsample'
 
     def print_inputs(self):
         """Print the resolved pipeline settings."""
@@ -362,7 +363,7 @@ class CreateTrain:
         print(f'\t\tTrain model: {self.run_config.train_model}', flush=True)
         print(f'\t\tCopy files: {self.run_config.copy_files}', flush=True)
         print(f'\t\tDelete files: {self.run_config.delete_files}', flush=True)
-        print(f'\t\tNumber of folds: {self.data_config.num_of_folds}', flush=True)
+        print(f'\t\tNumber of folds (total): {self.data_config.num_of_folds}', flush=True)
         print(f'\t\tSub-patch scales: {self.data_config.sub_patch_scales}', flush=True)
         print(f'\t\tPatches per training sample: {self.data_config.patches_per_training_sample}', flush=True)
         print(f'\t\tGrid data step: {self.data_config.test_data_step}', flush=True)
@@ -386,7 +387,7 @@ class CreateTrain:
         print(f'\t\tFold lists path: {self.data_config.fold_lists_path}', flush=True)
         print(f'\t\tMark list file: {self.data_config.mark_list_file}', flush=True)
         print(f'\t\tImage data dir: {self.data_config.image_data_dir}', flush=True)
-        print(f'\t\tData save path: {self.data_save_path}', flush=True)
+        print(f'\t\tTraining data save path: {self.data_save_path}', flush=True)
         self.print_section_end()
 
     @staticmethod
