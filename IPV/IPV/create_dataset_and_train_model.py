@@ -76,9 +76,19 @@ class CreateTrain:
         self.run_results_path = self.build_run_results_path()
 
     def create_data(self):
-        """Create fold data for the requested task."""
+        """Create fold data for the requested task, or reuse existing generated data."""
         self.print_section_start(f'Fold {self.fold} {self.task_name} data creation')
         start_time = dt.datetime.now()
+
+        if self.data_save_path.exists():
+            print(f"\t'{self.data_save_path.name}' exists, and it will be used instead of creating a new training set.", flush=True)
+            self.validate_training_data_point_count()
+            self.write_run_info(write_to_data_dir=True)
+            end_time = dt.datetime.now()
+            print(f'\tFold {self.fold} {self.task_name} existing data checked in {self.format_runtime(start_time, end_time)}.', flush=True)
+            print(f'\tRaw elapsed time: {end_time - start_time}', flush=True)
+            self.print_section_end()
+            return
 
         data_creator = DataCreator(
             distance_intervals=self.data_config.distance_intervals,
@@ -124,7 +134,7 @@ class CreateTrain:
         )
 
         trainer.train()
-        self.write_run_info()
+        self.write_run_info(write_to_data_dir=False)
 
         end_time = dt.datetime.now()
         print(f'\tFold {self.fold} {self.task_name} training complete in {self.format_runtime(start_time, end_time)}.', flush=True)
@@ -285,7 +295,7 @@ class CreateTrain:
                 self.data_config.image_data_dir
             ])
 
-    def write_run_info(self):
+    def write_run_info(self, write_to_data_dir=False):
         """Write full run, data, training, and model metadata."""
         run_info_path_name = f'run_info_{self.task_name}_f{self.fold}.json'
         save_copy_path = self.get_save_copy_path()
@@ -310,15 +320,21 @@ class CreateTrain:
             'quadruplet_config': asdict(self.quadruplet_config)
         }
 
-        for output_dir in (self.data_save_path, self.run_results_path):
+        output_dirs = [self.run_results_path]
+
+        if write_to_data_dir:
+            output_dirs.append(self.data_save_path)
+
+        for output_dir in output_dirs:
             output_dir.mkdir(exist_ok=True, parents=True)
+
             with open(output_dir / run_info_path_name, 'w', encoding='utf-8') as run_info_file:
                 json.dump(run_info, run_info_file, indent=4, default=str)
 
     def write_metadata(self):
         """Write compact CSV metadata and full JSON metadata."""
         self.write_data_info()
-        self.write_run_info()
+        self.write_run_info(write_to_data_dir=True)
 
     def get_save_copy_path(self):
         """Return the optional external save path for copied result files."""
