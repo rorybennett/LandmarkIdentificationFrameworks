@@ -321,6 +321,9 @@ class TrainModel:
                 window_predictions = 0
                 window_samples = 0
 
+            latest_val_loss, latest_val_accuracy = self.validate(model, val_loader, criterion)
+            model.train()
+
         average_epoch_loss = epoch_loss / max(len(train_loader.dataset), 1)
         average_epoch_accuracy = epoch_correct / max(epoch_predictions, 1)
 

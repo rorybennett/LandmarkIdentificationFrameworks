@@ -12,7 +12,7 @@ import numpy as np
 from scipy.spatial import distance as dist
 from skimage import io
 from skimage.transform import resize
-from skimage.util import img_as_ubyte
+from skimage.util import img_as_float32, img_as_ubyte
 
 from .gpu_utils import createPatch, getAngle, get_label
 
@@ -162,6 +162,19 @@ class PatchCreator:
         return patches
 
 
+def load_patch_source_image(image_path):
+    """Load a source image for grayscale training patch extraction.
+
+    The training pipeline intentionally uses grayscale patches. Colour images are
+    converted to grayscale, and all images are normalised to float32 in [0, 1]
+    before patch extraction so saved patch PNGs can be safely converted with
+    img_as_ubyte.
+    """
+    image = io.imread(image_path, as_gray=True)
+
+    return img_as_float32(image)
+
+
 def load_display_image(image_path):
     """Load an image suitable for drawing and saving."""
     image = io.imread(image_path)
@@ -267,7 +280,7 @@ def create_patch_job(job):
     """Create all patch images and CSV rows for one sample."""
     rng = np.random.default_rng(job.seed)
 
-    image = io.imread(job.image_path, as_gray=True)
+    image = load_patch_source_image(job.image_path)
     display_image = load_display_image(job.image_path)
     patch_creator = PatchCreator(image, sub_patch_scales=job.sub_patch_scales)
 
