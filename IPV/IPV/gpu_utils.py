@@ -62,31 +62,38 @@ def get_angle(point_1, point_2):
     return angle
 
 
-@njit(cache=True)
 def create_patch(image, x, y, patch_size):
     """Create a square patch centred on x, y with zero-padding outside the image."""
     x = int(x)
     y = int(y)
     half_patch = patch_size // 2
 
-    patch = np.zeros((patch_size, patch_size), dtype=image.dtype)
+    if image.ndim == 2:
+        patch = np.zeros((patch_size, patch_size), dtype=image.dtype)
+    elif image.ndim == 3:
+        patch = np.zeros((patch_size, patch_size, image.shape[2]), dtype=image.dtype)
+    else:
+        raise ValueError(f'Image must be 2D or 3D, got shape {image.shape}.')
 
     row_start = y - half_patch
+    row_end = row_start + patch_size
     col_start = x - half_patch
+    col_end = col_start + patch_size
 
-    for patch_row in range(patch_size):
-        image_row = row_start + patch_row
+    source_row_start = max(row_start, 0)
+    source_row_end = min(row_end, image.shape[0])
+    source_col_start = max(col_start, 0)
+    source_col_end = min(col_end, image.shape[1])
 
-        if image_row < 0 or image_row >= image.shape[0]:
-            continue
+    if source_row_start >= source_row_end or source_col_start >= source_col_end:
+        return patch
 
-        for patch_col in range(patch_size):
-            image_col = col_start + patch_col
+    patch_row_start = source_row_start - row_start
+    patch_col_start = source_col_start - col_start
+    patch_row_end = patch_row_start + (source_row_end - source_row_start)
+    patch_col_end = patch_col_start + (source_col_end - source_col_start)
 
-            if image_col < 0 or image_col >= image.shape[1]:
-                continue
-
-            patch[patch_row, patch_col] = image[image_row, image_col]
+    patch[patch_row_start:patch_row_end, patch_col_start:patch_col_end, ...] = image[source_row_start:source_row_end, source_col_start:source_col_end, ...]
 
     return patch
 

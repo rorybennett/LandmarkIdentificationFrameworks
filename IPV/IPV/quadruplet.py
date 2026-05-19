@@ -7,11 +7,12 @@ from torchvision.models.resnet import BasicBlock, ResNet
 class SmallCNN(nn.Module):
     """Small CNN branch placeholder for 64x64 patch inputs."""
 
-    def __init__(self, output_features):
+    def __init__(self, output_features, input_channels=3):
         super(SmallCNN, self).__init__()
+        validate_input_channels(input_channels)
 
         self.net = nn.Sequential(
-            nn.Conv2d(3, 32, kernel_size=3, padding=1),
+            nn.Conv2d(input_channels, 32, kernel_size=3, padding=1),
             nn.BatchNorm2d(32),
             nn.ReLU(inplace=True),
             nn.MaxPool2d(kernel_size=2),
@@ -31,17 +32,63 @@ class SmallCNN(nn.Module):
         return self.net(x)
 
 
-def update_resnet_for_small_inputs(network, pretrained_stem=False):
-    """Replace the standard ImageNet stem with a small-input stem."""
-    old_weight = network.conv1.weight.detach().clone()
-    network.conv1 = nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1, bias=False)
+def validate_input_channels(input_channels):
+    """Validate the number of image channels expected by a branch."""
+    if int(input_channels) < 1:
+        raise ValueError(f'input_channels must be at least 1. Got: {input_channels}')
+
+
+def adapt_conv_weight(old_weight, input_channels):
+    """Adapt pretrained first-layer weights to the requested input channel count."""
+    validate_input_channels(input_channels)
+
+    old_channels = old_weight.shape[1]
+
+    if input_channels == old_channels:
+        return old_weight.clone()
+
+    if input_channels == 1:
+        return old_weight.mean(dim=1, keepdim=True)
+
+    new_weight = old_weight.new_empty(old_weight.shape[0], input_channels, old_weight.shape[2], old_weight.shape[3])
+
+    channels_to_copy = min(old_channels, input_channels)
+    new_weight[:, :channels_to_copy] = old_weight[:, :channels_to_copy]
+
+    if input_channels > old_channels:
+        channel_mean = old_weight.mean(dim=1, keepdim=True)
+        new_weight[:, old_channels:] = channel_mean.repeat(1, input_channels - old_channels, 1, 1)
+
+    return new_weight
+
+
+def replace_first_conv(network, input_channels, kernel_size=None, stride=None, padding=None, pretrained_stem=False, old_weight=None):
+    """Replace a ResNet first convolution while preserving or initialising its weights."""
+    validate_input_channels(input_channels)
+
+    old_conv = network.conv1
+    kernel_size = kernel_size if kernel_size is not None else old_conv.kernel_size
+    stride = stride if stride is not None else old_conv.stride
+    padding = padding if padding is not None else old_conv.padding
+    old_weight = old_weight if old_weight is not None else old_conv.weight.detach().clone()
+
+    network.conv1 = nn.Conv2d(input_channels, old_conv.out_channels, kernel_size=kernel_size, stride=stride, padding=padding, bias=False)
 
     if pretrained_stem:
         with torch.no_grad():
-            network.conv1.weight.copy_(old_weight[:, :, 2:5, 2:5])
+            network.conv1.weight.copy_(adapt_conv_weight(old_weight, input_channels))
     else:
         nn.init.kaiming_normal_(network.conv1.weight, mode='fan_out', nonlinearity='relu')
 
+    return network
+
+
+def update_resnet_for_small_inputs(network, input_channels=3, pretrained_stem=False):
+    """Replace the standard ImageNet stem with a small-input stem."""
+    old_weight = network.conv1.weight.detach().clone()
+    small_stem_weight = old_weight[:, :, 2:5, 2:5]
+    network = replace_first_conv(network=network, input_channels=input_channels, kernel_size=3, stride=1, padding=1,
+                                 pretrained_stem=pretrained_stem, old_weight=small_stem_weight)
     network.maxpool = nn.Identity()
 
     return network
@@ -85,24 +132,29 @@ def freeze_resnet_stages(network, frozen_stages):
     set_frozen_resnet_stages_eval(network)
 
 
-def build_custom_resnet(layer_config, output_features, small_input_stem):
+def build_custom_resnet(layer_config, output_features, small_input_stem, input_channels):
     """Build an untrained BasicBlock ResNet branch."""
     network = ResNet(block=BasicBlock, layers=layer_config, num_classes=output_features)
 
     if small_input_stem:
-        network = update_resnet_for_small_inputs(network, pretrained_stem=False)
+        network = update_resnet_for_small_inputs(network, input_channels=input_channels, pretrained_stem=False)
+    else:
+        network = replace_first_conv(network, input_channels=input_channels, pretrained_stem=False)
 
     return network
 
 
-def build_branch(network_name, output_features=128, frozen_stages=0, small_input_stem=True):
+def build_branch(network_name, output_features=128, frozen_stages=0, small_input_stem=True, input_channels=3):
     """Build one quadruplet branch and return a feature vector."""
     network_name = network_name.lower()
+    validate_input_channels(input_channels)
 
     if network_name == 'resnet18_pretrained':
         network = resnet18(weights=ResNet18_Weights.DEFAULT)
         if small_input_stem:
-            network = update_resnet_for_small_inputs(network, pretrained_stem=True)
+            network = update_resnet_for_small_inputs(network, input_channels=input_channels, pretrained_stem=True)
+        else:
+            network = replace_first_conv(network, input_channels=input_channels, pretrained_stem=True)
         network.fc = nn.Linear(network.fc.in_features, output_features)
         freeze_resnet_stages(network, frozen_stages=frozen_stages)
         return network
@@ -112,14 +164,18 @@ def build_branch(network_name, output_features=128, frozen_stages=0, small_input
             raise ValueError('Do not freeze stages in an untrained ResNet unless you intentionally want fixed random filters.')
         network = resnet18(weights=None)
         if small_input_stem:
-            network = update_resnet_for_small_inputs(network, pretrained_stem=False)
+            network = update_resnet_for_small_inputs(network, input_channels=input_channels, pretrained_stem=False)
+        else:
+            network = replace_first_conv(network, input_channels=input_channels, pretrained_stem=False)
         network.fc = nn.Linear(network.fc.in_features, output_features)
         return network
 
     if network_name == 'resnet34_pretrained':
         network = resnet34(weights=ResNet34_Weights.DEFAULT)
         if small_input_stem:
-            network = update_resnet_for_small_inputs(network, pretrained_stem=True)
+            network = update_resnet_for_small_inputs(network, input_channels=input_channels, pretrained_stem=True)
+        else:
+            network = replace_first_conv(network, input_channels=input_channels, pretrained_stem=True)
         network.fc = nn.Linear(network.fc.in_features, output_features)
         freeze_resnet_stages(network, frozen_stages=frozen_stages)
         return network
@@ -129,40 +185,44 @@ def build_branch(network_name, output_features=128, frozen_stages=0, small_input
             raise ValueError('Do not freeze stages in an untrained ResNet unless you intentionally want fixed random filters.')
         network = resnet34(weights=None)
         if small_input_stem:
-            network = update_resnet_for_small_inputs(network, pretrained_stem=False)
+            network = update_resnet_for_small_inputs(network, input_channels=input_channels, pretrained_stem=False)
+        else:
+            network = replace_first_conv(network, input_channels=input_channels, pretrained_stem=False)
         network.fc = nn.Linear(network.fc.in_features, output_features)
         return network
 
     if network_name == 'resnet10_untrained':
         if frozen_stages != 0:
             raise ValueError('Do not freeze stages in an untrained ResNet unless you intentionally want fixed random filters.')
-        return build_custom_resnet(layer_config=[1, 1, 1, 1], output_features=output_features, small_input_stem=small_input_stem)
+        return build_custom_resnet(layer_config=[1, 1, 1, 1], output_features=output_features, small_input_stem=small_input_stem, input_channels=input_channels)
 
     if network_name == 'resnet14_untrained':
         if frozen_stages != 0:
             raise ValueError('Do not freeze stages in an untrained ResNet unless you intentionally want fixed random filters.')
-        return build_custom_resnet(layer_config=[1, 1, 2, 2], output_features=output_features, small_input_stem=small_input_stem)
+        return build_custom_resnet(layer_config=[1, 1, 2, 2], output_features=output_features, small_input_stem=small_input_stem, input_channels=input_channels)
 
     if network_name == 'small_cnn':
         if frozen_stages != 0:
             raise ValueError('frozen_stages is only valid for pretrained ResNet branches.')
-        return SmallCNN(output_features=output_features)
+        return SmallCNN(output_features=output_features, input_channels=input_channels)
 
     raise ValueError(f'Unknown network_name: {network_name}')
 
 
 class Quadruplet(nn.Module):
 
-    def __init__(self, num_of_pts, tasks_classes, network_name='resnet18_pretrained', branch_features=128, frozen_stages=0, small_input_stem=True):
+    def __init__(self, num_of_pts, tasks_classes, network_name='resnet18_pretrained', branch_features=128, frozen_stages=0, small_input_stem=True, input_channels=3):
         super(Quadruplet, self).__init__()
+        validate_input_channels(input_channels)
 
         if num_of_pts < 1 or num_of_pts > 30:
             raise ValueError('num_of_pts must be between 1 and 30.')
 
-        self.net1 = build_branch(network_name=network_name, output_features=branch_features, frozen_stages=frozen_stages, small_input_stem=small_input_stem)
-        self.net2 = build_branch(network_name=network_name, output_features=branch_features, frozen_stages=frozen_stages, small_input_stem=small_input_stem)
-        self.net3 = build_branch(network_name=network_name, output_features=branch_features, frozen_stages=frozen_stages, small_input_stem=small_input_stem)
-        self.net4 = build_branch(network_name=network_name, output_features=branch_features, frozen_stages=frozen_stages, small_input_stem=small_input_stem)
+        self.input_channels = int(input_channels)
+        self.net1 = build_branch(network_name=network_name, output_features=branch_features, frozen_stages=frozen_stages, small_input_stem=small_input_stem, input_channels=self.input_channels)
+        self.net2 = build_branch(network_name=network_name, output_features=branch_features, frozen_stages=frozen_stages, small_input_stem=small_input_stem, input_channels=self.input_channels)
+        self.net3 = build_branch(network_name=network_name, output_features=branch_features, frozen_stages=frozen_stages, small_input_stem=small_input_stem, input_channels=self.input_channels)
+        self.net4 = build_branch(network_name=network_name, output_features=branch_features, frozen_stages=frozen_stages, small_input_stem=small_input_stem, input_channels=self.input_channels)
 
         self.num_of_pts = num_of_pts
         self.num_of_tasks = len(tasks_classes)
@@ -177,6 +237,9 @@ class Quadruplet(nn.Module):
 
         if x.shape[1] != 4:
             raise ValueError(f'Quadruplet expects exactly 4 sub-patches per sample, got {x.shape[1]}.')
+
+        if x.shape[2] != self.input_channels:
+            raise ValueError(f'Quadruplet was built for {self.input_channels} input channels, got {x.shape[2]}.')
 
         net1_out = self.net1(x[:, 0])
         net2_out = self.net2(x[:, 1])

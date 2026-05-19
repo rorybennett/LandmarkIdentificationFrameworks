@@ -784,7 +784,7 @@ def build_configs(args):
 
     validate_args(args, num_of_folds)
     loss_print_interval = max(1, args.loss_print_samples // args.batch_size)
-    run_name = build_run_name(args, num_of_folds)
+    run_name = clean_run_name(args.run_name) if args.run_name is not None else build_run_name(args, num_of_folds)
 
     if not run_name:
         raise ValueError('--run-name cannot be empty after cleaning.')

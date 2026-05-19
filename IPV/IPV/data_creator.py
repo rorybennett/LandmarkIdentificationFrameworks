@@ -156,23 +156,36 @@ class PatchCreator:
 
         for scale in self.sub_patch_scales:
             patch = createPatch(self.image, x, y, scale)
-            patch = resize(patch, (self.patch_size, self.patch_size), preserve_range=True)
+            patch = resize_patch(patch, output_size=self.patch_size)
             patches.append(patch)
 
         return patches
 
 
+def resize_patch(patch, output_size):
+    """Resize a patch while preserving its original channel count."""
+    if patch.ndim == 2:
+        output_shape = (output_size, output_size)
+    elif patch.ndim == 3:
+        output_shape = (output_size, output_size, patch.shape[2])
+    else:
+        raise ValueError(f'Patch must be 2D or 3D, got shape {patch.shape}.')
+
+    return resize(patch, output_shape, preserve_range=True, anti_aliasing=True)
+
+
 def load_patch_source_image(image_path):
-    """Load a source image for grayscale training patch extraction.
+    """Load a source image for patch extraction without changing its channel count."""
+    image = io.imread(image_path)
+    image = img_as_float32(image)
 
-    The training pipeline intentionally uses grayscale patches. Colour images are
-    converted to grayscale, and all images are normalised to float32 in [0, 1]
-    before patch extraction so saved patch PNGs can be safely converted with
-    img_as_ubyte.
-    """
-    image = io.imread(image_path, as_gray=True)
+    if image.ndim == 2:
+        return image
 
-    return img_as_float32(image)
+    if image.ndim == 3 and image.shape[2] in (1, 3, 4):
+        return image
+
+    raise ValueError(f'Image {image_path} has unsupported shape {image.shape}. Expected greyscale, RGB, or RGBA.')
 
 
 def load_display_image(image_path):
@@ -189,6 +202,17 @@ def load_display_image(image_path):
         image = img_as_ubyte(image)
 
     return np.ascontiguousarray(image)
+
+
+def prepare_patch_for_saving(patch):
+    """Convert a generated patch into a PNG-compatible array."""
+    if patch.ndim == 3 and patch.shape[2] == 1:
+        patch = patch[:, :, 0]
+
+    if patch.ndim == 3 and patch.shape[2] not in (3, 4):
+        raise ValueError(f'Cannot save patch with shape {patch.shape} as PNG. Use greyscale, RGB, or RGBA images.')
+
+    return img_as_ubyte(patch)
 
 
 def create_labels_for_point(points, x, y, distance_intervals, angle_intervals, sample_name=None):
@@ -303,7 +327,7 @@ def create_patch_job(job):
 
             for patch_index, patch in enumerate(patches, start=1):
                 patch_path = job.patch_save_path / f'{patch_id}_{patch_index}.png'
-                patch_image = img_as_ubyte(patch)
+                patch_image = prepare_patch_for_saving(patch)
 
                 io.imsave(patch_path, patch_image, check_contrast=False)
                 csv_writer.writerow([patch_id, patch_path.as_posix(), job.sample_name, x, y, *labels])

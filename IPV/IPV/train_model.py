@@ -25,6 +25,7 @@ class QuadrupletConfig:
     frozen_stages: int = 0
     small_input_stem: bool = True
     num_sub_patches: int = 4
+    input_channels: int | None = None
 
 
 @dataclass
@@ -58,13 +59,15 @@ class TrainModel:
         self.tasks_per_point = len(self.tasks_classes)
         self.expected_label_count = self.num_of_pts * self.tasks_per_point
         self.num_of_classes = [len(task_classes) for _ in range(self.num_of_pts) for task_classes in self.tasks_classes]
+        self.input_channels = None
 
     def train(self):
         """Run training for one fold."""
         self.validate_training_inputs()
         self.output_path.mkdir(exist_ok=True, parents=True)
         train_loader, val_loader = self.build_data_loaders()
-        model = self.build_model()
+        self.input_channels = self.resolve_input_channels(train_loader.dataset, val_loader.dataset)
+        model = self.build_model(input_channels=self.input_channels)
         criterion = nn.CrossEntropyLoss()
         optimiser = SGD(model.parameters(), lr=self.train_config.learning_rate, momentum=self.train_config.momentum)
         scheduler = StepLR(optimiser, step_size=self.train_config.lr_step_size, gamma=self.train_config.lr_gamma) if self.train_config.lr_schedule else None
@@ -244,7 +247,24 @@ class TrainModel:
 
         return train_loader, val_loader
 
-    def build_model(self):
+    def resolve_input_channels(self, train_dataset, val_dataset):
+        """Resolve the input channel count used by the model."""
+        train_channels = int(train_dataset.input_channels)
+        val_channels = int(val_dataset.input_channels)
+
+        if train_channels != val_channels:
+            raise ValueError(f'Train patches have {train_channels} channels, but validation patches have {val_channels} channels.')
+
+        configured_channels = self.quadruplet_config.input_channels
+
+        if configured_channels is not None and int(configured_channels) != train_channels:
+            raise ValueError(f'QuadrupletConfig requested {configured_channels} input channels, but generated patches contain {train_channels}.')
+
+        print(f'	Detected {train_channels} input channel(s) per patch.', flush=True)
+
+        return train_channels
+
+    def build_model(self, input_channels):
         """Create the Quadruplet model."""
         from .quadruplet import Quadruplet
 
@@ -254,7 +274,8 @@ class TrainModel:
             network_name=self.quadruplet_config.network_name,
             branch_features=self.quadruplet_config.branch_features,
             frozen_stages=self.quadruplet_config.frozen_stages,
-            small_input_stem=self.quadruplet_config.small_input_stem
+            small_input_stem=self.quadruplet_config.small_input_stem,
+            input_channels=input_channels
         )
 
         return model.to(self.device)
@@ -321,7 +342,6 @@ class TrainModel:
                 window_predictions = 0
                 window_samples = 0
 
-            latest_val_loss, latest_val_accuracy = self.validate(model, val_loader, criterion)
             model.train()
 
         average_epoch_loss = epoch_loss / max(len(train_loader.dataset), 1)
@@ -442,6 +462,7 @@ class TrainModel:
             'num_of_points': self.num_of_pts,
             'tasks_per_point': self.tasks_per_point,
             'expected_label_count': self.expected_label_count,
+            'input_channels': self.input_channels,
             'best_epoch': best_epoch,
             'last_epoch': last_epoch,
             'best_val_loss': best_val_loss,
@@ -463,7 +484,10 @@ class TrainModel:
         lr_label = self.format_number(self.train_config.learning_rate)
         stem_label = int(self.quadruplet_config.small_input_stem)
 
-        return f'points{self.num_of_pts}_{self.quadruplet_config.network_name}_bf{self.quadruplet_config.branch_features}_fs{self.quadruplet_config.frozen_stages}_stem{stem_label}_bs{self.train_config.batch_size}_lr{lr_label}_ep{self.train_config.max_training_epochs}'
+        channel_label = self.input_channels if self.input_channels is not None else self.quadruplet_config.input_channels
+        channel_part = f'_ch{channel_label}' if channel_label is not None else ''
+
+        return f'points{self.num_of_pts}_{self.quadruplet_config.network_name}_bf{self.quadruplet_config.branch_features}_fs{self.quadruplet_config.frozen_stages}_stem{stem_label}{channel_part}_bs{self.train_config.batch_size}_lr{lr_label}_ep{self.train_config.max_training_epochs}'
 
     def get_train_csv_path(self):
         """Return the generated training CSV path."""

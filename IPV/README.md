@@ -89,25 +89,22 @@ python -m IPV.create_dataset_and_train_model --help
 
 ## Image handling
 
-Training patches are intentionally grayscale.
-
-Colour source images are accepted, but the patch-creation stage converts each
-source image to grayscale before creating training and validation patches. Saved
-patch PNGs are grayscale. During dataset loading, each grayscale patch is loaded
-and repeated across three channels so ResNet/torchvision-style models still
-receive tensors shaped like 3-channel images.
-
-In other words, the model receives:
+Training patches preserve the source image channel count. Greyscale images create
+one-channel patches, RGB images create three-channel patches, and RGBA images
+create four-channel patches. During dataset loading, patches are converted to
+channel-first tensors shaped like:
 
 ```text
-R = grayscale
-G = grayscale
-B = grayscale
+[num_sub_patches, channels, height, width]
 ```
 
-It does not receive true RGB colour information. This is appropriate for the
-original ultrasound use case. For colour-dependent tasks, update both patch
-creation and dataset loading before training.
+The model detects the channel count from the generated training and validation
+patches before construction. ResNet and small-CNN backbones are built with a
+matching first convolution. For pretrained ResNet backbones, the first-layer
+weights are adapted when the patch channel count is not three channels.
+
+All images within one generated training run should have the same channel count.
+Saved PNG patches support greyscale, RGB, and RGBA data.
 
 The saved overlay/debug images are separate from the training patches. They are
 loaded from the original source image for visualisation and may preserve colour
@@ -228,10 +225,8 @@ fold count, patch scales, sampling variances, point count, patch count, grid
 spacing, network, branch features, frozen stages, stem setting, batch size,
 learning rate, epoch count, and random seed.
 
-The CLI currently accepts `--run-name`, but `build_configs()` generates the run
-name from the configuration and does not use the provided `--run-name` value. If
-you want manual run names, update `build_configs()` before relying on that
-argument.
+By default, `RUN_NAME` is generated from the configuration. Supplying
+`--run-name` overrides the generated name after path-safe cleaning.
 
 Use `--save-dir` only when you want a copy of selected result files outside the
 run directory. When `COPY_FILES=true`, `--save-dir` is required. When
