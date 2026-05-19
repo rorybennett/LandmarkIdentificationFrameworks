@@ -33,7 +33,7 @@ class PatchJob:
     image_path: Path
     points: list
     phase: str
-    step: int
+    grid_spacing: int
     sub_patch_scales: list
     distance_intervals: list
     angle_intervals: list
@@ -450,15 +450,15 @@ class DataCreator:
         if sorted(subpatch_scales) != list(subpatch_scales):
             raise ValueError(f'subpatch_scales should be in ascending order because the first value is the output patch size. Got: {subpatch_scales}')
 
-    def create(self, step, current_fold):
+    def create(self, grid_spacing, current_fold):
         """Create training and validation data for the requested fold."""
         self.current_fold = current_fold
 
         if not self.fold_list:
             self.read_fold_lists()
 
-        self.create_data(step=step, phase='Train')
-        self.create_data(step=step, phase='Val')
+        self.create_data(grid_spacing=grid_spacing, phase='Train')
+        self.create_data(grid_spacing=grid_spacing, phase='Val')
 
     def read_fold_lists(self):
         """Read train and validation sample names for all folds."""
@@ -505,7 +505,7 @@ class DataCreator:
         if len(points) > MAX_POINTS_PER_IMAGE:
             raise ValueError(f'{sample_name} has {len(points)} points; the maximum supported number is {MAX_POINTS_PER_IMAGE}.')
 
-    def create_data(self, step, phase):
+    def create_data(self, grid_spacing, phase):
         """Create and save patches and labels for one phase."""
         self.read_points(phase)
 
@@ -522,7 +522,7 @@ class DataCreator:
 
         part_csv_dir.mkdir(exist_ok=True, parents=True)
 
-        jobs = self.create_patch_jobs(phase=phase, step=step, patch_save_path=patch_save_path, image_save_path=image_save_path, part_csv_dir=part_csv_dir)
+        jobs = self.create_patch_jobs(phase=phase, grid_spacing=grid_spacing, patch_save_path=patch_save_path, image_save_path=image_save_path, part_csv_dir=part_csv_dir)
         progress_label = f'{phase} phase patch creation'
 
         if self.num_workers <= 1:
@@ -578,7 +578,7 @@ class DataCreator:
 
         print(f'\tValidated {csv_path.name}: {len(group_counts)} patch groups.', flush=True)
 
-    def create_patch_jobs(self, phase, step, patch_save_path, image_save_path, part_csv_dir):
+    def create_patch_jobs(self, phase, grid_spacing, patch_save_path, image_save_path, part_csv_dir):
         """Create one worker job per sample in natural alphabetical order."""
         jobs = []
         sample_names = sorted(self.points_dict.keys(), key=natural_key)
@@ -592,7 +592,7 @@ class DataCreator:
                 image_path=self.paths_dict[sample_name],
                 points=self.points_dict[sample_name],
                 phase=phase,
-                step=step,
+                grid_spacing=grid_spacing,
                 sub_patch_scales=self.sub_patch_scales,
                 distance_intervals=self.distance_intervals,
                 angle_intervals=self.angle_intervals,

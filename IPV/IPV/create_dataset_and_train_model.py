@@ -29,7 +29,7 @@ class DataCreationConfig:
     num_of_folds: int
     sub_patch_scales: list
     patches_per_training_sample: int
-    test_data_step: int
+    grid_spacing: int
     fold_lists_path: Path
     mark_list_file: Path
     image_data_dir: Path
@@ -97,7 +97,7 @@ class CreateTrain:
             keep_part_csvs=self.data_config.keep_part_csvs
         )
 
-        data_creator.create(step=self.data_config.test_data_step, current_fold=self.fold)
+        data_creator.create(grid_spacing=self.data_config.grid_spacing, current_fold=self.fold)
         self.write_metadata()
 
         end_time = dt.datetime.now()
@@ -277,7 +277,7 @@ class CreateTrain:
                 self.data_config.sub_patch_scales,
                 self.data_config.sub_patch_scales[0],
                 self.data_config.patches_per_training_sample,
-                self.data_config.test_data_step,
+                self.data_config.grid_spacing,
                 self.data_config.sampling_variances,
                 self.data_config.num_workers,
                 self.data_config.random_seed,
@@ -360,7 +360,7 @@ class CreateTrain:
         print(f'\t\tNumber of folds: {self.data_config.num_of_folds}', flush=True)
         print(f'\t\tSub-patch scales: {self.data_config.sub_patch_scales}', flush=True)
         print(f'\t\tPatches per training sample: {self.data_config.patches_per_training_sample}', flush=True)
-        print(f'\t\tGrid data step: {self.data_config.test_data_step}', flush=True)
+        print(f'\t\tGrid data step: {self.data_config.grid_spacing}', flush=True)
         print(f'\t\tSampling variances: {self.data_config.sampling_variances}', flush=True)
         print(f'\t\tData workers: {self.data_config.num_workers}', flush=True)
         print(f'\t\tTraining workers: {self.train_config.num_workers}', flush=True)
@@ -373,8 +373,8 @@ class CreateTrain:
         print(f'\t\tSmall input stem: {self.quadruplet_config.small_input_stem}', flush=True)
         print(f'\t\tRun dir: {self.run_config.run_dir}', flush=True)
         print(f'\t\tSave dir: {self.run_config.save_dir}', flush=True)
-        print(f'\t\tRun training root: {self.run_training_root}', flush=True)
-        print(f'\t\tRun results root: {self.run_results_root}', flush=True)
+        print(f'\t\tTraining root dir: {self.run_training_root}', flush=True)
+        print(f'\t\tTraining results dir: {self.run_results_root}', flush=True)
         print(f'\t\tRun name: {self.run_config.run_name}', flush=True)
         print(f'\t\tRun results path: {self.run_results_path}', flush=True)
         print(f'\t\tSave copy path: {self.get_save_copy_path()}', flush=True)
@@ -460,7 +460,7 @@ def parse_args():
     parser.add_argument('--lr-schedule', type=str_to_bool, required=True)
     parser.add_argument('--loss-print-samples', type=int, required=True)
     parser.add_argument('--patches-per-training-sample', type=int, required=True)
-    parser.add_argument('--test-data-step', type=int, required=True)
+    parser.add_argument('--grid-spacing', type=int, required=True)
     parser.add_argument('--run-name', type=str, default=None)
 
     parser.add_argument('--network-name', type=str, choices=get_available_model_names(), required=True)
@@ -488,8 +488,8 @@ def validate_args(args, num_of_folds):
     if args.patches_per_training_sample < 1:
         raise ValueError('--patches-per-training-sample must be at least 1.')
 
-    if args.test_data_step < 1:
-        raise ValueError('--test-data-step must be at least 1.')
+    if args.grid_spacing < 1:
+        raise ValueError('--grid-spacing must be at least 1.')
 
     if num_of_folds < 2:
         raise ValueError(f'At least 2 fold files are required. Found {num_of_folds}.')
@@ -584,7 +584,8 @@ def validate_intervals(name, intervals, expected_start=None, expected_end=None):
             raise ValueError(f'{name}[{index}] has lower_bound >= upper_bound. Got: {interval}')
 
         if previous_upper is not None and lower_bound != previous_upper:
-            raise ValueError(f'{name} intervals must be contiguous with no gaps or overlaps. Previous upper bound was {previous_upper}, but interval {index} starts at {lower_bound}.')
+            raise ValueError(
+                f'{name} intervals must be contiguous with no gaps or overlaps. Previous upper bound was {previous_upper}, but interval {index} starts at {lower_bound}.')
 
         previous_upper = upper_bound
 
@@ -631,7 +632,7 @@ def build_run_name(args, num_of_folds):
         f'sv{format_scales(pms.sampling_variances)}',
         f'points{args.num_points}',
         f'ppts{args.patches_per_training_sample}',
-        f'step{args.test_data_step}',
+        f'step{args.grid_spacing}',
         args.network_name,
         f'bf{args.branch_features}',
         f'fs{args.frozen_stages}',
@@ -667,7 +668,7 @@ def build_configs(args):
 
     validate_args(args, num_of_folds)
     loss_print_interval = max(1, args.loss_print_samples // args.batch_size)
-    run_name = clean_run_name(args.run_name) if args.run_name else build_run_name(args, num_of_folds)
+    run_name = build_run_name(args, num_of_folds)
 
     if not run_name:
         raise ValueError('--run-name cannot be empty after cleaning.')
@@ -691,7 +692,7 @@ def build_configs(args):
         num_of_folds=num_of_folds,
         sub_patch_scales=pms.sub_patch_scales,
         patches_per_training_sample=args.patches_per_training_sample,
-        test_data_step=args.test_data_step,
+        grid_spacing=args.grid_spacing,
         fold_lists_path=args.fold_lists_path,
         mark_list_file=args.mark_list_file,
         image_data_dir=args.image_data_dir,

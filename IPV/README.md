@@ -249,7 +249,7 @@ PROJECT_DIR="$HOME/LandmarkIdentificationFrameworks/IPV"
 RUN_DIR="$HOME/IPV_TRAINING"
 SAVE_DIR="$HOME/IPV_SAVING"
 
-FOLD_LISTS_PATH="$HOME/DATA/folds"
+FOLD_LISTS_DIR="$HOME/DATA/folds"
 MARK_LIST_FILE="$HOME/DATA/transverse_points_list.txt"
 IMAGE_DATA_DIR="$HOME/DATA/transverse"
 
@@ -280,8 +280,6 @@ BRANCH_FEATURES=128
 FROZEN_STAGES=0
 SMALL_INPUT_STEM="false"
 
-RUN_NAME="prostate_${TASK_NAME}_fold${FOLD}_points${NUM_POINTS}_${NETWORK_NAME}_sis${SMALL_INPUT_STEM}_bs${BATCH_SIZE}_epochs${MAX_TRAINING_EPOCHS}_seed${RANDOM_SEED}"
-
 cd "$PROJECT_DIR"
 
 python -m IPV.create_dataset_and_train_model \
@@ -289,7 +287,7 @@ python -m IPV.create_dataset_and_train_model \
     --run-dir "$RUN_DIR" \
     --save-dir "$SAVE_DIR" \
     --num-points "$NUM_POINTS" \
-    --fold-lists-path "$FOLD_LISTS_PATH" \
+    --fold-lists-path "FOLD_LISTS_DIR" \
     --mark-list-file "$MARK_LIST_FILE" \
     --image-data-dir "$IMAGE_DATA_DIR" \
     --data-creation-workers "$DATA_CREATION_WORKERS" \
@@ -303,7 +301,6 @@ python -m IPV.create_dataset_and_train_model \
     --loss-print-samples "$LOSS_PRINT_SAMPLES" \
     --patches-per-training-sample "$PATCHES_PER_TRAINING_SAMPLE" \
     --test-data-step "$TEST_DATA_STEP" \
-    --run-name "$RUN_NAME" \
     --network-name "$NETWORK_NAME" \
     --branch-features "$BRANCH_FEATURES" \
     --frozen-stages "$FROZEN_STAGES" \
@@ -319,7 +316,7 @@ $PROJECT_DIR = "D:\LandmarkIdentificationFrameworks\IPV"
 $RUN_DIR = "D:\IPV_TRAINING"
 $SAVE_DIR = "D:\IPV_SAVING"
 
-$FOLD_LISTS_PATH = "D:\DATA\folds"
+$FOLD_LISTS_DIR = "D:\DATA\folds"
 $MARK_LIST_FILE = "D:\DATA\transverse_points_list.txt"
 $IMAGE_DATA_DIR = "D:\DATA\transverse"
 
@@ -350,15 +347,13 @@ $BRANCH_FEATURES = 128
 $FROZEN_STAGES = 0
 $SMALL_INPUT_STEM = "false"
 
-$RUN_NAME = "prostate_${TASK_NAME}_fold${FOLD}_points${NUM_POINTS}_${NETWORK_NAME}_sis${SMALL_INPUT_STEM}_bs${BATCH_SIZE}_epochs${MAX_TRAINING_EPOCHS}_seed${RANDOM_SEED}"
-
 Set-Location $PROJECT_DIR
 
 ipv-train $FOLD $TASK_NAME $CREATE_DATA $TRAIN_MODEL $COPY_FILES $DELETE_FILES `
     --run-dir $RUN_DIR `
     --save-dir $SAVE_DIR `
     --num-points $NUM_POINTS `
-    --fold-lists-path $FOLD_LISTS_PATH `
+    --fold-lists-path $FOLD_LISTS_DIR `
     --mark-list-file $MARK_LIST_FILE `
     --image-data-dir $IMAGE_DATA_DIR `
     --data-creation-workers $DATA_CREATION_WORKERS `
@@ -372,7 +367,6 @@ ipv-train $FOLD $TASK_NAME $CREATE_DATA $TRAIN_MODEL $COPY_FILES $DELETE_FILES `
     --loss-print-samples $LOSS_PRINT_SAMPLES `
     --patches-per-training-sample $PATCHES_PER_TRAINING_SAMPLE `
     --test-data-step $TEST_DATA_STEP `
-    --run-name $RUN_NAME `
     --network-name $NETWORK_NAME `
     --branch-features $BRANCH_FEATURES `
     --frozen-stages $FROZEN_STAGES `
