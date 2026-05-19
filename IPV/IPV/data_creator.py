@@ -450,19 +450,15 @@ class DataCreator:
         if sorted(subpatch_scales) != list(subpatch_scales):
             raise ValueError(f'subpatch_scales should be in ascending order because the first value is the output patch size. Got: {subpatch_scales}')
 
-    def create(self, step, phase, current_fold):
-        """Create data for the requested phase."""
+    def create(self, step, current_fold):
+        """Create training and validation data for the requested fold."""
         self.current_fold = current_fold
 
         if not self.fold_list:
             self.read_fold_lists()
 
-        if phase == 'both':
-            self.create_data(step=step, phase='Train')
-            self.create_data(step=step, phase='Val')
-            return
-
-        self.create_data(step=step, phase=phase)
+        self.create_data(step=step, phase='Train')
+        self.create_data(step=step, phase='Val')
 
     def read_fold_lists(self):
         """Read train and validation sample names for all folds."""

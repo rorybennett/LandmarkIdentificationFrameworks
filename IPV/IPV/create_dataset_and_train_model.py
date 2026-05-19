@@ -30,7 +30,6 @@ class DataCreationConfig:
     sub_patch_scales: list
     patches_per_training_sample: int
     test_data_step: int
-    phase: str
     fold_lists_path: Path
     mark_list_file: Path
     image_data_dir: Path
@@ -50,7 +49,6 @@ class RunConfig:
     fold: int
     task_name: str
     num_of_points: int
-    phase: str
     create_data: bool
     train_model: bool
     copy_files: bool
@@ -99,7 +97,7 @@ class CreateTrain:
             keep_part_csvs=self.data_config.keep_part_csvs
         )
 
-        data_creator.create(step=self.data_config.test_data_step, phase=self.data_config.phase, current_fold=self.fold)
+        data_creator.create(step=self.data_config.test_data_step, current_fold=self.fold)
         self.write_metadata()
 
         end_time = dt.datetime.now()
@@ -152,7 +150,7 @@ class CreateTrain:
 
     def validate_run_metadata_point_count(self):
         """Check data creation metadata when it is available."""
-        metadata_path = self.data_save_path / f'run_info_{self.task_name}_{self.data_config.phase}_f{self.fold}.json'
+        metadata_path = self.data_save_path / f'run_info_{self.task_name}_f{self.fold}.json'
 
         if not metadata_path.is_file():
             return
@@ -250,7 +248,7 @@ class CreateTrain:
     def write_data_info(self):
         """Write fold data creation metadata."""
         self.data_save_path.mkdir(exist_ok=True, parents=True)
-        info_path = self.data_save_path / f'data_info_{self.data_config.phase}_f{self.fold}.csv'
+        info_path = self.data_save_path / f'data_info_f{self.fold}.csv'
 
         with open(info_path, 'w', newline='', encoding='utf-8') as info_csv:
             writer = csv.writer(info_csv)
@@ -264,7 +262,6 @@ class CreateTrain:
                 'PATCH_SIZE',
                 'PATCHES_PER_TRAINING_SAMPLE',
                 'GRID_DATA_STEP',
-                'PHASE',
                 'SAMPLING_VARIANCES',
                 'NUM_WORKERS',
                 'RANDOM_SEED',
@@ -281,7 +278,6 @@ class CreateTrain:
                 self.data_config.sub_patch_scales[0],
                 self.data_config.patches_per_training_sample,
                 self.data_config.test_data_step,
-                self.data_config.phase,
                 self.data_config.sampling_variances,
                 self.data_config.num_workers,
                 self.data_config.random_seed,
@@ -291,7 +287,7 @@ class CreateTrain:
 
     def write_run_info(self):
         """Write full run, data, training, and model metadata."""
-        run_info_path_name = f'run_info_{self.task_name}_{self.data_config.phase}_f{self.fold}.json'
+        run_info_path_name = f'run_info_{self.task_name}_f{self.fold}.json'
         save_copy_path = self.get_save_copy_path()
 
         run_info = {
@@ -349,8 +345,7 @@ class CreateTrain:
 
     def build_data_save_path(self):
         """Build the folder containing generated train, validation, and test CSVs."""
-        scale_label = format_scales(self.data_config.sub_patch_scales)
-        return self.fold_training_data_dir / f'{self.data_config.num_of_folds}_FOLDS' / self.task_name / f'patch{scale_label}_{self.num_of_points}points_{self.data_config.patches_per_training_sample}pertrainingsample'
+        return self.fold_training_data_dir / f'{self.data_config.num_of_folds}_FOLDS' / self.task_name / f'{self.data_config.sub_patch_scales}_{self.num_of_points}points_{self.data_config.patches_per_training_sample}pertrainingsample'
 
     def print_inputs(self):
         """Print the resolved pipeline settings."""
@@ -358,12 +353,11 @@ class CreateTrain:
         print(f'\t\tFold: {self.fold}', flush=True)
         print(f'\t\tTask name: {self.task_name}', flush=True)
         print(f'\t\tNumber of landmark points: {self.run_config.num_of_points}', flush=True)
-        print(f'\t\tPhase: {self.data_config.phase}', flush=True)
         print(f'\t\tCreate data: {self.run_config.create_data}', flush=True)
         print(f'\t\tTrain model: {self.run_config.train_model}', flush=True)
         print(f'\t\tCopy files: {self.run_config.copy_files}', flush=True)
         print(f'\t\tDelete files: {self.run_config.delete_files}', flush=True)
-        print(f'\t\tNumber of folds (total): {self.data_config.num_of_folds}', flush=True)
+        print(f'\t\tNumber of folds: {self.data_config.num_of_folds}', flush=True)
         print(f'\t\tSub-patch scales: {self.data_config.sub_patch_scales}', flush=True)
         print(f'\t\tPatches per training sample: {self.data_config.patches_per_training_sample}', flush=True)
         print(f'\t\tGrid data step: {self.data_config.test_data_step}', flush=True)
@@ -387,7 +381,7 @@ class CreateTrain:
         print(f'\t\tFold lists path: {self.data_config.fold_lists_path}', flush=True)
         print(f'\t\tMark list file: {self.data_config.mark_list_file}', flush=True)
         print(f'\t\tImage data dir: {self.data_config.image_data_dir}', flush=True)
-        print(f'\t\tTraining data save path: {self.data_save_path}', flush=True)
+        print(f'\t\tData save path: {self.data_save_path}', flush=True)
         self.print_section_end()
 
     @staticmethod
@@ -445,7 +439,6 @@ def parse_args():
 
     parser.add_argument('fold', type=int)
     parser.add_argument('task_name', type=validate_task_name)
-    parser.add_argument('phase', choices=['Train', 'Val', 'both'])
     parser.add_argument('create_data', type=str_to_bool)
     parser.add_argument('train_model', type=str_to_bool)
     parser.add_argument('copy_files', type=str_to_bool)
@@ -634,7 +627,6 @@ def build_run_name(args, num_of_folds):
     parts = [
         'ipv',
         f'{num_of_folds}fold',
-        args.phase.lower(),
         f'patch{format_scales(pms.sub_patch_scales)}',
         f'sv{format_scales(pms.sampling_variances)}',
         f'points{args.num_points}',
@@ -684,7 +676,6 @@ def build_configs(args):
         fold=args.fold,
         task_name=args.task_name,
         num_of_points=args.num_points,
-        phase=args.phase,
         create_data=args.create_data,
         train_model=args.train_model,
         copy_files=args.copy_files,
@@ -701,7 +692,6 @@ def build_configs(args):
         sub_patch_scales=pms.sub_patch_scales,
         patches_per_training_sample=args.patches_per_training_sample,
         test_data_step=args.test_data_step,
-        phase=args.phase,
         fold_lists_path=args.fold_lists_path,
         mark_list_file=args.mark_list_file,
         image_data_dir=args.image_data_dir,

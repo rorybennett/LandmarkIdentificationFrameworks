@@ -208,7 +208,7 @@ For untrained models, use `--frozen-stages 0`. For `small_cnn`, use
 The command has the following structure:
 
 ```bash
-ipv-train FOLD TASK_NAME PHASE CREATE_DATA TRAIN_MODEL COPY_FILES DELETE_FILES [OPTIONS]
+ipv-train FOLD TASK_NAME CREATE_DATA TRAIN_MODEL COPY_FILES DELETE_FILES [OPTIONS]
 ```
 
 Positional arguments:
@@ -217,7 +217,6 @@ Positional arguments:
 |---|---|---|
 | `FOLD` | integer | Fold number to run. |
 | `TASK_NAME` | string | Name of the landmark task. For prostate IPV, use `transverse` or `sagittal`. |
-| `PHASE` | `Train`, `Val`, `both` | Data phase to create. Use `both` for training runs. |
 | `CREATE_DATA` | boolean | Create patch data before training. |
 | `TRAIN_MODEL` | boolean | Train the model. |
 | `COPY_FILES` | boolean | Copy selected result files to `--save-dir`, if provided. |
@@ -256,7 +255,6 @@ IMAGE_DATA_DIR="$HOME/DATA/transverse"
 
 FOLD=1
 TASK_NAME="transverse"
-PHASE="both"
 NUM_POINTS=4
 
 CREATE_DATA="true"
@@ -287,7 +285,7 @@ RUN_NAME="prostate_${TASK_NAME}_fold${FOLD}_points${NUM_POINTS}_${NETWORK_NAME}_
 cd "$PROJECT_DIR"
 
 python -m IPV.create_dataset_and_train_model \
-    "$FOLD" "$TASK_NAME" "$PHASE" "$CREATE_DATA" "$TRAIN_MODEL" "$COPY_FILES" "$DELETE_FILES" \
+    "$FOLD" "$TASK_NAME" "$CREATE_DATA" "$TRAIN_MODEL" "$COPY_FILES" "$DELETE_FILES" \
     --run-dir "$RUN_DIR" \
     --save-dir "$SAVE_DIR" \
     --num-points "$NUM_POINTS" \
@@ -327,7 +325,6 @@ $IMAGE_DATA_DIR = "D:\DATA\transverse"
 
 $FOLD = 1
 $TASK_NAME = "transverse"
-$PHASE = "both"
 $NUM_POINTS = 4
 
 $CREATE_DATA = "true"
@@ -357,7 +354,7 @@ $RUN_NAME = "prostate_${TASK_NAME}_fold${FOLD}_points${NUM_POINTS}_${NETWORK_NAM
 
 Set-Location $PROJECT_DIR
 
-ipv-train $FOLD $TASK_NAME $PHASE $CREATE_DATA $TRAIN_MODEL $COPY_FILES $DELETE_FILES `
+ipv-train $FOLD $TASK_NAME $CREATE_DATA $TRAIN_MODEL $COPY_FILES $DELETE_FILES `
     --run-dir $RUN_DIR `
     --save-dir $SAVE_DIR `
     --num-points $NUM_POINTS `
