@@ -322,11 +322,9 @@ class DataCreator:
                  sampling_variances=(500, 10000),
                  num_workers=1,
                  random_seed=42,
-                 keep_part_csvs=False,
-                 scan_type=None):
+                 keep_part_csvs=False):
 
-        self.task_name = self.resolve_task_name(task_name=task_name, scan_type=scan_type)
-        self.scan_type = self.task_name
+        self.task_name = self.resolve_task_name(task_name=task_name)
         self.num_of_pts = self.validate_num_points(num_of_points)
         self.sampling_variances = self.validate_sampling_variances(sampling_variances)
         self.patches_per_training_sample = self.validate_patches_per_training_sample(patches_per_training_sample, self.num_of_pts, self.sampling_variances)
@@ -354,9 +352,9 @@ class DataCreator:
         self.paths_dict = {}
 
     @staticmethod
-    def resolve_task_name(task_name=None, scan_type=None):
-        """Return the generic task name, accepting scan_type for older calls."""
-        resolved_name = task_name if task_name is not None else scan_type
+    def resolve_task_name(task_name=None):
+        """Return the generic task name."""
+        resolved_name = task_name
 
         if resolved_name is None:
             raise ValueError('task_name must be provided.')

@@ -44,10 +44,11 @@ class TrainConfig:
 
 
 class TrainModel:
-    def __init__(self, current_fold, num_of_points, data_save_path, tasks_classes, train_config, quadruplet_config, device=None):
+    def __init__(self, current_fold, num_of_points, data_save_path, tasks_classes, train_config, quadruplet_config, output_save_path=None, device=None):
         self.fold = current_fold
         self.num_of_pts = num_of_points
         self.train_path = Path(data_save_path)
+        self.output_path = Path(output_save_path) if output_save_path is not None else self.train_path
         self.tasks_classes = tasks_classes
         self.train_config = train_config
         self.quadruplet_config = quadruplet_config
@@ -61,6 +62,7 @@ class TrainModel:
     def train(self):
         """Run training for one fold."""
         self.validate_training_inputs()
+        self.output_path.mkdir(exist_ok=True, parents=True)
         train_loader, val_loader = self.build_data_loaders()
         model = self.build_model()
         criterion = nn.CrossEntropyLoss()
@@ -124,7 +126,6 @@ class TrainModel:
         self.write_checkpoint_summary(best_epoch=best_epoch, last_epoch=last_epoch, best_val_loss=best_val_loss, last_val_loss=last_val_loss,
                                       best_checkpoint_path=best_checkpoint_path, last_checkpoint_path=last_checkpoint_path)
         plt.clf()
-
 
     def validate_training_inputs(self):
         """Validate generated fold data before model construction."""
@@ -418,10 +419,10 @@ class TrainModel:
         plot_path = self.get_plot_path()
 
         plt.clf()
-        plt.plot(history['step'], history['train_loss'], 'r--')
-        plt.plot(history['step'], history['train_accuracy'], 'r-')
-        plt.plot(history['step'], history['val_loss'], 'b--')
-        plt.plot(history['step'], history['val_accuracy'], 'b-')
+        plt.plot(history['step'], history['train_loss'], '--')
+        plt.plot(history['step'], history['train_accuracy'], '-')
+        plt.plot(history['step'], history['val_loss'], '--')
+        plt.plot(history['step'], history['val_accuracy'], '-')
         plt.legend(['Training Loss', 'Train accuracy', 'Val Loss', 'Val accuracy'])
         plt.xlabel('Epoch progress')
         plt.ylabel('Loss / Accuracy')
@@ -433,6 +434,8 @@ class TrainModel:
         summary = {
             'fold': self.fold,
             'run_name': self.get_run_name(),
+            'data_save_path': self.train_path,
+            'output_save_path': self.output_path,
             'num_of_points': self.num_of_pts,
             'tasks_per_point': self.tasks_per_point,
             'expected_label_count': self.expected_label_count,
@@ -469,19 +472,19 @@ class TrainModel:
 
     def get_log_path(self):
         """Return the log CSV path."""
-        return self.train_path / f'train_log_f{self.fold}_{self.get_run_name()}.csv'
+        return self.output_path / f'train_log_f{self.fold}_{self.get_run_name()}.csv'
 
     def get_checkpoint_path(self, checkpoint_type):
         """Return the latest or best checkpoint path."""
-        return self.train_path / f'model_f{self.fold}_{self.get_run_name()}_{checkpoint_type}.pth'
+        return self.output_path / f'model_f{self.fold}_{self.get_run_name()}_{checkpoint_type}.pth'
 
     def get_checkpoint_summary_path(self):
         """Return the checkpoint summary JSON path."""
-        return self.train_path / f'checkpoint_summary_f{self.fold}_{self.get_run_name()}.json'
+        return self.output_path / f'checkpoint_summary_f{self.fold}_{self.get_run_name()}.json'
 
     def get_plot_path(self):
         """Return the plot path."""
-        return self.train_path / f'train_plot_f{self.fold}_{self.get_run_name()}.png'
+        return self.output_path / f'train_plot_f{self.fold}_{self.get_run_name()}.png'
 
     @staticmethod
     def format_number(value):

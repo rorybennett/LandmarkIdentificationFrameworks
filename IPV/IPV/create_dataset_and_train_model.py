@@ -1,5 +1,5 @@
 """
-Create train/validation fold data, train a model, copy outputs, and optionally delete temporary fold data.
+Create train/validation fold data, train a model, optionally copy outputs, and safely delete generated training data.
 """
 import argparse
 import csv
@@ -18,6 +18,8 @@ from .train_model import TrainModel, TrainConfig, QuadrupletConfig
 MIN_POINTS_PER_IMAGE = 1
 MAX_POINTS_PER_IMAGE = 30
 BASE_CSV_COLUMNS = 5
+TRAINING_DATA_DIR_NAME = 'TRAINING_DATA'
+RESULTS_DIR_NAME = 'RESULTS'
 
 
 @dataclass
@@ -53,8 +55,8 @@ class RunConfig:
     train_model: bool
     copy_files: bool
     delete_files: bool
-    scratch_dir: Path
-    results_dir: Path
+    run_dir: Path
+    save_dir: Path | None
     run_name: str
 
 
@@ -69,8 +71,11 @@ class CreateTrain:
         self.task_name = run_config.task_name
         self.num_of_points = run_config.num_of_points
 
-        self.code_data_dir = self.build_code_data_dir()
+        self.run_training_root = self.build_run_training_root()
+        self.run_results_root = self.build_run_results_root()
+        self.fold_training_data_dir = self.build_fold_training_data_dir()
         self.data_save_path = self.build_data_save_path()
+        self.run_results_path = self.build_run_results_path()
 
     def create_data(self):
         """Create fold data for the requested task."""
@@ -108,10 +113,12 @@ class CreateTrain:
         start_time = dt.datetime.now()
 
         self.validate_training_data_point_count()
+        self.run_results_path.mkdir(exist_ok=True, parents=True)
 
         trainer = TrainModel(
             current_fold=self.fold,
             data_save_path=self.data_save_path,
+            output_save_path=self.run_results_path,
             num_of_points=self.num_of_points,
             tasks_classes=self.data_config.tasks_classes,
             train_config=self.train_config,
@@ -119,6 +126,7 @@ class CreateTrain:
         )
 
         trainer.train()
+        self.write_run_info()
 
         end_time = dt.datetime.now()
         print(f'\tFold {self.fold} {self.task_name} training complete in {self.format_runtime(start_time, end_time)}.', flush=True)
@@ -158,15 +166,23 @@ class CreateTrain:
             raise ValueError(f'Model requested {self.num_of_points} points but metadata says data was created with {created_points} points.')
 
     def copy_files(self):
-        """Copy fold output files to the results directory."""
+        """Copy selected run results to the optional external save directory."""
         self.print_section_start(f'Fold {self.fold} {self.task_name} copying outputs')
         start_time = dt.datetime.now()
 
-        save_path = self.get_results_save_path()
-        save_path.mkdir(exist_ok=True, parents=True)
+        save_path = self.get_save_copy_path()
 
-        files = [file_path for file_path in self.data_save_path.iterdir() if file_path.is_file()]
-        print(f'\tCopying {len(files)} files from {self.data_save_path}...', flush=True)
+        if save_path is None:
+            print(f'\tNo save dir supplied. Outputs remain in {self.run_results_path}.', flush=True)
+            self.print_section_end()
+            return
+
+        if not self.run_results_path.is_dir():
+            raise ValueError(f'Run results path does not exist: {self.run_results_path}')
+
+        save_path.mkdir(exist_ok=True, parents=True)
+        files = [file_path for file_path in self.run_results_path.iterdir() if file_path.is_file()]
+        print(f'\tCopying {len(files)} files from {self.run_results_path} to {save_path}...', flush=True)
 
         for file_path in files:
             shutil.copy(file_path, save_path / file_path.name)
@@ -177,24 +193,25 @@ class CreateTrain:
         self.print_section_end()
 
     def delete_files(self):
-        """Delete the temporary fold data directory."""
-        self.print_section_start(f'Fold {self.fold} {self.task_name} deleting data')
+        """Delete only the generated training data folder for this fold and task."""
+        self.print_section_start(f'Fold {self.fold} {self.task_name} deleting training data')
         start_time = dt.datetime.now()
 
-        target = self.code_data_dir.resolve()
-        scratch_root = self.run_config.scratch_dir.resolve()
+        target = self.fold_training_data_dir.resolve()
+        training_root = self.run_training_root.resolve()
 
         if not target.exists():
             print(f'\tNothing to delete: {target}', flush=True)
+            self.print_section_end()
             return
 
-        if scratch_root not in target.parents:
-            raise ValueError(f'Refusing to delete {target}; it is not inside scratch_dir={scratch_root}.')
+        if target == training_root or training_root not in target.parents:
+            raise ValueError(f'Refusing to delete {target}; it is not a fold training data directory inside run training root={training_root}.')
 
         shutil.rmtree(target)
 
         end_time = dt.datetime.now()
-        print(f'\tFold {self.fold} {self.task_name} data deleted in {self.format_runtime(start_time, end_time)}.', flush=True)
+        print(f'\tFold {self.fold} {self.task_name} training data deleted in {self.format_runtime(start_time, end_time)}.', flush=True)
         print(f'\tRaw elapsed time: {end_time - start_time}', flush=True)
         self.print_section_end()
 
@@ -202,6 +219,7 @@ class CreateTrain:
         """Run the requested pipeline stages."""
         total_start_time = dt.datetime.now()
 
+        self.prepare_run_directories()
         self.print_inputs()
         self.write_run_info()
 
@@ -222,6 +240,12 @@ class CreateTrain:
         print(f'\tTotal runtime: {self.format_runtime(total_start_time, total_end_time)}.', flush=True)
         print(f'\tRaw total elapsed time: {total_end_time - total_start_time}', flush=True)
         self.print_section_end()
+
+    def prepare_run_directories(self):
+        """Create the two required high-level run directories."""
+        self.run_training_root.mkdir(exist_ok=True, parents=True)
+        self.run_results_root.mkdir(exist_ok=True, parents=True)
+        self.run_results_path.mkdir(exist_ok=True, parents=True)
 
     def write_data_info(self):
         """Write fold data creation metadata."""
@@ -267,18 +291,21 @@ class CreateTrain:
 
     def write_run_info(self):
         """Write full run, data, training, and model metadata."""
-        self.data_save_path.mkdir(exist_ok=True, parents=True)
-
-        run_info_path = self.data_save_path / f'run_info_{self.task_name}_{self.data_config.phase}_f{self.fold}.json'
+        run_info_path_name = f'run_info_{self.task_name}_{self.data_config.phase}_f{self.fold}.json'
+        save_copy_path = self.get_save_copy_path()
 
         run_info = {
             'created_at': dt.datetime.now().isoformat(),
             'fold': self.fold,
             'task_name': self.task_name,
             'num_of_points': self.num_of_points,
-            'code_data_dir': self.code_data_dir,
+            'run_dir': self.run_config.run_dir,
+            'run_training_root': self.run_training_root,
+            'run_results_root': self.run_results_root,
+            'fold_training_data_dir': self.fold_training_data_dir,
             'data_save_path': self.data_save_path,
-            'results_save_path': self.get_results_save_path(),
+            'run_results_path': self.run_results_path,
+            'save_copy_path': save_copy_path,
             'mark_list_file': self.data_config.mark_list_file,
             'image_data_dir': self.data_config.image_data_dir,
             'run_config': asdict(self.run_config),
@@ -287,25 +314,42 @@ class CreateTrain:
             'quadruplet_config': asdict(self.quadruplet_config)
         }
 
-        with open(run_info_path, 'w', encoding='utf-8') as run_info_file:
-            json.dump(run_info, run_info_file, indent=4, default=str)
+        for output_dir in (self.data_save_path, self.run_results_path):
+            output_dir.mkdir(exist_ok=True, parents=True)
+            with open(output_dir / run_info_path_name, 'w', encoding='utf-8') as run_info_file:
+                json.dump(run_info, run_info_file, indent=4, default=str)
 
     def write_metadata(self):
         """Write compact CSV metadata and full JSON metadata."""
         self.write_data_info()
         self.write_run_info()
 
-    def get_results_save_path(self):
-        """Return the final output directory for this run and task."""
-        return self.run_config.results_dir / self.run_config.run_name / self.task_name
+    def get_save_copy_path(self):
+        """Return the optional external save path for copied result files."""
+        if self.run_config.save_dir is None:
+            return None
 
-    def build_code_data_dir(self):
-        """Build the scratch directory used for generated fold data."""
-        return self.run_config.scratch_dir / f'Data_F{self.fold}_{self.task_name}'
+        return self.run_config.save_dir / self.run_config.run_name / self.task_name
+
+    def build_run_training_root(self):
+        """Build the run-level training-data root."""
+        return self.run_config.run_dir / TRAINING_DATA_DIR_NAME
+
+    def build_run_results_root(self):
+        """Build the run-level results root."""
+        return self.run_config.run_dir / RESULTS_DIR_NAME
+
+    def build_fold_training_data_dir(self):
+        """Build the fold/task training-data directory."""
+        return self.run_training_root / f'Data_F{self.fold}_{self.task_name}'
+
+    def build_run_results_path(self):
+        """Build the folder containing model checkpoints, logs, plots, and metadata."""
+        return self.run_results_root / self.run_config.run_name / self.task_name
 
     def build_data_save_path(self):
         """Build the folder containing generated train, validation, and test CSVs."""
-        return self.code_data_dir / f'{self.data_config.num_of_folds}_FOLDS' / self.task_name / f'{self.data_config.sub_patch_scales}_{self.num_of_points}points_{self.data_config.patches_per_training_sample}pertrainingsample'
+        return self.fold_training_data_dir / f'{self.data_config.num_of_folds}_FOLDS' / self.task_name / f'{self.data_config.sub_patch_scales}_{self.num_of_points}points_{self.data_config.patches_per_training_sample}pertrainingsample'
 
     def print_inputs(self):
         """Print the resolved pipeline settings."""
@@ -332,10 +376,13 @@ class CreateTrain:
         print(f'\t\tBranch features: {self.quadruplet_config.branch_features}', flush=True)
         print(f'\t\tFrozen stages: {self.quadruplet_config.frozen_stages}', flush=True)
         print(f'\t\tSmall input stem: {self.quadruplet_config.small_input_stem}', flush=True)
-        print(f'\t\tScratch dir: {self.run_config.scratch_dir}', flush=True)
-        print(f'\t\tResults dir: {self.run_config.results_dir}', flush=True)
+        print(f'\t\tRun dir: {self.run_config.run_dir}', flush=True)
+        print(f'\t\tSave dir: {self.run_config.save_dir}', flush=True)
+        print(f'\t\tRun training root: {self.run_training_root}', flush=True)
+        print(f'\t\tRun results root: {self.run_results_root}', flush=True)
         print(f'\t\tRun name: {self.run_config.run_name}', flush=True)
-        print(f'\t\tResults save path: {self.get_results_save_path()}', flush=True)
+        print(f'\t\tRun results path: {self.run_results_path}', flush=True)
+        print(f'\t\tSave copy path: {self.get_save_copy_path()}', flush=True)
         print(f'\t\tFold lists path: {self.data_config.fold_lists_path}', flush=True)
         print(f'\t\tMark list file: {self.data_config.mark_list_file}', flush=True)
         print(f'\t\tImage data dir: {self.data_config.image_data_dir}', flush=True)
@@ -378,9 +425,22 @@ def str_to_bool(value):
     raise argparse.ArgumentTypeError(f'Invalid boolean value: {value}')
 
 
+def optional_path(value):
+    """Convert an optional command-line path, treating empty strings as not supplied."""
+    if value is None:
+        return None
+
+    value = str(value).strip()
+
+    if not value:
+        return None
+
+    return Path(value)
+
+
 def parse_args():
     """Parse terminal arguments."""
-    parser = argparse.ArgumentParser(description='Create train/validation fold data, train a model, copy results, and delete temporary files.')
+    parser = argparse.ArgumentParser(description='Create train/validation fold data, train a model, copy selected outputs, and delete generated training data.')
 
     parser.add_argument('fold', type=int)
     parser.add_argument('task_name', type=validate_task_name)
@@ -390,8 +450,8 @@ def parse_args():
     parser.add_argument('copy_files', type=str_to_bool)
     parser.add_argument('delete_files', type=str_to_bool)
 
-    parser.add_argument('--scratch-dir', type=Path, required=True)
-    parser.add_argument('--results-dir', type=Path, required=True)
+    parser.add_argument('--run-dir', type=Path, required=True)
+    parser.add_argument('--save-dir', type=optional_path, default=None)
     parser.add_argument('--num-points', type=validate_num_points, required=True)
     parser.add_argument('--fold-lists-path', type=Path, required=True)
     parser.add_argument('--mark-list-file', type=Path, required=True)
@@ -418,7 +478,7 @@ def parse_args():
 
 
 def validate_args(args, num_of_folds):
-    """Validate numeric terminal arguments."""
+    """Validate numeric and path terminal arguments."""
     if args.batch_size < 1:
         raise ValueError('--batch-size must be at least 1.')
 
@@ -442,6 +502,12 @@ def validate_args(args, num_of_folds):
 
     if args.fold < 1 or args.fold > num_of_folds:
         raise ValueError(f'fold must be between 1 and {num_of_folds}. Got fold={args.fold}.')
+
+    if args.run_dir.exists() and not args.run_dir.is_dir():
+        raise ValueError(f'--run-dir exists but is not a directory: {args.run_dir}')
+
+    if args.save_dir is not None and args.save_dir.exists() and not args.save_dir.is_dir():
+        raise ValueError(f'--save-dir exists but is not a directory: {args.save_dir}')
 
     if len(pms.sub_patch_scales) != 4:
         raise ValueError(f'Quadruplet requires exactly 4 sub-patch scales, got {len(pms.sub_patch_scales)}: {pms.sub_patch_scales}')
@@ -524,8 +590,7 @@ def validate_intervals(name, intervals, expected_start=None, expected_end=None):
             raise ValueError(f'{name}[{index}] has lower_bound >= upper_bound. Got: {interval}')
 
         if previous_upper is not None and lower_bound != previous_upper:
-            raise ValueError(
-                f'{name} intervals must be contiguous with no gaps or overlaps. Previous upper bound was {previous_upper}, but interval {index} starts at {lower_bound}.')
+            raise ValueError(f'{name} intervals must be contiguous with no gaps or overlaps. Previous upper bound was {previous_upper}, but interval {index} starts at {lower_bound}.')
 
         previous_upper = upper_bound
 
@@ -588,7 +653,7 @@ def build_run_name(args, num_of_folds):
 
 
 def clean_run_name(value):
-    """Remove characters that are awkward in shared HPC paths."""
+    """Remove characters that are awkward in shared paths."""
     return re.sub(r'[^A-Za-z0-9._-]+', '_', str(value)).strip('_')
 
 
@@ -623,8 +688,8 @@ def build_configs(args):
         train_model=args.train_model,
         copy_files=args.copy_files,
         delete_files=args.delete_files,
-        scratch_dir=args.scratch_dir,
-        results_dir=args.results_dir,
+        run_dir=args.run_dir,
+        save_dir=args.save_dir,
         run_name=run_name
     )
 
