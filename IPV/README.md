@@ -61,8 +61,8 @@ python -m pip install --upgrade pip
 Install in editable mode from the repository root:
 
 ```bash
-git clone <repository-url>
-cd <repository-root>/IPV
+git clone https://github.com/rorybennett/LandmarkIdentificationFrameworks
+cd LandmarkIdentificationFrameworks/IPV
 pip install -e .
 ```
 
