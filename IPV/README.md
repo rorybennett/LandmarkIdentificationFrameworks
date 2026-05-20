@@ -3,8 +3,8 @@
 Dataset creation and quadruplet model training tools for Image-Patch Voting
 (IPV) landmark identification.
 
-The pipeline creates multi-scale grayscale patch data from annotated images,
-trains a quadruplet network, writes checkpoints, logs, and metadata to a run
+The pipeline creates multi-scale patch data from annotated 2D images, trains a
+quadruplet network, writes checkpoints, logs, plots, and metadata to a run
 directory, optionally copies selected result files to a separate save directory,
 and can safely delete generated training-data artefacts.
 
@@ -158,10 +158,13 @@ validation.
 ### Mark-list files
 
 Each mark-list row must start with the image filename followed by coordinate
-pairs. The number of coordinate pairs must match `--num-points`, unless the mark
-list contains additional points and you deliberately want the first
-`--num-points` points to be used. The maximum supported number of points per
-image is 30.
+pairs. The number of coordinate pairs must be at least `--num-points`. If a row
+contains more coordinate pairs than requested, only the first `--num-points`
+points are used. The maximum supported number of points per image is 30.
+
+Sample names are taken from the image filename stem. Duplicate sample names in a
+mark-list file are rejected, and the requested landmark points must lie within
+the corresponding image bounds.
 
 Prostate transverse example with four endpoints:
 
@@ -204,19 +207,19 @@ directory, optional save directory, and model backbone.
 
 ## Run and save directories
 
-Every run uses a required `--run-dir`. The current code creates these two
-high-level directories inside it:
+Every run uses a required `--run-dir`. The code creates these two high-level
+directories inside it:
 
 ```text
 <RUN_DIR>/
 ├── TRAINING_DATA/
-│   └── <NUM_FOLDS>_Folds/
-│       └── <TASK_NAME>/
+│   └── <TASK_NAME>/
+│       └── <NUM_FOLDS>_Folds/
 │           └── <SCALES>_<NUM_POINTS>points_<PATCHES_PER_TRAINING_SAMPLE>pertrainingsample/
 │               └── ... generated CSVs, patch images, overlay images, and data metadata
 └── TRAINING_RESULTS/
-    └── <RUN_NAME>/
-        └── <TASK_NAME>/
+    └── <TASK_NAME>/
+        └── <RUN_NAME>/
             └── ... checkpoints, logs, plots, and run metadata
 ```
 
@@ -232,9 +235,26 @@ Use `--save-dir` only when you want a copy of selected result files outside the
 run directory. When `COPY_FILES=true`, `--save-dir` is required. When
 `COPY_FILES=false`, any supplied `--save-dir` is ignored.
 
+When `COPY_FILES=true`, files from:
+
+```text
+<RUN_DIR>/TRAINING_RESULTS/<TASK_NAME>/<RUN_NAME>/
+```
+
+are copied to:
+
+```text
+<SAVE_DIR>/<TASK_NAME>/<RUN_NAME>/
+```
+
 When `DELETE_FILES=true`, only generated training-data artefacts for the current
 fold/task/sample configuration are deleted from `<RUN_DIR>/TRAINING_DATA`. Files
 in `<RUN_DIR>/TRAINING_RESULTS` and the optional save directory are not deleted.
+
+When `TRAIN_MODEL=true` and `CREATE_DATA=false`, the pipeline checks for partial
+fold data before training. If some expected fold-specific files exist and others
+are missing, training stops so stale or incomplete data are not accidentally
+reused.
 
 ## Supported models
 
@@ -265,7 +285,7 @@ Positional arguments:
 
 | Argument | Values | Description |
 |---|---|---|
-| `FOLD` | integer | Fold number to run. |
+| `FOLD` | integer | Fold number to run. Must match an available `train_fN.txt` file. |
 | `TASK_NAME` | string | Name of the landmark task. For prostate IPV, use `transverse` or `sagittal`. |
 | `CREATE_DATA` | boolean | Create patch data before training. |
 | `TRAIN_MODEL` | boolean | Train the model. |
@@ -284,14 +304,19 @@ Important options:
 | `--fold-lists-path` | Directory containing `train_fN.txt` files and `val.txt`. |
 | `--mark-list-file` | Text file containing image filenames and point coordinates. |
 | `--image-data-dir` | Directory containing the source images. |
-| `--data-creation-workers` | Number of worker processes used for patch/data creation. |
-| `--train-workers` | Number of PyTorch DataLoader workers used during training. |
+| `--data-creation-workers` | Number of worker processes used for patch/data creation. Must be at least 1. |
+| `--train-workers` | Number of PyTorch DataLoader workers used during training. Use 0 for single-process loading. |
 | `--random-seed` | Seed used for deterministic sampled training centres. |
 | `--keep-part-csvs` | Keep per-sample temporary CSV part files if true. |
 | `--batch-size` | Training batch size. |
 | `--max-training-epochs` | Maximum training epochs. |
-| `--learning-rate` | SGD learning rate. |
+| `--learning-rate` | Initial SGD learning rate. |
 | `--lr-schedule` | Enable the validation-accuracy-triggered learning-rate scheduler. |
+| `--lr-step-size` | StepLR step size used when `--lr-schedule true`. Default: 1. |
+| `--lr-gamma` | StepLR multiplicative decay factor used when `--lr-schedule true`. Default: 0.1. |
+| `--early-stop-patience` | Number of validation epochs without sufficient loss improvement before early stopping. Default: 5. |
+| `--early-stop-min-delta` | Minimum validation-loss improvement required to reset early-stopping patience. Default: 0.001. |
+| `--early-stop-warmup-epochs` | Number of initial epochs before early stopping is allowed. Default: 3. |
 | `--loss-print-samples` | Approximate sample interval used to derive the validation/logging batch interval. |
 | `--patches-per-training-sample` | Number of sampled patch centres per training image. Must be at least `num_points * len(sampling_variances)`. |
 | `--grid-spacing` | Grid stride for validation patch-centre creation. |
@@ -299,7 +324,7 @@ Important options:
 | `--branch-features` | Number of features output by each branch before concatenation. |
 | `--frozen-stages` | Number of pretrained ResNet stages to freeze. Use `0` for untrained models and `small_cnn`. |
 | `--small-input-stem` | Use the small-input ResNet stem when true. Use `false` for `small_cnn`. |
-| `--run-name` | Currently accepted by the parser but not applied by `build_configs()`. |
+| `--run-name` | Optional custom run name. When omitted, a deterministic name is generated from the run configuration. |
 
 ## Ubuntu example script
 
@@ -338,6 +363,11 @@ BATCH_SIZE=64
 MAX_TRAINING_EPOCHS=15
 LEARNING_RATE=0.01
 LR_SCHEDULE="true"
+LR_STEP_SIZE=1
+LR_GAMMA=0.1
+EARLY_STOP_PATIENCE=5
+EARLY_STOP_MIN_DELTA=0.001
+EARLY_STOP_WARMUP_EPOCHS=3
 LOSS_PRINT_SAMPLES=1600
 
 NETWORK_NAME="small_cnn"
@@ -363,6 +393,11 @@ python -m IPV.create_dataset_and_train_model \
     --max-training-epochs "$MAX_TRAINING_EPOCHS" \
     --learning-rate "$LEARNING_RATE" \
     --lr-schedule "$LR_SCHEDULE" \
+    --lr-step-size "$LR_STEP_SIZE" \
+    --lr-gamma "$LR_GAMMA" \
+    --early-stop-patience "$EARLY_STOP_PATIENCE" \
+    --early-stop-min-delta "$EARLY_STOP_MIN_DELTA" \
+    --early-stop-warmup-epochs "$EARLY_STOP_WARMUP_EPOCHS" \
     --loss-print-samples "$LOSS_PRINT_SAMPLES" \
     --patches-per-training-sample "$PATCHES_PER_TRAINING_SAMPLE" \
     --grid-spacing "$GRID_SPACING" \
@@ -409,6 +444,11 @@ $BATCH_SIZE = 64
 $MAX_TRAINING_EPOCHS = 15
 $LEARNING_RATE = 0.01
 $LR_SCHEDULE = "true"
+$LR_STEP_SIZE = 1
+$LR_GAMMA = 0.1
+$EARLY_STOP_PATIENCE = 5
+$EARLY_STOP_MIN_DELTA = 0.001
+$EARLY_STOP_WARMUP_EPOCHS = 3
 $LOSS_PRINT_SAMPLES = 1600
 
 $NETWORK_NAME = "small_cnn"
@@ -433,6 +473,11 @@ ipv-train $FOLD $TASK_NAME $CREATE_DATA $TRAIN_MODEL $COPY_FILES $DELETE_FILES `
     --max-training-epochs $MAX_TRAINING_EPOCHS `
     --learning-rate $LEARNING_RATE `
     --lr-schedule $LR_SCHEDULE `
+    --lr-step-size $LR_STEP_SIZE `
+    --lr-gamma $LR_GAMMA `
+    --early-stop-patience $EARLY_STOP_PATIENCE `
+    --early-stop-min-delta $EARLY_STOP_MIN_DELTA `
+    --early-stop-warmup-epochs $EARLY_STOP_WARMUP_EPOCHS `
     --loss-print-samples $LOSS_PRINT_SAMPLES `
     --patches-per-training-sample $PATCHES_PER_TRAINING_SAMPLE `
     --grid-spacing $GRID_SPACING `
@@ -444,8 +489,17 @@ ipv-train $FOLD $TASK_NAME $CREATE_DATA $TRAIN_MODEL $COPY_FILES $DELETE_FILES `
 
 ## Outputs
 
-Generated fold data is written under `<RUN_DIR>/TRAINING_DATA`. Models and
-training outputs are written under `<RUN_DIR>/TRAINING_RESULTS`.
+Generated fold data is written under:
+
+```text
+<RUN_DIR>/TRAINING_DATA/<TASK_NAME>/<NUM_FOLDS>_Folds/<SCALES>_<NUM_POINTS>points_<PATCHES_PER_TRAINING_SAMPLE>pertrainingsample/
+```
+
+Models and training outputs are written under:
+
+```text
+<RUN_DIR>/TRAINING_RESULTS/<TASK_NAME>/<RUN_NAME>/
+```
 
 Common generated training-data files include:
 
@@ -473,24 +527,15 @@ Common result files include:
 - `model_f<FOLD>_<TRAINING_NAME>_last.pth`
 - `checkpoint_summary_f<FOLD>_<TRAINING_NAME>.json`
 
-When `COPY_FILES=true`, files from:
-
-```text
-<RUN_DIR>/TRAINING_RESULTS/<RUN_NAME>/<TASK_NAME>/
-```
-
-are copied to:
-
-```text
-<SAVE_DIR>/<RUN_NAME>/<TASK_NAME>/
-```
-
 ## Notes and limits
 
 - Each image must have at least `--num-points` coordinate pairs in the mark-list file.
+- Duplicate mark-list sample names are rejected.
+- The requested mark-list points must lie inside the matching image dimensions.
+- Temporary per-sample CSV filenames and overlay filenames are derived from sanitised sample names.
 - `--num-points` must be between 1 and 30.
-- Training patches are grayscale. Colour images are converted to grayscale before patch extraction.
 - The current model expects exactly four sub-patch scales because each sample is represented as a quadruplet.
 - The current label structure is distance plus angle per point, so each point adds two model output heads.
 - Generated metadata and CSV label counts are checked before training starts.
+- Training from existing data checks for partial fold data before model training starts.
 - Keep generated data, checkpoints, logs, and copied outputs out of Git.
