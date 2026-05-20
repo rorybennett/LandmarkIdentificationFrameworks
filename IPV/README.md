@@ -227,7 +227,7 @@ directories inside it:
 `RUN_NAME` is generated deterministically from the run configuration, including
 fold count, patch scales, sampling variances, point count, patch count, grid
 spacing, network, branch features, frozen stages, stem setting, batch size,
-learning rate, epoch count, and random seed.
+learning rate, scheduler, early-stopping, epoch count, and random seed.
 
 By default, `RUN_NAME` is generated from the configuration. Supplying
 `--run-name` overrides the generated name after path-safe cleaning.
