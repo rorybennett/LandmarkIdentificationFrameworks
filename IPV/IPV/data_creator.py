@@ -260,10 +260,7 @@ def get_checked_label(value, intervals, label_name, sample_name=None, point=None
             'patch_centre': (x, y)
         }
 
-        raise ValueError(
-            f'Invalid {label_name} label: value does not fall inside any configured interval. '
-            f'Context: {context}'
-        )
+        raise ValueError(f'Invalid {label_name} label: value does not fall inside any configured interval. Context: {context}')
 
     return label
 
@@ -277,9 +274,20 @@ def create_grid_centres(image_shape, step):
             yield int(x), int(y)
 
 
-def wrap_point_to_image(x, y, width, height):
-    """Wrap sampled coordinates back inside the image extent."""
-    return int(round(x)) % width, int(round(y)) % height
+def is_point_inside_image(x, y, width, height):
+    """Return True when integer coordinates lie inside the image extent."""
+    return 0 <= x < width and 0 <= y < height
+
+
+def sample_centre_inside_image(point, covariance, width, height, rng):
+    """Sample one centre and return it only when it falls inside the image."""
+    x, y = rng.multivariate_normal(point, covariance)
+    centre = int(round(x)), int(round(y))
+
+    if not is_point_inside_image(x=centre[0], y=centre[1], width=width, height=height):
+        return None
+
+    return centre
 
 
 def create_training_centres(points, image_shape, patches_per_training_sample, sampling_variances, rng):
@@ -296,14 +304,13 @@ def create_training_centres(points, image_shape, patches_per_training_sample, sa
         covariance = [[variance, 0], [0, variance]]
         created_count = 0
         attempt_count = 0
-        max_attempts = max(group_count * 100, 1000)
+        max_attempts = max(group_count * 200, 2000)
 
         while created_count < group_count and attempt_count < max_attempts:
             attempt_count += 1
-            x, y = rng.multivariate_normal(point, covariance).T
-            centre = wrap_point_to_image(x=x, y=y, width=width, height=height)
+            centre = sample_centre_inside_image(point=point, covariance=covariance, width=width, height=height, rng=rng)
 
-            if centre in seen_centres:
+            if centre is None or centre in seen_centres:
                 continue
 
             seen_centres.add(centre)
@@ -311,7 +318,8 @@ def create_training_centres(points, image_shape, patches_per_training_sample, sa
             yield centre
 
         if created_count < group_count:
-            raise RuntimeError(f'Only created {created_count}/{group_count} unique centres for point {point} with variance {variance}.')
+            raise RuntimeError(f'Only created {created_count}/{group_count} unique in-image centres for point {point} with variance {variance}. '
+                               f'Image size is width={width}, height={height}; consider lowering sampling variance or patches_per_training_sample.')
 
 
 def create_patch_job(job):
@@ -465,10 +473,8 @@ class DataCreator:
         minimum_patches = num_of_points * len(sampling_variances)
 
         if patches_per_training_sample < minimum_patches:
-            raise ValueError(
-                f'patches_per_training_sample must be at least {minimum_patches} '
-                f'for {num_of_points} points and {len(sampling_variances)} sampling variances.'
-            )
+            raise ValueError(f'patches_per_training_sample must be at least {minimum_patches} for '
+                             f'{num_of_points} points and {len(sampling_variances)} sampling variances.')
 
         return patches_per_training_sample
 
