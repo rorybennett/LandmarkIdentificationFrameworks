@@ -105,6 +105,15 @@ def natural_key(value):
     """Sort strings naturally, so A2 comes before A10."""
     return [int(part) if part.isdigit() else part.lower() for part in re.split(r'(\d+)', str(value))]
 
+def safe_file_stem(value):
+    """Return a safe filename stem derived from a sample name."""
+    safe_value = re.sub(r'[^A-Za-z0-9._-]+', '_', str(value)).strip('._-')
+
+    if not safe_value:
+        raise ValueError(f'Sample name cannot be converted to a safe filename: {value}')
+
+    return safe_value
+
 
 def discover_fold_numbers(fold_lists_path):
     """Return contiguous fold numbers discovered from train_fN.txt files."""
@@ -359,7 +368,7 @@ def create_patch_job(job):
     for point in job.points:
         cv2.drawMarker(display_image, point, (255, 255, 255), markerType=cv2.MARKER_TILTED_CROSS, markerSize=12, thickness=2, line_type=cv2.LINE_AA)
 
-    io.imsave(job.image_save_path / f'{job.sample_name}.png', display_image, check_contrast=False)
+    io.imsave(job.image_save_path / f'{safe_file_stem(job.sample_name)}.png', display_image, check_contrast=False)
 
     return job.sample_index, job.part_csv_path
 
@@ -699,7 +708,7 @@ class DataCreator:
                 sampling_variances=self.sampling_variances,
                 patch_save_path=patch_save_path,
                 image_save_path=image_save_path,
-                part_csv_path=part_csv_dir / f'{sample_index}_{sample_name}.csv',
+                part_csv_path=part_csv_dir / f'{sample_index}_{safe_file_stem(sample_name)}.csv',
                 seed=seed
             ))
 
