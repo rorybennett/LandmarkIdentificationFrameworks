@@ -174,18 +174,32 @@ def resize_patch(patch, output_size):
     return resize(patch, output_shape, preserve_range=True, anti_aliasing=True)
 
 
+def get_image_channel_count(image, image_path=None):
+    """Return the channel count for a greyscale, RGB, or RGBA image array."""
+    path_text = f' {image_path}' if image_path is not None else ''
+
+    if image.ndim == 2:
+        return 1
+
+    if image.ndim == 3 and image.shape[2] in (1, 3, 4):
+        return int(image.shape[2])
+
+    raise ValueError(f'Image{path_text} has unsupported shape {image.shape}. Expected greyscale, RGB, or RGBA.')
+
+
+def infer_image_channel_count(image_path):
+    """Read one image and return its input channel count."""
+    image = io.imread(image_path)
+
+    return get_image_channel_count(image=image, image_path=image_path)
+
+
 def load_patch_source_image(image_path):
     """Load a source image for patch extraction without changing its channel count."""
     image = io.imread(image_path)
-    image = img_as_float32(image)
+    get_image_channel_count(image=image, image_path=image_path)
 
-    if image.ndim == 2:
-        return image
-
-    if image.ndim == 3 and image.shape[2] in (1, 3, 4):
-        return image
-
-    raise ValueError(f'Image {image_path} has unsupported shape {image.shape}. Expected greyscale, RGB, or RGBA.')
+    return img_as_float32(image)
 
 
 def load_display_image(image_path):
@@ -384,6 +398,7 @@ class DataCreator:
         self.image_data_path = Path(image_data_path)
 
         self.current_fold = None
+        self.input_channels = None
         self.fold_list = []
         self.points_dict = {}
         self.paths_dict = {}
@@ -494,6 +509,8 @@ class DataCreator:
         if not self.fold_list:
             self.read_fold_lists()
 
+        self.report_current_fold_input_channels()
+
         self.create_data(grid_spacing=grid_spacing, phase='Train')
         self.create_data(grid_spacing=grid_spacing, phase='Val')
 
@@ -533,6 +550,42 @@ class DataCreator:
 
             self.paths_dict[sample_name] = image_path
             self.points_dict[sample_name] = points[:self.num_of_pts]
+
+    def report_current_fold_input_channels(self):
+        """Report and validate the input channel count for the current fold."""
+        sample_names = self.get_current_fold_sample_names()
+        mark_records = self.read_mark_list()
+        channel_counts = {}
+
+        for sample_name in sample_names:
+            if sample_name not in mark_records:
+                raise KeyError(f'{sample_name} was found in the fold list but not in {self.mark_list_path}.')
+
+            image_name, _ = mark_records[sample_name]
+            image_path = self.image_data_path / image_name
+
+            if not image_path.is_file():
+                raise FileNotFoundError(f'Image for {sample_name} was not found: {image_path}')
+
+            input_channels = infer_image_channel_count(image_path)
+            channel_counts.setdefault(input_channels, []).append(sample_name)
+
+        if len(channel_counts) != 1:
+            details = ', '.join(f'{channels} channels: {len(names)} images' for channels, names in sorted(channel_counts.items()))
+            raise ValueError(f'Mixed input channel counts found for fold {self.current_fold}: {details}. Use one consistent channel count per dataset.')
+
+        self.input_channels = next(iter(channel_counts))
+        image_text = 'image' if len(sample_names) == 1 else 'images'
+        print(f'	Input channels detected for fold {self.current_fold} {self.task_name}: {self.input_channels} ({len(sample_names)} {image_text}).', flush=True)
+
+    def get_current_fold_sample_names(self):
+        """Return all sample names used by the current fold."""
+        sample_names = []
+
+        for phase in ('Train', 'Val'):
+            sample_names.extend(self.get_phase_names(phase))
+
+        return sorted(set(sample_names), key=natural_key)
 
     def validate_mark_points(self, sample_name, points):
         """Validate landmark count for one mark-list row."""
