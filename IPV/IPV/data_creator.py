@@ -105,6 +105,7 @@ def natural_key(value):
     """Sort strings naturally, so A2 comes before A10."""
     return [int(part) if part.isdigit() else part.lower() for part in re.split(r'(\d+)', str(value))]
 
+
 def safe_file_stem(value):
     """Return a safe filename stem derived from a sample name."""
     safe_value = re.sub(r'[^A-Za-z0-9._-]+', '_', str(value)).strip('._-')
@@ -555,13 +556,13 @@ class DataCreator:
                 raise KeyError(f'{sample_name} was found in the fold list but not in {self.mark_list_path}.')
 
             image_name, points = mark_records[sample_name]
-
-            self.validate_mark_points(sample_name=sample_name, points=points)
-
             image_path = self.image_data_path / image_name
 
             if not image_path.is_file():
                 raise FileNotFoundError(f'Image for {sample_name} was not found: {image_path}')
+
+            image_shape = io.imread(image_path).shape
+            self.validate_mark_points(sample_name=sample_name, points=points, image_shape=image_shape)
 
             self.paths_dict[sample_name] = image_path
             self.points_dict[sample_name] = points[:self.num_of_pts]
@@ -602,13 +603,22 @@ class DataCreator:
 
         return sorted(set(sample_names), key=natural_key)
 
-    def validate_mark_points(self, sample_name, points):
-        """Validate landmark count for one mark-list row."""
+    def validate_mark_points(self, sample_name, points, image_shape=None):
+        """Validate landmark count and optional image bounds for one mark-list row."""
         if len(points) < self.num_of_pts:
             raise ValueError(f'{sample_name} has {len(points)} points but {self.num_of_pts} are required.')
 
         if len(points) > MAX_POINTS_PER_IMAGE:
             raise ValueError(f'{sample_name} has {len(points)} points; the maximum supported number is {MAX_POINTS_PER_IMAGE}.')
+
+        if image_shape is None:
+            return
+
+        height, width = image_shape[:2]
+
+        for point_index, (x, y) in enumerate(points[:self.num_of_pts], start=1):
+            if not is_point_inside_image(x=x, y=y, width=width, height=height):
+                raise ValueError(f'{sample_name} point {point_index} is outside image bounds: ({x}, {y}) for width={width}, height={height}.')
 
     def create_data(self, grid_spacing, phase):
         """Create and save patches and labels for one phase."""
@@ -774,7 +784,7 @@ class DataCreator:
         records = {}
 
         with open(self.mark_list_path, 'r', encoding='utf-8') as mark_file:
-            for line in mark_file:
+            for line_number, line in enumerate(mark_file, start=1):
                 line = line.strip()
 
                 if not line:
@@ -783,6 +793,11 @@ class DataCreator:
                 image_name = line.split()[0]
                 sample_name = Path(image_name).stem
                 points = [(int(x), int(y)) for x, y in re.findall(r'\((-?\d+),\s*(-?\d+)\)', line)]
+
+                if sample_name in records:
+                    previous_image_name, _ = records[sample_name]
+                    raise ValueError(f'Duplicate sample name in mark list: {sample_name}. Previous image={previous_image_name}, '
+                                     f'duplicate image={image_name}, line={line_number}.')
 
                 records[sample_name] = (image_name, points)
 
