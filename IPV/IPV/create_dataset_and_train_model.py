@@ -652,6 +652,11 @@ def parse_args():
     parser.add_argument('--max-training-epochs', type=int, required=True)
     parser.add_argument('--learning-rate', type=float, required=True)
     parser.add_argument('--lr-schedule', type=str_to_bool, required=True)
+    parser.add_argument('--lr-step-size', type=int, default=1)
+    parser.add_argument('--lr-gamma', type=float, default=0.1)
+    parser.add_argument('--early-stop-patience', type=int, default=5)
+    parser.add_argument('--early-stop-min-delta', type=float, default=0.001)
+    parser.add_argument('--early-stop-warmup-epochs', type=int, default=3)
     parser.add_argument('--loss-print-samples', type=int, required=True)
     parser.add_argument('--patches-per-training-sample', type=int, required=True)
     parser.add_argument('--grid-spacing', type=int, required=True)
@@ -666,8 +671,17 @@ def parse_args():
 
 
 def validate_args(args, num_of_folds):
-    """Validate numeric and path terminal arguments."""
+    """Validate numeric, path, training, and model terminal arguments."""
     normalise_save_dir(args)
+
+    if args.data_creation_workers < 1:
+        raise ValueError('--data-creation-workers must be at least 1.')
+
+    if args.train_workers < 0:
+        raise ValueError('--train-workers must be at least 0.')
+
+    if args.random_seed < 0:
+        raise ValueError('--random-seed must be at least 0.')
 
     if args.batch_size < 1:
         raise ValueError('--batch-size must be at least 1.')
@@ -678,6 +692,21 @@ def validate_args(args, num_of_folds):
     if args.learning_rate <= 0:
         raise ValueError('--learning-rate must be greater than 0.')
 
+    if args.lr_step_size < 1:
+        raise ValueError('--lr-step-size must be at least 1.')
+
+    if args.lr_gamma <= 0:
+        raise ValueError('--lr-gamma must be greater than 0.')
+
+    if args.early_stop_patience < 1:
+        raise ValueError('--early-stop-patience must be at least 1.')
+
+    if args.early_stop_min_delta < 0:
+        raise ValueError('--early-stop-min-delta must be at least 0.')
+
+    if args.early_stop_warmup_epochs < 0:
+        raise ValueError('--early-stop-warmup-epochs must be at least 0.')
+
     if args.loss_print_samples < 1:
         raise ValueError('--loss-print-samples must be at least 1.')
 
@@ -686,6 +715,21 @@ def validate_args(args, num_of_folds):
 
     if args.grid_spacing < 1:
         raise ValueError('--grid-spacing must be at least 1.')
+
+    if args.branch_features < 1:
+        raise ValueError('--branch-features must be at least 1.')
+
+    if args.frozen_stages < 0 or args.frozen_stages > 5:
+        raise ValueError('--frozen-stages must be between 0 and 5.')
+
+    if args.network_name.endswith('_untrained') and args.frozen_stages != 0:
+        raise ValueError('--frozen-stages must be 0 for untrained networks.')
+
+    if args.network_name == 'small_cnn' and args.frozen_stages != 0:
+        raise ValueError('--frozen-stages must be 0 for small_cnn.')
+
+    if args.network_name == 'small_cnn' and args.small_input_stem:
+        raise ValueError('--small-input-stem must be false for small_cnn.')
 
     if num_of_folds < 2:
         raise ValueError(f'At least 2 fold files are required. Found {num_of_folds}.')
@@ -904,7 +948,12 @@ def build_configs(args):
         max_training_epochs=args.max_training_epochs,
         loss_print_interval=loss_print_interval,
         num_workers=args.train_workers,
-        lr_schedule=args.lr_schedule
+        lr_schedule=args.lr_schedule,
+        lr_step_size=args.lr_step_size,
+        lr_gamma=args.lr_gamma,
+        early_stop_patience=args.early_stop_patience,
+        early_stop_min_delta=args.early_stop_min_delta,
+        early_stop_warmup_epochs=args.early_stop_warmup_epochs
     )
 
     quadruplet_config = QuadrupletConfig(
