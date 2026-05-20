@@ -88,11 +88,11 @@ class CreateTrain:
         self.run_results_path = self.build_run_results_path()
 
     def create_data(self):
-        """Create fold data for the requested task from a clean data directory."""
+        """Create fold data for the requested task after removing existing artefacts for this fold."""
         self.print_section_start(f'Fold {self.fold} {self.task_name} data creation')
         start_time = dt.datetime.now()
 
-        self.delete_existing_data_save_path()
+        self.delete_existing_fold_data()
 
         data_creator = DataCreator(
             distance_intervals=self.data_config.distance_intervals,
@@ -119,23 +119,33 @@ class CreateTrain:
         print(f'\tRaw elapsed time: {end_time - start_time}', flush=True)
         self.print_section_end()
 
-    def delete_existing_data_save_path(self):
-        """Delete the generated data directory before creating a fresh dataset."""
+    def delete_existing_fold_data(self):
+        """Delete only the current fold artefacts before recreating that fold."""
         if not self.data_save_path.exists():
             return
 
+        deleted_count = 0
         training_root = self.run_training_root.resolve()
-        resolved_target = self.data_save_path.resolve()
 
-        if resolved_target == training_root or training_root not in resolved_target.parents:
-            raise ValueError(f'Refusing to delete {resolved_target}; it is not inside run training root={training_root}.')
+        for target in self.get_fold_data_paths(include_metadata=True):
+            resolved_target = target.resolve()
 
-        print(f"	Existing data directory found at '{self.data_save_path}'. Deleting it before regeneration.", flush=True)
+            if not target.exists():
+                continue
 
-        if self.data_save_path.is_dir():
-            shutil.rmtree(self.data_save_path)
-        else:
-            self.data_save_path.unlink()
+            if resolved_target == training_root or training_root not in resolved_target.parents:
+                raise ValueError(f'Refusing to delete {resolved_target}; it is not inside run training root={training_root}.')
+
+            if target.is_dir():
+                shutil.rmtree(target)
+            else:
+                target.unlink()
+
+            deleted_count += 1
+            print(f'\tDeleted existing fold artefact before regeneration: {target}', flush=True)
+
+        if deleted_count == 0:
+            print(f'\tExisting data directory found at {self.data_save_path}, but no artefacts for fold {self.fold} were found.', flush=True)
 
     def train_model(self):
         """Validate the generated data and train the model."""
