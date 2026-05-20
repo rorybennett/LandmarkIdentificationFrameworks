@@ -88,21 +88,11 @@ class CreateTrain:
         self.run_results_path = self.build_run_results_path()
 
     def create_data(self):
-        """Create fold data for the requested task, or reuse existing generated data."""
+        """Create fold data for the requested task from a clean data directory."""
         self.print_section_start(f'Fold {self.fold} {self.task_name} data creation')
         start_time = dt.datetime.now()
 
-        self.validate_no_partial_fold_data()
-
-        if self.fold_data_exists():
-            print(f"\tExisting fold data found in '{self.data_save_path}', and it will be used instead of creating a new training set.", flush=True)
-            self.validate_training_data_point_count()
-            self.write_run_info(write_to_data_dir=True)
-            end_time = dt.datetime.now()
-            print(f'\tFold {self.fold} {self.task_name} existing data checked in {self.format_runtime(start_time, end_time)}.', flush=True)
-            print(f'\tRaw elapsed time: {end_time - start_time}', flush=True)
-            self.print_section_end()
-            return
+        self.delete_existing_data_save_path()
 
         data_creator = DataCreator(
             distance_intervals=self.data_config.distance_intervals,
@@ -128,6 +118,24 @@ class CreateTrain:
         print(f'\tFold {self.fold} {self.task_name} data created in {self.format_runtime(start_time, end_time)}.', flush=True)
         print(f'\tRaw elapsed time: {end_time - start_time}', flush=True)
         self.print_section_end()
+
+    def delete_existing_data_save_path(self):
+        """Delete the generated data directory before creating a fresh dataset."""
+        if not self.data_save_path.exists():
+            return
+
+        training_root = self.run_training_root.resolve()
+        resolved_target = self.data_save_path.resolve()
+
+        if resolved_target == training_root or training_root not in resolved_target.parents:
+            raise ValueError(f'Refusing to delete {resolved_target}; it is not inside run training root={training_root}.')
+
+        print(f"	Existing data directory found at '{self.data_save_path}'. Deleting it before regeneration.", flush=True)
+
+        if self.data_save_path.is_dir():
+            shutil.rmtree(self.data_save_path)
+        else:
+            self.data_save_path.unlink()
 
     def train_model(self):
         """Validate the generated data and train the model."""
@@ -422,7 +430,7 @@ class CreateTrain:
         if self.run_config.save_dir is None:
             raise ValueError('save_dir must be supplied when copy_files is True.')
 
-        return self.run_config.save_dir / self.task_name / self.run_config.run_name
+        return self.run_config.save_dir / self.run_config.run_name / self.task_name
 
     def build_run_training_root(self):
         """Build the run-level training-data root."""
@@ -438,7 +446,7 @@ class CreateTrain:
 
     def build_run_results_path(self):
         """Build the folder containing model checkpoints, logs, plots, and metadata."""
-        return self.run_results_root / self.task_name / self.run_config.run_name
+        return self.run_results_root / self.run_config.run_name / self.task_name
 
     def build_data_save_path(self):
         """Build the shared folder containing generated fold CSVs, images, and patches."""
