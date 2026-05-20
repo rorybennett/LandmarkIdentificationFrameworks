@@ -434,7 +434,7 @@ class CreateTrain:
 
     def build_fold_training_data_dir(self):
         """Build the shared task-level training-data directory."""
-        return self.run_training_root / format_fold_collection_name(self.data_config.num_of_folds) / self.task_name
+        return self.run_training_root / self.task_name / format_fold_collection_name(self.data_config.num_of_folds)
 
     def build_run_results_path(self):
         """Build the folder containing model checkpoints, logs, plots, and metadata."""
