@@ -57,7 +57,7 @@ python -m pip install --upgrade pip
 
 ### 2. Install PyTorch and torchvision
 
-Install a PyTorch and torchvision build that matches your CUDA or CPU
+Install a [PyTorch and torchvision](https://pytorch.org/get-started/locally/) build that matches your CUDA or CPU
 environment before installing/running the project. This project imports both
 `torch` and `torchvision`, but they are not pinned in `pyproject.toml` because
 the correct build depends on your machine.
@@ -160,7 +160,8 @@ validation.
 Each mark-list row must start with the image filename followed by coordinate
 pairs. The number of coordinate pairs must be at least `--num-points`. If a row
 contains more coordinate pairs than requested, only the first `--num-points`
-points are used. The maximum supported number of points per image is 30.
+points are used. The maximum supported number of points per image is 30. This is an
+arbitrary upper limit which can be changed manually.
 
 Sample names are taken from the image filename stem. Duplicate sample names in a
 mark-list file are rejected, and the requested landmark points must lie within
@@ -258,7 +259,8 @@ reused.
 
 ## Supported models
 
-Available network names are defined in `IPV/model_registry.py`.
+Available network names are defined in `IPV/model_registry.py`. The Quadruplet class makes use
+of four of the chosen model, one for each patch scale.
 
 | Model name | Notes |
 |---|---|
