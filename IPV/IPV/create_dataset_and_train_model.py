@@ -661,12 +661,13 @@ def parse_args():
     parser.add_argument('--lr-schedule', type=str_to_bool, required=True, help='Whether to enable the validation-accuracy-triggered learning-rate scheduler.')
     parser.add_argument('--lr-step-size', type=int, default=1, help='StepLR step size used when --lr-schedule is true.')
     parser.add_argument('--lr-gamma', type=float, default=0.1, help='StepLR multiplicative learning-rate decay factor used when --lr-schedule is true.')
-    parser.add_argument('--early-stop-patience', type=int, default=10, help='Number of validation epochs without sufficient loss improvement before early stopping.')
+    parser.add_argument('--early-stop-patience', type=int, default=5, help='Number of validation epochs without sufficient loss improvement before early stopping.')
     parser.add_argument('--early-stop-min-delta', type=float, default=0.001, help='Minimum validation-loss improvement required to reset early-stopping patience.')
     parser.add_argument('--early-stop-warmup-epochs', type=int, default=3, help='Number of initial epochs before early stopping is allowed.')
     parser.add_argument('--loss-print-samples', type=int, required=True,
                         help='Approximate number of training samples between validation/logging events. Converted internally to a batch interval.')
-    parser.add_argument('--patches-per-training-sample', type=int, required=True, help='Number of sampled patch centres created for each training image.')
+    parser.add_argument('--patches-per-training-sample', type=int, required=True,
+                        help='Total number of sampled patch centres created per training image, distributed across all landmarks and sampling variances.')
     parser.add_argument('--grid-spacing', type=int, required=True, help='Pixel stride used to create grid patch centres for validation images.')
     parser.add_argument('--run-name', type=str, default=None,
                         help='Optional custom run name. When omitted, a deterministic name is generated from the run configuration.')
@@ -890,6 +891,12 @@ def build_run_name(args, num_of_folds):
         f'bs{args.batch_size}',
         f'lr{format_number(args.learning_rate)}',
         f'ep{args.max_training_epochs}',
+        f'sched{int(args.lr_schedule)}',
+        f'lrs{args.lr_step_size}',
+        f'lrg{format_number(args.lr_gamma)}',
+        f'esp{args.early_stop_patience}',
+        f'esd{format_number(args.early_stop_min_delta)}',
+        f'esw{args.early_stop_warmup_epochs}',
         f'seed{args.random_seed}'
     ]
 

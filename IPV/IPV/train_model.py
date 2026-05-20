@@ -487,7 +487,24 @@ class TrainModel:
         channel_label = self.input_channels if self.input_channels is not None else self.quadruplet_config.input_channels
         channel_part = f'_ch{channel_label}' if channel_label is not None else ''
 
-        return f'points{self.num_of_pts}_{self.quadruplet_config.network_name}_bf{self.quadruplet_config.branch_features}_fs{self.quadruplet_config.frozen_stages}_stem{stem_label}{channel_part}_bs{self.train_config.batch_size}_lr{lr_label}_ep{self.train_config.max_training_epochs}'
+        schedule_label = int(self.train_config.lr_schedule)
+        lr_gamma_label = self.format_number(self.train_config.lr_gamma)
+        early_delta_label = self.format_number(self.train_config.early_stop_min_delta)
+
+        return (f'points{self.num_of_pts}_'
+                f'{self.quadruplet_config.network_name}_'
+                f'bf{self.quadruplet_config.branch_features}_'
+                f'fs{self.quadruplet_config.frozen_stages}_'
+                f'stem{stem_label}{channel_part}_'
+                f'bs{self.train_config.batch_size}_'
+                f'lr{lr_label}_sched{schedule_label}_'
+                f'lrs{self.train_config.lr_step_size}_'
+                f'lrg{lr_gamma_label}_'
+                f'ep{self.train_config.max_training_epochs}_'
+                f'esp{self.train_config.early_stop_patience}_'
+                f'esd{early_delta_label}_'
+                f'esw{self.train_config.early_stop_warmup_epochs}')
+
 
     def get_train_csv_path(self):
         """Return the generated training CSV path."""
