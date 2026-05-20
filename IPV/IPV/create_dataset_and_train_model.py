@@ -112,12 +112,66 @@ class CreateTrain:
         )
 
         data_creator.create(grid_spacing=self.data_config.grid_spacing, current_fold=self.fold)
+        self.update_quadruplet_input_channels_from_generated_data()
         self.write_metadata()
 
         end_time = dt.datetime.now()
         print(f'\tFold {self.fold} {self.task_name} data created in {self.format_runtime(start_time, end_time)}.', flush=True)
         print(f'\tRaw elapsed time: {end_time - start_time}', flush=True)
         self.print_section_end()
+
+    def update_quadruplet_input_channels_from_generated_data(self):
+        """Infer generated patch channels and store them in the model config."""
+        train_channels = self.infer_patch_input_channels_from_csv(self.get_phase_csv_path('Train'))
+        val_channels = self.infer_patch_input_channels_from_csv(self.get_phase_csv_path('Val'))
+
+        if train_channels != val_channels:
+            raise ValueError(f'Train patches have {train_channels} channels, but validation patches have {val_channels} channels.')
+
+        configured_channels = self.quadruplet_config.input_channels
+
+        if configured_channels is not None and int(configured_channels) != train_channels:
+            raise ValueError(f'QuadrupletConfig requested {configured_channels} input channels, but generated patches contain {train_channels}.')
+
+        self.quadruplet_config.input_channels = int(train_channels)
+        print(f'\tDetected {train_channels} input channel(s) per patch from generated data.', flush=True)
+
+    @staticmethod
+    def infer_patch_input_channels_from_csv(csv_path):
+        """Infer patch channel count from the first valid patch path in a generated CSV."""
+        from .custom_dataset import load_patch_image
+
+        csv_path = Path(csv_path)
+
+        if not csv_path.is_file():
+            raise ValueError(f'Generated data CSV does not exist: {csv_path}')
+
+        with open(csv_path, 'r', newline='', encoding='utf-8') as csv_file:
+            reader = csv.reader(csv_file)
+
+            for row_number, row in enumerate(reader, start=1):
+                if not row:
+                    continue
+
+                if len(row) < 2:
+                    raise ValueError(f'CSV row {row_number} in {csv_path} does not contain a patch path column.')
+
+                patch_path = Path(row[1])
+
+                if not patch_path.is_file():
+                    candidate_path = csv_path.parent / patch_path
+
+                    if candidate_path.is_file():
+                        patch_path = candidate_path
+
+                if not patch_path.is_file():
+                    raise FileNotFoundError(f'Patch path from row {row_number} in {csv_path} was not found: {row[1]}')
+
+                patch_image = load_patch_image(patch_path)
+
+                return int(patch_image.shape[0])
+
+        raise ValueError(f'{csv_path} is empty.')
 
     def delete_existing_fold_data(self):
         """Delete only the current fold artefacts before recreating that fold."""
@@ -153,6 +207,7 @@ class CreateTrain:
         start_time = dt.datetime.now()
 
         self.validate_training_data_point_count()
+        self.update_quadruplet_input_channels_from_generated_data()
         self.run_results_path.mkdir(exist_ok=True, parents=True)
 
         trainer = TrainModel(
@@ -166,6 +221,10 @@ class CreateTrain:
         )
 
         trainer.train()
+
+        if trainer.input_channels is not None:
+            self.quadruplet_config.input_channels = int(trainer.input_channels)
+
         self.write_run_info(write_to_data_dir=False)
 
         end_time = dt.datetime.now()
