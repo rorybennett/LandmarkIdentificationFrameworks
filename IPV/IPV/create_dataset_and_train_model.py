@@ -422,7 +422,7 @@ class CreateTrain:
         if self.run_config.save_dir is None:
             raise ValueError('save_dir must be supplied when copy_files is True.')
 
-        return self.run_config.save_dir / self.run_config.run_name / self.task_name
+        return self.run_config.save_dir / self.task_name / self.run_config.run_name
 
     def build_run_training_root(self):
         """Build the run-level training-data root."""
@@ -438,7 +438,7 @@ class CreateTrain:
 
     def build_run_results_path(self):
         """Build the folder containing model checkpoints, logs, plots, and metadata."""
-        return self.run_results_root / self.run_config.run_name / self.task_name
+        return self.run_results_root / self.task_name / self.run_config.run_name
 
     def build_data_save_path(self):
         """Build the shared folder containing generated fold CSVs, images, and patches."""
