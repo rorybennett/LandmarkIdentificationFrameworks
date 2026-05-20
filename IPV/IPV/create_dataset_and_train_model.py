@@ -629,43 +629,53 @@ def normalise_save_dir(args):
 
 def parse_args():
     """Parse terminal arguments."""
-    parser = argparse.ArgumentParser(description='Create train/validation fold data, train a model, copy selected outputs, and delete generated training data.')
+    parser = argparse.ArgumentParser(description='Create train/validation fold data, train a model, copy selected outputs, and delete generated training data.',
+                                     formatter_class=argparse.ArgumentDefaultsHelpFormatter)
 
-    parser.add_argument('fold', type=int)
-    parser.add_argument('task_name', type=validate_task_name)
-    parser.add_argument('create_data', type=str_to_bool)
-    parser.add_argument('train_model', type=str_to_bool)
-    parser.add_argument('copy_files', type=str_to_bool)
-    parser.add_argument('delete_files', type=str_to_bool)
+    parser.add_argument('fold', type=int, metavar='FOLD', help='Fold number to run. Must match an available train_fN.txt file in --fold-lists-path.')
+    parser.add_argument('task_name', type=validate_task_name, metavar='TASK_NAME',
+                        help='Task name used in output paths and metadata, for example transverse or sagittal for prostate imaging.')
+    parser.add_argument('create_data', type=str_to_bool, metavar='CREATE_DATA',
+                        help='Whether to create patch data before training. Accepted values: true/false, yes/no, 1/0.')
+    parser.add_argument('train_model', type=str_to_bool, metavar='TRAIN_MODEL', help='Whether to train the model using the generated or existing fold data.')
+    parser.add_argument('copy_files', type=str_to_bool, metavar='COPY_FILES', help='Whether to copy selected result files to --save-dir after training.')
+    parser.add_argument('delete_files', type=str_to_bool, metavar='DELETE_FILES',
+                        help='Whether to delete generated training-data artefacts for this fold after completion.')
 
-    parser.add_argument('--run-dir', type=Path, required=True)
-    parser.add_argument('--save-dir', type=optional_path, default=None)
-    parser.add_argument('--num-points', type=validate_num_points, required=True)
-    parser.add_argument('--fold-lists-path', type=Path, required=True)
-    parser.add_argument('--mark-list-file', type=Path, required=True)
-    parser.add_argument('--image-data-dir', type=Path, required=True)
-    parser.add_argument('--data-creation-workers', type=int, required=True)
-    parser.add_argument('--train-workers', type=int, required=True)
-    parser.add_argument('--random-seed', type=int, required=True)
-    parser.add_argument('--keep-part-csvs', type=str_to_bool, required=True)
-    parser.add_argument('--batch-size', type=int, required=True)
-    parser.add_argument('--max-training-epochs', type=int, required=True)
-    parser.add_argument('--learning-rate', type=float, required=True)
-    parser.add_argument('--lr-schedule', type=str_to_bool, required=True)
-    parser.add_argument('--lr-step-size', type=int, default=1)
-    parser.add_argument('--lr-gamma', type=float, default=0.1)
-    parser.add_argument('--early-stop-patience', type=int, default=5)
-    parser.add_argument('--early-stop-min-delta', type=float, default=0.001)
-    parser.add_argument('--early-stop-warmup-epochs', type=int, default=3)
-    parser.add_argument('--loss-print-samples', type=int, required=True)
-    parser.add_argument('--patches-per-training-sample', type=int, required=True)
-    parser.add_argument('--grid-spacing', type=int, required=True)
-    parser.add_argument('--run-name', type=str, default=None)
+    parser.add_argument('--run-dir', type=Path, required=True, help='Root directory used for generated training data and model results.')
+    parser.add_argument('--save-dir', type=optional_path, default=None,
+                        help='Optional external directory for copied result files. Required when COPY_FILES is true and ignored when COPY_FILES is false.')
+    parser.add_argument('--num-points', type=validate_num_points, required=True,
+                        help=f'Number of ordered landmark points per image. Must be between {MIN_POINTS_PER_IMAGE} and {MAX_POINTS_PER_IMAGE}.')
+    parser.add_argument('--fold-lists-path', type=Path, required=True, help='Directory containing train_fN.txt files and val.txt.')
+    parser.add_argument('--mark-list-file', type=Path, required=True, help='Text file containing image filenames followed by landmark coordinate pairs.')
+    parser.add_argument('--image-data-dir', type=Path, required=True, help='Directory containing the source image files referenced by the mark-list file.')
+    parser.add_argument('--data-creation-workers', type=int, required=True, help='Number of worker processes used during patch/data creation.')
+    parser.add_argument('--train-workers', type=int, required=True, help='Number of PyTorch DataLoader workers used during training. Use 0 for single-process loading.')
+    parser.add_argument('--random-seed', type=int, required=True, help='Random seed used for deterministic training-centre sampling.')
+    parser.add_argument('--keep-part-csvs', type=str_to_bool, required=True,
+                        help='Whether to keep temporary per-sample CSV part files after merging. Accepted values: true/false, yes/no, 1/0.')
+    parser.add_argument('--batch-size', type=int, required=True, help='Training batch size.')
+    parser.add_argument('--max-training-epochs', type=int, required=True, help='Maximum number of training epochs.')
+    parser.add_argument('--learning-rate', type=float, required=True, help='Initial SGD learning rate.')
+    parser.add_argument('--lr-schedule', type=str_to_bool, required=True, help='Whether to enable the validation-accuracy-triggered learning-rate scheduler.')
+    parser.add_argument('--lr-step-size', type=int, default=1, help='StepLR step size used when --lr-schedule is true.')
+    parser.add_argument('--lr-gamma', type=float, default=0.1, help='StepLR multiplicative learning-rate decay factor used when --lr-schedule is true.')
+    parser.add_argument('--early-stop-patience', type=int, default=10, help='Number of validation epochs without sufficient loss improvement before early stopping.')
+    parser.add_argument('--early-stop-min-delta', type=float, default=0.001, help='Minimum validation-loss improvement required to reset early-stopping patience.')
+    parser.add_argument('--early-stop-warmup-epochs', type=int, default=3, help='Number of initial epochs before early stopping is allowed.')
+    parser.add_argument('--loss-print-samples', type=int, required=True,
+                        help='Approximate number of training samples between validation/logging events. Converted internally to a batch interval.')
+    parser.add_argument('--patches-per-training-sample', type=int, required=True, help='Number of sampled patch centres created for each training image.')
+    parser.add_argument('--grid-spacing', type=int, required=True, help='Pixel stride used to create grid patch centres for validation images.')
+    parser.add_argument('--run-name', type=str, default=None,
+                        help='Optional custom run name. When omitted, a deterministic name is generated from the run configuration.')
 
-    parser.add_argument('--network-name', type=str, choices=get_available_model_names(), required=True)
-    parser.add_argument('--branch-features', type=int, required=True)
-    parser.add_argument('--frozen-stages', type=int, required=True)
-    parser.add_argument('--small-input-stem', type=str_to_bool, required=True)
+    parser.add_argument('--network-name', type=str, choices=get_available_model_names(), required=True, help='Model backbone to train.')
+    parser.add_argument('--branch-features', type=int, required=True, help='Number of features output by each quadruplet branch before concatenation.')
+    parser.add_argument('--frozen-stages', type=int, required=True,
+                        help='Number of pretrained ResNet stages to freeze. Use 0 for untrained networks, small_cnn, and non-conventional ResNet networks.')
+    parser.add_argument('--small-input-stem', type=str_to_bool, required=True, help='Whether to use the small-input ResNet stem. Use false for small_cnn.')
 
     return parser.parse_args()
 
