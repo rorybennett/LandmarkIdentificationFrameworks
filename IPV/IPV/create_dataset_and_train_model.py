@@ -335,6 +335,9 @@ class CreateTrain:
         if self.run_config.create_data:
             self.create_data()
 
+        if self.run_config.train_model and not self.run_config.create_data:
+            self.validate_no_partial_fold_data()
+
         if self.run_config.train_model:
             self.train_model()
 
