@@ -378,12 +378,15 @@ BRANCH_FEATURES=128
 FROZEN_STAGES=0
 SMALL_INPUT_STEM="false"
 
+RUN_NAME="${NETWORK_NAME}_fs${FROZEN_STAGES}_stem${SMALL_INPUT_STEM}_ppts${PATCHES_PER_TRAINING_SAMPLE}_gs${GRID_SPACING}_${}"
+
 cd "$PROJECT_DIR"
 
 python -m IPV.create_dataset_and_train_model \
     "$FOLD" "$TASK_NAME" "$CREATE_DATA" "$TRAIN_MODEL" "$COPY_FILES" "$DELETE_FILES" \
     --run-dir "$RUN_DIR" \
     --save-dir "$SAVE_DIR" \
+    --run-name "$RUN_NAME" \
     --num-points "$NUM_POINTS" \
     --fold-lists-path "$FOLD_LISTS_DIR" \
     --mark-list-file "$MARK_LIST_FILE" \
@@ -459,11 +462,14 @@ $BRANCH_FEATURES = 128
 $FROZEN_STAGES = 0
 $SMALL_INPUT_STEM = "false"
 
+$RUN_NAME = "${NETWORK_NAME}_fs${FROZEN_STAGES}_stem${SMALL_INPUT_STEM}_ppts${PATCHES_PER_TRAINING_SAMPLE}_gs${GRID_SPACING}"
+
 Set-Location $PROJECT_DIR
 
 ipv-train $FOLD $TASK_NAME $CREATE_DATA $TRAIN_MODEL $COPY_FILES $DELETE_FILES `
     --run-dir $RUN_DIR `
     --save-dir $SAVE_DIR `
+    --run-name $RUN_NAME `
     --num-points $NUM_POINTS `
     --fold-lists-path $FOLD_LISTS_DIR `
     --mark-list-file $MARK_LIST_FILE `
