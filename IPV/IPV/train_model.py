@@ -3,6 +3,7 @@ import datetime as dt
 import json
 from dataclasses import asdict, dataclass
 from pathlib import Path
+import ast
 
 import matplotlib.pyplot as plt
 import torch
@@ -440,6 +441,7 @@ class TrainModel:
             'model': self.build_model_metadata(),
             'input': self.build_input_metadata(),
             'output': self.build_output_metadata(),
+            'inference': self.build_inference_metadata(),
             'training': {
                 'fold': self.fold,
                 'data_save_path': str(self.train_path),
@@ -465,6 +467,137 @@ class TrainModel:
         plt.ylabel('Loss / Accuracy')
         plt.savefig(plot_path)
 
+    def build_inference_metadata(self):
+        """Build patch-generation and voting metadata needed for later landmark inference."""
+        data_metadata = self.read_data_creation_metadata()
+        sub_patch_scales = self.require_metadata_value(data_metadata, 'sub_patch_scales')
+        grid_spacing = self.require_metadata_value(data_metadata, 'grid_spacing')
+        patch_size = int(data_metadata.get('patch_size', sub_patch_scales[0]))
+
+        return {
+            'sub_patch_scales': [int(scale) for scale in sub_patch_scales],
+            'patch_size': patch_size,
+            'grid_spacing': int(grid_spacing),
+            'num_sub_patches': int(self.quadruplet_config.num_sub_patches),
+            'input_channels': int(self.input_channels),
+            'image_value_range': 'float32_0_to_1',
+            'patch_stack_shape': '[batch, num_sub_patches, channels, patch_size, patch_size]',
+            'patch_channel_order': 'channels_first',
+            'patch_resize': {
+                'library': 'skimage.transform.resize',
+                'preserve_range': True,
+                'anti_aliasing': True
+            },
+            'centre_grid': {
+                'x_start': 0,
+                'y_start': 0,
+                'x_step': int(grid_spacing),
+                'y_step': int(grid_spacing),
+                'loop_order': 'x_outer_y_inner'
+            },
+            'vote_accumulation': {
+                'distance_interval_source': 'output.distance_intervals',
+                'angle_interval_source': 'output.angle_intervals',
+                'prediction_mode': 'top_1_softmax_class',
+                'default_probability_weighting': True,
+                'default_smoothing_sigma': 7
+            }
+        }
+
+    def read_data_creation_metadata(self):
+        """Read data-creation metadata from generated fold metadata files."""
+        data_info_path = self.train_path / f'data_info_f{self.fold}.csv'
+
+        if data_info_path.is_file():
+            return self.read_data_info_csv(data_info_path)
+
+        run_info_metadata = self.read_run_info_metadata()
+
+        if run_info_metadata:
+            return run_info_metadata
+
+        raise ValueError(
+            f'Cannot save inference metadata because no data metadata was found for fold {self.fold}. '
+            f'Expected {data_info_path} or run_info_*_f{self.fold}.json in {self.train_path}.'
+        )
+
+    def read_data_info_csv(self, data_info_path):
+        """Read compact data_info CSV metadata."""
+        with open(data_info_path, 'r', newline='', encoding='utf-8') as data_info_file:
+            reader = csv.reader(data_info_file)
+            rows = list(reader)
+
+        if len(rows) < 2:
+            raise ValueError(f'Data metadata file is incomplete: {data_info_path}')
+
+        raw_metadata = dict(zip(rows[0], rows[1]))
+
+        return {
+            'distance_intervals': self.parse_metadata_value(raw_metadata.get('DISTANCE_INTERVALS')),
+            'angle_intervals': self.parse_metadata_value(raw_metadata.get('ANGLE_INTERVALS')),
+            'task_name': raw_metadata.get('TASK_NAME'),
+            'num_of_points': int(raw_metadata.get('NUM_OF_POINTS')),
+            'sub_patch_scales': self.parse_metadata_value(raw_metadata.get('SUB_PATCH_SCALES')),
+            'patch_size': int(raw_metadata.get('PATCH_SIZE')),
+            'patches_per_training_sample': int(raw_metadata.get('PATCHES_PER_TRAINING_SAMPLE')),
+            'grid_spacing': int(raw_metadata.get('GRID_DATA_STEP')),
+            'sampling_variances': self.parse_metadata_value(raw_metadata.get('SAMPLING_VARIANCES')),
+            'random_seed': int(raw_metadata.get('RANDOM_SEED')),
+            'mark_list_file': raw_metadata.get('MARK_LIST_FILE'),
+            'image_data_dir': raw_metadata.get('IMAGE_DATA_DIR')
+        }
+
+    def read_run_info_metadata(self):
+        """Read full run_info JSON metadata when compact data_info CSV is unavailable."""
+        metadata_paths = sorted(self.train_path.glob(f'run_info_*_f{self.fold}.json'))
+
+        if not metadata_paths:
+            return None
+
+        with open(metadata_paths[0], 'r', encoding='utf-8') as metadata_file:
+            run_info = json.load(metadata_file)
+
+        data_config = run_info.get('data_config', {})
+
+        if not data_config:
+            return None
+
+        return {
+            'distance_intervals': data_config.get('distance_intervals'),
+            'angle_intervals': data_config.get('angle_intervals'),
+            'task_name': run_info.get('task_name'),
+            'num_of_points': run_info.get('num_of_points'),
+            'sub_patch_scales': data_config.get('sub_patch_scales'),
+            'patch_size': data_config.get('sub_patch_scales', [None])[0],
+            'patches_per_training_sample': data_config.get('patches_per_training_sample'),
+            'grid_spacing': data_config.get('grid_spacing'),
+            'sampling_variances': data_config.get('sampling_variances'),
+            'random_seed': data_config.get('random_seed'),
+            'mark_list_file': str(data_config.get('mark_list_file')),
+            'image_data_dir': str(data_config.get('image_data_dir'))
+        }
+
+    @staticmethod
+    def parse_metadata_value(value):
+        """Parse a value written into compact CSV metadata."""
+        if value is None:
+            return None
+
+        try:
+            return ast.literal_eval(value)
+        except (ValueError, SyntaxError):
+            return value
+
+    @staticmethod
+    def require_metadata_value(metadata, key):
+        """Return required metadata or raise a clear error."""
+        value = metadata.get(key)
+
+        if value is None:
+            raise ValueError(f'Cannot save checkpoint inference metadata because {key} is missing from data metadata.')
+
+        return value
+
     def write_checkpoint_summary(self, best_epoch, last_epoch, best_val_loss, last_val_loss, best_checkpoint_path, last_checkpoint_path):
         """Write checkpoint paths and epoch metadata."""
         summary_path = self.get_checkpoint_summary_path()
@@ -477,6 +610,7 @@ class TrainModel:
             'tasks_per_point': self.tasks_per_point,
             'expected_label_count': self.expected_label_count,
             'input_channels': self.input_channels,
+            'inference': self.build_inference_metadata(),
             'best_epoch': best_epoch,
             'last_epoch': last_epoch,
             'best_val_loss': best_val_loss,
