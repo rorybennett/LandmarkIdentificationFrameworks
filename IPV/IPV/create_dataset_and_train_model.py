@@ -353,10 +353,6 @@ class CreateTrain:
         print(f'\tRaw total elapsed time: {total_end_time - total_start_time}', flush=True)
         self.print_section_end()
 
-    def fold_data_exists(self):
-        """Return True when all required fold-specific generated data exists."""
-        return all(path.exists() for path in self.get_fold_data_paths(include_metadata=False))
-
     def validate_no_partial_fold_data(self):
         """Prevent accidental reuse of partially generated fold data."""
         expected_paths = self.get_fold_data_paths(include_metadata=False)

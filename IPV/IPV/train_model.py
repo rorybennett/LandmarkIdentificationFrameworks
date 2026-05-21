@@ -58,7 +58,6 @@ class TrainModel:
         self.validate_tasks_classes_structure(self.tasks_classes)
         self.tasks_per_point = len(self.tasks_classes)
         self.expected_label_count = self.num_of_pts * self.tasks_per_point
-        self.num_of_classes = [len(task_classes) for _ in range(self.num_of_pts) for task_classes in self.tasks_classes]
         self.input_channels = None
 
     def train(self):
@@ -201,11 +200,13 @@ class TrainModel:
                     raise ValueError(f'{phase} CSV row {row_number} in {csv_path} has {label_count} label columns; expected {detected_label_count}.')
 
                 if label_count % self.tasks_per_point != 0:
-                    raise ValueError(f'{phase} CSV row {row_number} in {csv_path} has {label_count} label columns, which is not divisible by {self.tasks_per_point} tasks per point.')
+                    raise ValueError(
+                        f'{phase} CSV row {row_number} in {csv_path} has {label_count} label columns, which is not divisible by {self.tasks_per_point} tasks per point.')
 
                 if label_count != self.expected_label_count:
                     detected_points = label_count // self.tasks_per_point
-                    raise ValueError(f'{phase} CSV row {row_number} in {csv_path} has {detected_points} points and {label_count} labels; model expects {self.num_of_pts} points and {self.expected_label_count} labels.')
+                    raise ValueError(
+                        f'{phase} CSV row {row_number} in {csv_path} has {detected_points} points and {label_count} labels; model expects {self.num_of_pts} points and {self.expected_label_count} labels.')
 
         if row_count == 0 or detected_label_count is None:
             raise ValueError(f'{phase} CSV is empty: {csv_path}')
@@ -242,8 +243,10 @@ class TrainModel:
         train_dataset = CustomDataset(train_csv_path, num_sub_patches=self.quadruplet_config.num_sub_patches, transform=ToTensor())
         val_dataset = CustomDataset(val_csv_path, num_sub_patches=self.quadruplet_config.num_sub_patches, transform=ToTensor())
 
-        train_loader = DataLoader(train_dataset, batch_size=self.train_config.batch_size, shuffle=True, num_workers=self.train_config.num_workers, pin_memory=self.device.type == 'cuda')
-        val_loader = DataLoader(val_dataset, batch_size=self.train_config.batch_size, shuffle=False, num_workers=self.train_config.num_workers, pin_memory=self.device.type == 'cuda')
+        train_loader = DataLoader(train_dataset, batch_size=self.train_config.batch_size, shuffle=True, num_workers=self.train_config.num_workers,
+                                  pin_memory=self.device.type == 'cuda')
+        val_loader = DataLoader(val_dataset, batch_size=self.train_config.batch_size, shuffle=False, num_workers=self.train_config.num_workers,
+                                pin_memory=self.device.type == 'cuda')
 
         return train_loader, val_loader
 
@@ -396,13 +399,6 @@ class TrainModel:
 
         return loss / len(outputs)
 
-    def calculate_accuracy(self, outputs, labels):
-        """Calculate classification accuracy across all output heads."""
-        correct = self.count_correct(outputs, labels)
-        total = labels.shape[0] * len(outputs)
-
-        return correct / max(total, 1)
-
     def count_correct(self, outputs, labels):
         """Count correct predictions across all output heads."""
         correct = 0
@@ -504,7 +500,6 @@ class TrainModel:
                 f'esp{self.train_config.early_stop_patience}_'
                 f'esd{early_delta_label}_'
                 f'esw{self.train_config.early_stop_warmup_epochs}')
-
 
     def get_train_csv_path(self):
         """Return the generated training CSV path."""

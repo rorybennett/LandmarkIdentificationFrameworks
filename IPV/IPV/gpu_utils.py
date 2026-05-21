@@ -105,10 +105,3 @@ def concat_patches(patches):
     bottom_row = np.concatenate((patches[2], patches[3]), axis=1)
 
     return np.concatenate((top_row, bottom_row), axis=0)
-
-
-checkCurrentLabels = check_current_labels
-checkLabels = check_labels
-getAngle = get_angle
-createPatch = create_patch
-concat = concat_patches
