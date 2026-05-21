@@ -1,7 +1,7 @@
 import csv
 import datetime as dt
 import json
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -59,6 +59,7 @@ class TrainModel:
         self.tasks_per_point = len(self.tasks_classes)
         self.expected_label_count = self.num_of_pts * self.tasks_per_point
         self.input_channels = None
+        self.num_of_classes = [len(task_classes) for _ in range(self.num_of_pts) for task_classes in self.tasks_classes]
 
     def train(self):
         """Run training for one fold."""
@@ -101,7 +102,7 @@ class TrainModel:
                 previous_val_accuracy = epoch_result['val_accuracy']
                 last_epoch = epoch
                 last_val_loss = epoch_result['val_loss']
-                last_checkpoint_path = self.save_checkpoint(model=model, checkpoint_type='last')
+                last_checkpoint_path = self.save_checkpoint(model=model, checkpoint_type='last', epoch=epoch, metrics=epoch_result)
 
                 previous_best_val_loss = best_val_loss
                 is_new_best = epoch_result['val_loss'] < best_val_loss
@@ -110,7 +111,7 @@ class TrainModel:
                 if is_new_best:
                     best_epoch = epoch
                     best_val_loss = epoch_result['val_loss']
-                    best_checkpoint_path = self.save_checkpoint(model=model, checkpoint_type='best')
+                    best_checkpoint_path = self.save_checkpoint(model=model, checkpoint_type='best', epoch=epoch, metrics=epoch_result)
                     print(f"\tNew best model saved from epoch {epoch} with val_loss={best_val_loss:.6f}", flush=True)
 
                 self.save_history_plot(history)
@@ -426,12 +427,29 @@ class TrainModel:
         history['val_loss'].append(val_loss)
         history['val_accuracy'].append(val_accuracy)
 
-    def save_checkpoint(self, model, checkpoint_type):
-        """Save model weights to either the latest or best checkpoint path."""
+    def save_checkpoint(self, model, checkpoint_type, epoch=None, metrics=None):
+        """Save model weights and all metadata needed for later inference."""
         checkpoint_path = self.get_checkpoint_path(checkpoint_type)
-        torch.save(model.state_dict(), checkpoint_path)
-
+        checkpoint = {
+            'format_version': 1,
+            'created_at': dt.datetime.now().isoformat(),
+            'checkpoint_type': checkpoint_type,
+            'epoch': epoch,
+            'metrics': metrics or {},
+            'state_dict': model.state_dict(),
+            'model': self.build_model_metadata(),
+            'input': self.build_input_metadata(),
+            'output': self.build_output_metadata(),
+            'training': {
+                'fold': self.fold,
+                'data_save_path': str(self.train_path),
+                'output_save_path': str(self.output_path),
+                'train_config': asdict(self.train_config)
+            }
+        }
+        torch.save(checkpoint, checkpoint_path)
         return checkpoint_path
+
 
     def save_history_plot(self, history):
         """Save a loss and accuracy plot."""
@@ -474,6 +492,61 @@ class TrainModel:
     def get_current_lr(optimiser):
         """Return the current optimiser learning rate."""
         return optimiser.param_groups[0]['lr']
+
+    def build_model_metadata(self):
+        """Build constructor metadata for the Quadruplet model."""
+        return {
+            'model_module': 'IPV.quadruplet',
+            'model_class': 'Quadruplet',
+            'init_args': {
+                'num_of_pts': self.num_of_pts,
+                'tasks_classes': self.serialise_tasks_classes(self.tasks_classes),
+                'network_name': self.quadruplet_config.network_name,
+                'branch_features': self.quadruplet_config.branch_features,
+                'frozen_stages': self.quadruplet_config.frozen_stages,
+                'small_input_stem': self.quadruplet_config.small_input_stem,
+                'input_channels': self.input_channels
+            }
+        }
+
+    def build_input_metadata(self):
+        """Build input-shape and patch-stack metadata."""
+        return {
+            'num_sub_patches': self.quadruplet_config.num_sub_patches,
+            'input_channels': self.input_channels,
+            'tensor_shape': '[batch, 4, channels, height, width]',
+            'channel_order': 'channels_first',
+            'value_range': 'float32_0_to_1'
+        }
+
+    def build_output_metadata(self):
+        """Build output-head metadata for interpreting distance and angle classes."""
+        head_order = []
+
+        for point_index in range(1, self.num_of_pts + 1):
+            head_order.append(
+                {'head_index': len(head_order), 'point_index': point_index, 'task': 'distance', 'class_intervals': self.serialise_intervals(self.tasks_classes[0])})
+            head_order.append(
+                {'head_index': len(head_order), 'point_index': point_index, 'task': 'angle', 'class_intervals': self.serialise_intervals(self.tasks_classes[1])})
+
+        return {
+            'task_names': ['distance', 'angle'],
+            'head_order': head_order,
+            'num_output_heads': self.expected_label_count,
+            'num_classes_per_head': self.num_of_classes,
+            'distance_intervals': self.serialise_intervals(self.tasks_classes[0]),
+            'angle_intervals': self.serialise_intervals(self.tasks_classes[1])
+        }
+
+    @staticmethod
+    def serialise_tasks_classes(tasks_classes):
+        """Convert interval tuples to lists for stable checkpoint metadata."""
+        return [TrainModel.serialise_intervals(task_classes) for task_classes in tasks_classes]
+
+    @staticmethod
+    def serialise_intervals(intervals):
+        """Convert interval pairs into plain serialisable lists."""
+        return [[float(lower), float(upper)] for lower, upper in intervals]
 
     def get_run_name(self):
         """Build a consistent name for logs, checkpoints, and plots."""
@@ -540,3 +613,21 @@ class TrainModel:
             'val_loss': [],
             'val_accuracy': []
         }
+
+def load_model_from_checkpoint(checkpoint_path, device=None):
+    """Load a Quadruplet model from a self-describing checkpoint."""
+    from .quadruplet import Quadruplet
+
+    device = device or torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    checkpoint = torch.load(checkpoint_path, map_location=device)
+
+    if 'state_dict' not in checkpoint:
+        raise ValueError('This checkpoint only contains a state_dict. Recreate the model manually or convert the checkpoint.')
+
+    model_args = checkpoint['model']['init_args']
+    model = Quadruplet(**model_args)
+    model.load_state_dict(checkpoint['state_dict'])
+    model.to(device)
+    model.eval()
+
+    return model, checkpoint
