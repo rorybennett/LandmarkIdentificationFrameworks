@@ -14,7 +14,7 @@ from skimage import io
 from skimage.transform import resize
 from skimage.util import img_as_float32, img_as_ubyte
 
-from .gpu_utils import createPatch, getAngle, get_label
+from .gpu_utils import create_patch, get_angle, get_label
 
 TRAIN_LIST_PATTERN = re.compile(r'^train_f(\d+)\.txt$')
 
@@ -165,7 +165,7 @@ class PatchCreator:
         patches = []
 
         for scale in self.sub_patch_scales:
-            patch = createPatch(self.image, x, y, scale)
+            patch = create_patch(self.image, x, y, scale)
             patch = resize_patch(patch, output_size=self.patch_size)
             patches.append(patch)
 
@@ -245,7 +245,7 @@ def create_labels_for_point(points, x, y, distance_intervals, angle_intervals, s
 
     for point in points:
         pixel_distance = dist.euclidean(point, (x, y))
-        angle = getAngle(point, (x, y))
+        angle = get_angle(point, (x, y))
 
         distance_class = get_checked_label(value=pixel_distance, intervals=distance_intervals, label_name='distance', sample_name=sample_name, point=point, x=x, y=y)
 
