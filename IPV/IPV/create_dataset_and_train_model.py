@@ -41,7 +41,7 @@ class DataCreationConfig:
     num_of_folds: int
     sub_patch_scales: list
     patches_per_training_sample: int
-    grid_spacing: int
+    val_grid_spacing: int
     fold_lists_path: Path
     mark_list_file: Path
     image_data_dir: Path
@@ -111,7 +111,7 @@ class CreateTrain:
             keep_part_csvs=self.data_config.keep_part_csvs
         )
 
-        data_creator.create(grid_spacing=self.data_config.grid_spacing, current_fold=self.fold)
+        data_creator.create(val_grid_spacing=self.data_config.val_grid_spacing, current_fold=self.fold)
         self.update_quadruplet_input_channels_from_generated_data()
         self.write_metadata()
 
@@ -441,7 +441,7 @@ class CreateTrain:
                 self.data_config.sub_patch_scales,
                 self.data_config.sub_patch_scales[0],
                 self.data_config.patches_per_training_sample,
-                self.data_config.grid_spacing,
+                self.data_config.val_grid_spacing,
                 self.data_config.sampling_variances,
                 self.data_config.num_workers,
                 self.data_config.random_seed,
@@ -539,7 +539,7 @@ class CreateTrain:
         print(f'\t\tNumber of folds: {self.data_config.num_of_folds}', flush=True)
         print(f'\t\tSub-patch scales: {self.data_config.sub_patch_scales}', flush=True)
         print(f'\t\tPatches per training sample: {self.data_config.patches_per_training_sample}', flush=True)
-        print(f'\t\tGrid data step: {self.data_config.grid_spacing}', flush=True)
+        print(f'\t\tGrid data step: {self.data_config.val_grid_spacing}', flush=True)
         print(f'\t\tSampling variances: {self.data_config.sampling_variances}', flush=True)
         print(f'\t\tData workers: {self.data_config.num_workers}', flush=True)
         print(f'\t\tTraining workers: {self.train_config.num_workers}', flush=True)
@@ -664,7 +664,7 @@ def parse_args():
                         help='Approximate number of training samples between validation/logging events. Converted internally to a batch interval.')
     parser.add_argument('--patches-per-training-sample', type=int, required=True,
                         help='Total number of sampled patch centres created per training image, distributed across all landmarks and sampling variances.')
-    parser.add_argument('--grid-spacing', type=int, required=True, help='Pixel stride used to create grid patch centres for validation images.')
+    parser.add_argument('--val-grid-spacing', type=int, required=True, help='Pixel stride used to create grid patch centres for validation images.')
     parser.add_argument('--run-name', type=str, default=None,
                         help='Optional custom run name. When omitted, a deterministic name is generated from the run configuration.')
 
@@ -720,8 +720,8 @@ def validate_args(args, num_of_folds):
     if args.patches_per_training_sample < 1:
         raise ValueError('--patches-per-training-sample must be at least 1.')
 
-    if args.grid_spacing < 1:
-        raise ValueError('--grid-spacing must be at least 1.')
+    if args.val_grid_spacing < 1:
+        raise ValueError('--val-grid-spacing must be at least 1.')
 
     if args.branch_features < 1:
         raise ValueError('--branch-features must be at least 1.')
@@ -879,7 +879,7 @@ def build_run_name(args, num_of_folds):
         f'sv{format_scales(pms.sampling_variances)}',
         f'points{args.num_points}',
         f'ppts{args.patches_per_training_sample}',
-        f'gs{args.grid_spacing}',
+        f'gs{args.val_grid_spacing}',
         args.network_name,
         f'bf{args.branch_features}',
         f'fs{args.frozen_stages}',
@@ -945,7 +945,7 @@ def build_configs(args):
         num_of_folds=num_of_folds,
         sub_patch_scales=pms.sub_patch_scales,
         patches_per_training_sample=args.patches_per_training_sample,
-        grid_spacing=args.grid_spacing,
+        val_grid_spacing=args.val_grid_spacing,
         fold_lists_path=args.fold_lists_path,
         mark_list_file=args.mark_list_file,
         image_data_dir=args.image_data_dir,
