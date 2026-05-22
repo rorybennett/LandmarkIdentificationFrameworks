@@ -1,9 +1,9 @@
+import ast
 import csv
 import datetime as dt
 import json
 from dataclasses import asdict, dataclass
 from pathlib import Path
-import ast
 
 import matplotlib.pyplot as plt
 import torch
@@ -17,6 +17,7 @@ from .custom_dataset import CustomDataset, ToTensor
 MIN_POINTS_PER_IMAGE = 1
 MAX_POINTS_PER_IMAGE = 30
 CSV_METADATA_COLUMNS = 5
+CHECKPOINT_FORMAT_VERSION = 1
 
 
 @dataclass
@@ -429,29 +430,17 @@ class TrainModel:
         history['val_accuracy'].append(val_accuracy)
 
     def save_checkpoint(self, model, checkpoint_type, epoch=None, metrics=None):
-        """Save model weights and all metadata needed for later inference."""
+        """Save model weights with one consolidated metadata block."""
         checkpoint_path = self.get_checkpoint_path(checkpoint_type)
+        created_at = dt.datetime.now().isoformat()
         checkpoint = {
-            'format_version': 1,
-            'created_at': dt.datetime.now().isoformat(),
-            'checkpoint_type': checkpoint_type,
-            'epoch': epoch,
-            'metrics': metrics or {},
+            'format_version': CHECKPOINT_FORMAT_VERSION,
+            'created_at': created_at,
             'state_dict': model.state_dict(),
-            'model': self.build_model_metadata(),
-            'input': self.build_input_metadata(),
-            'output': self.build_output_metadata(),
-            'inference': self.build_inference_metadata(),
-            'training': {
-                'fold': self.fold,
-                'data_save_path': str(self.train_path),
-                'output_save_path': str(self.output_path),
-                'train_config': asdict(self.train_config)
-            }
+            'metadata': self.build_checkpoint_metadata(checkpoint_type=checkpoint_type, epoch=epoch, metrics=metrics or {}, created_at=created_at)
         }
         torch.save(checkpoint, checkpoint_path)
         return checkpoint_path
-
 
     def save_history_plot(self, history):
         """Save a loss and accuracy plot."""
@@ -467,41 +456,124 @@ class TrainModel:
         plt.ylabel('Loss / Accuracy')
         plt.savefig(plot_path)
 
-    def build_inference_metadata(self):
-        """Build patch-generation and voting metadata needed for later landmark inference."""
+    def build_checkpoint_metadata(self, checkpoint_type=None, epoch=None, metrics=None, created_at=None):
+        """Build the single metadata structure saved in every checkpoint."""
         data_metadata = self.read_data_creation_metadata()
+
+        return {
+            'schema': 'ipv_checkpoint_metadata',
+            'schema_version': CHECKPOINT_FORMAT_VERSION,
+            'created_at': created_at or dt.datetime.now().isoformat(),
+            'checkpoint': {
+                'type': checkpoint_type,
+                'epoch': epoch,
+                'metrics': metrics or {}
+            },
+            'task': self.build_task_metadata(data_metadata),
+            'model': self.build_model_metadata(),
+            'data': self.build_data_metadata(data_metadata),
+            'preprocessing': self.build_preprocessing_metadata(data_metadata),
+            'inference': self.build_inference_metadata(data_metadata),
+            'training': self.build_training_metadata()
+        }
+
+    def build_task_metadata(self, data_metadata):
+        """Build task and output-head metadata without repeating interval definitions per head."""
+        task_names = self.get_task_names()
+        output_heads = []
+
+        for point_index in range(1, self.num_of_pts + 1):
+            for task_name in task_names:
+                output_heads.append({'head_index': len(output_heads), 'point_index': point_index, 'task': task_name})
+
+        return {
+            'name': data_metadata.get('task_name'),
+            'num_points': int(self.num_of_pts),
+            'task_names': task_names,
+            'output_heads': output_heads,
+            'num_output_heads': int(self.expected_label_count),
+            'num_classes_per_head': [int(value) for value in self.num_of_classes]
+        }
+
+    def build_model_metadata(self):
+        """Build constructor metadata for the Quadruplet model."""
+        return {
+            'module': 'IPV.quadruplet',
+            'class_name': 'Quadruplet',
+            'init_args': self.build_model_init_args()
+        }
+
+    def build_model_init_args(self):
+        """Return the exact arguments needed to rebuild the model."""
+        return {
+            'num_of_pts': int(self.num_of_pts),
+            'tasks_classes': self.serialise_tasks_classes(self.tasks_classes),
+            'network_name': self.quadruplet_config.network_name,
+            'branch_features': int(self.quadruplet_config.branch_features),
+            'frozen_stages': int(self.quadruplet_config.frozen_stages),
+            'small_input_stem': bool(self.quadruplet_config.small_input_stem),
+            'input_channels': int(self.input_channels)
+        }
+
+    def build_data_metadata(self, data_metadata):
+        """Build compact data-source metadata."""
+        return {
+            'fold': int(self.fold),
+            'data_save_path': str(self.train_path),
+            'output_save_path': str(self.output_path),
+            'mark_list_file': self.path_metadata_to_string(data_metadata.get('mark_list_file')),
+            'image_data_dir': self.path_metadata_to_string(data_metadata.get('image_data_dir')),
+            'patches_per_training_sample': self.optional_int(data_metadata.get('patches_per_training_sample')),
+            'sampling_variances': self.optional_number_list(data_metadata.get('sampling_variances')),
+            'random_seed': self.optional_int(data_metadata.get('random_seed'))
+        }
+
+    def build_preprocessing_metadata(self, data_metadata):
+        """Build image and patch preprocessing metadata used during training and inference."""
         sub_patch_scales = self.require_metadata_value(data_metadata, 'sub_patch_scales')
-        grid_spacing = self.require_metadata_value(data_metadata, 'grid_spacing')
         patch_size = int(data_metadata.get('patch_size', sub_patch_scales[0]))
 
         return {
             'sub_patch_scales': [int(scale) for scale in sub_patch_scales],
-            'patch_size': patch_size,
-            'grid_spacing': int(grid_spacing),
+            'patch_size': int(patch_size),
             'num_sub_patches': int(self.quadruplet_config.num_sub_patches),
             'input_channels': int(self.input_channels),
+            'tensor_shape': '[batch, num_sub_patches, channels, patch_size, patch_size]',
+            'channel_order': 'channels_first',
             'image_value_range': 'float32_0_to_1',
-            'patch_stack_shape': '[batch, num_sub_patches, channels, patch_size, patch_size]',
-            'patch_channel_order': 'channels_first',
             'patch_resize': {
                 'library': 'skimage.transform.resize',
                 'preserve_range': True,
                 'anti_aliasing': True
-            },
+            }
+        }
+
+    def build_inference_metadata(self, data_metadata=None):
+        """Build inference-specific metadata."""
+        data_metadata = data_metadata or self.read_data_creation_metadata()
+        grid_spacing = int(self.require_metadata_value(data_metadata, 'grid_spacing'))
+
+        return {
+            'grid_spacing': grid_spacing,
             'centre_grid': {
                 'x_start': 0,
                 'y_start': 0,
-                'x_step': int(grid_spacing),
-                'y_step': int(grid_spacing),
+                'x_step': grid_spacing,
+                'y_step': grid_spacing,
                 'loop_order': 'x_outer_y_inner'
             },
             'vote_accumulation': {
-                'distance_interval_source': 'output.distance_intervals',
-                'angle_interval_source': 'output.angle_intervals',
-                'prediction_mode': 'top_1_softmax_class',
-                'default_probability_weighting': True,
-                'default_smoothing_sigma': 7
+                'class_prediction': 'top_1_softmax_class',
+                'use_probability_weights': True,
+                'smoothing_sigma': 7
             }
+        }
+
+    def build_training_metadata(self):
+        """Build training configuration metadata."""
+        return {
+            'train_config': asdict(self.train_config),
+            'quadruplet_config': asdict(self.quadruplet_config)
         }
 
     def read_data_creation_metadata(self):
@@ -533,8 +605,6 @@ class TrainModel:
         raw_metadata = dict(zip(rows[0], rows[1]))
 
         return {
-            'distance_intervals': self.parse_metadata_value(raw_metadata.get('DISTANCE_INTERVALS')),
-            'angle_intervals': self.parse_metadata_value(raw_metadata.get('ANGLE_INTERVALS')),
             'task_name': raw_metadata.get('TASK_NAME'),
             'num_of_points': int(raw_metadata.get('NUM_OF_POINTS')),
             'sub_patch_scales': self.parse_metadata_value(raw_metadata.get('SUB_PATCH_SCALES')),
@@ -562,26 +632,26 @@ class TrainModel:
         if not data_config:
             return None
 
+        sub_patch_scales = data_config.get('sub_patch_scales') or []
+
         return {
-            'distance_intervals': data_config.get('distance_intervals'),
-            'angle_intervals': data_config.get('angle_intervals'),
             'task_name': run_info.get('task_name'),
             'num_of_points': run_info.get('num_of_points'),
-            'sub_patch_scales': data_config.get('sub_patch_scales'),
-            'patch_size': data_config.get('sub_patch_scales', [None])[0],
+            'sub_patch_scales': sub_patch_scales,
+            'patch_size': sub_patch_scales[0] if sub_patch_scales else None,
             'patches_per_training_sample': data_config.get('patches_per_training_sample'),
             'grid_spacing': data_config.get('grid_spacing'),
             'sampling_variances': data_config.get('sampling_variances'),
             'random_seed': data_config.get('random_seed'),
-            'mark_list_file': str(data_config.get('mark_list_file')),
-            'image_data_dir': str(data_config.get('image_data_dir'))
+            'mark_list_file': data_config.get('mark_list_file'),
+            'image_data_dir': data_config.get('image_data_dir')
         }
 
     @staticmethod
     def parse_metadata_value(value):
         """Parse a value written into compact CSV metadata."""
-        if value is None:
-            return None
+        if value is None or not isinstance(value, str):
+            return value
 
         try:
             return ast.literal_eval(value)
@@ -594,29 +664,41 @@ class TrainModel:
         value = metadata.get(key)
 
         if value is None:
-            raise ValueError(f'Cannot save checkpoint inference metadata because {key} is missing from data metadata.')
+            raise ValueError(f'Cannot save checkpoint metadata because {key} is missing from data metadata.')
 
         return value
 
     def write_checkpoint_summary(self, best_epoch, last_epoch, best_val_loss, last_val_loss, best_checkpoint_path, last_checkpoint_path):
-        """Write checkpoint paths and epoch metadata."""
+        """Write a compact run-level checkpoint summary."""
         summary_path = self.get_checkpoint_summary_path()
+        metadata = self.build_checkpoint_metadata(
+            checkpoint_type='summary',
+            epoch=last_epoch,
+            metrics={'best_val_loss': best_val_loss, 'last_val_loss': last_val_loss}
+        )
         summary = {
-            'fold': self.fold,
+            'format_version': CHECKPOINT_FORMAT_VERSION,
+            'created_at': dt.datetime.now().isoformat(),
             'run_name': self.get_run_name(),
-            'data_save_path': self.train_path,
-            'output_save_path': self.output_path,
-            'num_of_points': self.num_of_pts,
-            'tasks_per_point': self.tasks_per_point,
-            'expected_label_count': self.expected_label_count,
-            'input_channels': self.input_channels,
-            'inference': self.build_inference_metadata(),
-            'best_epoch': best_epoch,
-            'last_epoch': last_epoch,
-            'best_val_loss': best_val_loss,
-            'last_val_loss': last_val_loss,
-            'best_checkpoint_path': best_checkpoint_path,
-            'last_checkpoint_path': last_checkpoint_path
+            'fold': int(self.fold),
+            'task': metadata['task'],
+            'model': metadata['model'],
+            'data': metadata['data'],
+            'preprocessing': metadata['preprocessing'],
+            'inference': metadata['inference'],
+            'training': metadata['training'],
+            'checkpoints': {
+                'best': {
+                    'epoch': best_epoch,
+                    'val_loss': best_val_loss,
+                    'path': str(best_checkpoint_path) if best_checkpoint_path is not None else None
+                },
+                'last': {
+                    'epoch': last_epoch,
+                    'val_loss': last_val_loss,
+                    'path': str(last_checkpoint_path) if last_checkpoint_path is not None else None
+                }
+            }
         }
 
         with open(summary_path, 'w', encoding='utf-8') as summary_file:
@@ -627,50 +709,10 @@ class TrainModel:
         """Return the current optimiser learning rate."""
         return optimiser.param_groups[0]['lr']
 
-    def build_model_metadata(self):
-        """Build constructor metadata for the Quadruplet model."""
-        return {
-            'model_module': 'IPV.quadruplet',
-            'model_class': 'Quadruplet',
-            'init_args': {
-                'num_of_pts': self.num_of_pts,
-                'tasks_classes': self.serialise_tasks_classes(self.tasks_classes),
-                'network_name': self.quadruplet_config.network_name,
-                'branch_features': self.quadruplet_config.branch_features,
-                'frozen_stages': self.quadruplet_config.frozen_stages,
-                'small_input_stem': self.quadruplet_config.small_input_stem,
-                'input_channels': self.input_channels
-            }
-        }
-
-    def build_input_metadata(self):
-        """Build input-shape and patch-stack metadata."""
-        return {
-            'num_sub_patches': self.quadruplet_config.num_sub_patches,
-            'input_channels': self.input_channels,
-            'tensor_shape': '[batch, 4, channels, height, width]',
-            'channel_order': 'channels_first',
-            'value_range': 'float32_0_to_1'
-        }
-
-    def build_output_metadata(self):
-        """Build output-head metadata for interpreting distance and angle classes."""
-        head_order = []
-
-        for point_index in range(1, self.num_of_pts + 1):
-            head_order.append(
-                {'head_index': len(head_order), 'point_index': point_index, 'task': 'distance', 'class_intervals': self.serialise_intervals(self.tasks_classes[0])})
-            head_order.append(
-                {'head_index': len(head_order), 'point_index': point_index, 'task': 'angle', 'class_intervals': self.serialise_intervals(self.tasks_classes[1])})
-
-        return {
-            'task_names': ['distance', 'angle'],
-            'head_order': head_order,
-            'num_output_heads': self.expected_label_count,
-            'num_classes_per_head': self.num_of_classes,
-            'distance_intervals': self.serialise_intervals(self.tasks_classes[0]),
-            'angle_intervals': self.serialise_intervals(self.tasks_classes[1])
-        }
+    @staticmethod
+    def get_task_names():
+        """Return model task names in output-head order."""
+        return ['distance', 'angle']
 
     @staticmethod
     def serialise_tasks_classes(tasks_classes):
@@ -681,6 +723,24 @@ class TrainModel:
     def serialise_intervals(intervals):
         """Convert interval pairs into plain serialisable lists."""
         return [[float(lower), float(upper)] for lower, upper in intervals]
+
+    @staticmethod
+    def optional_int(value):
+        """Return an int or None."""
+        return None if value is None else int(value)
+
+    @staticmethod
+    def optional_number_list(values):
+        """Return a list of numeric values or None."""
+        if values is None:
+            return None
+
+        return [float(value) for value in values]
+
+    @staticmethod
+    def path_metadata_to_string(value):
+        """Return path metadata as a string or None."""
+        return None if value is None else str(value)
 
     def get_run_name(self):
         """Build a consistent name for logs, checkpoints, and plots."""
@@ -748,6 +808,7 @@ class TrainModel:
             'val_accuracy': []
         }
 
+
 def load_model_from_checkpoint(checkpoint_path, device=None):
     """Load a Quadruplet model from a self-describing checkpoint."""
     from .quadruplet import Quadruplet
@@ -758,7 +819,13 @@ def load_model_from_checkpoint(checkpoint_path, device=None):
     if 'state_dict' not in checkpoint:
         raise ValueError('This checkpoint only contains a state_dict. Recreate the model manually or convert the checkpoint.')
 
-    model_args = checkpoint['model']['init_args']
+    metadata = checkpoint.get('metadata', {})
+    model_metadata = metadata.get('model', checkpoint.get('model', {})) if isinstance(metadata, dict) else checkpoint.get('model', {})
+    model_args = model_metadata.get('init_args')
+
+    if not model_args:
+        raise ValueError('Checkpoint does not contain model init_args.')
+
     model = Quadruplet(**model_args)
     model.load_state_dict(checkpoint['state_dict'])
     model.to(device)
