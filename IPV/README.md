@@ -225,8 +225,8 @@ directories inside it:
 ```
 
 `RUN_NAME` is generated deterministically from the run configuration, including
-fold count, patch scales, sampling variances, point count, patch count, grid
-spacing, network, branch features, frozen stages, stem setting, batch size,
+fold count, patch scales, sampling variances, point count, patch count, validation
+grid spacing, network, branch features, frozen stages, stem setting, batch size,
 learning rate, scheduler, early-stopping, epoch count, and random seed. This 
 creates quite a cumbersome file name, but almost all of the details are there.
 
@@ -299,202 +299,36 @@ Boolean values can be supplied as `true`, `false`, `yes`, `no`, `1`, or `0`.
 
 Important options:
 
-| Option | Description |
-|---|---|
-| `--run-dir` | Required directory used for generated training data and run results. |
-| `--save-dir` | Required only when `COPY_FILES=true`; used for copies of selected result files after training. |
-| `--num-points` | Number of ordered landmark points per image. Must be between 1 and 30. |
-| `--fold-lists-path` | Directory containing `train_fN.txt` files and `val.txt`. |
-| `--mark-list-file` | Text file containing image filenames and point coordinates. |
-| `--image-data-dir` | Directory containing the source images. |
-| `--data-creation-workers` | Number of worker processes used for patch/data creation. Must be at least 1. |
-| `--train-workers` | Number of PyTorch DataLoader workers used during training. Use 0 for single-process loading. |
-| `--random-seed` | Seed used for deterministic sampled training centres. |
-| `--keep-part-csvs` | Keep per-sample temporary CSV part files if true. |
-| `--batch-size` | Training batch size. |
-| `--max-training-epochs` | Maximum training epochs. |
-| `--learning-rate` | Initial SGD learning rate. |
-| `--lr-schedule` | Enable the validation-accuracy-triggered learning-rate scheduler. |
-| `--lr-step-size` | StepLR step size used when `--lr-schedule true`. Default: 1. |
-| `--lr-gamma` | StepLR multiplicative decay factor used when `--lr-schedule true`. Default: 0.1. |
-| `--early-stop-patience` | Number of validation epochs without sufficient loss improvement before early stopping. Default: 5. |
-| `--early-stop-min-delta` | Minimum validation-loss improvement required to reset early-stopping patience. Default: 0.001. |
-| `--early-stop-warmup-epochs` | Number of initial epochs before early stopping is allowed. Default: 3. |
-| `--loss-print-samples` | Approximate sample interval used to derive the validation/logging batch interval. |
+| Option                          | Description |
+|---------------------------------|---|
+| `--run-dir`                     | Required directory used for generated training data and run results. |
+| `--save-dir`                    | Required only when `COPY_FILES=true`; used for copies of selected result files after training. |
+| `--num-points`                  | Number of ordered landmark points per image. Must be between 1 and 30. |
+| `--fold-lists-path`             | Directory containing `train_fN.txt` files and `val.txt`. |
+| `--mark-list-file`              | Text file containing image filenames and point coordinates. |
+| `--image-data-dir`              | Directory containing the source images. |
+| `--data-creation-workers`       | Number of worker processes used for patch/data creation. Must be at least 1. |
+| `--train-workers`               | Number of PyTorch DataLoader workers used during training. Use 0 for single-process loading. |
+| `--random-seed`                 | Seed used for deterministic sampled training centres. |
+| `--keep-part-csvs`              | Keep per-sample temporary CSV part files if true. |
+| `--batch-size`                  | Training batch size. |
+| `--max-training-epochs`         | Maximum training epochs. |
+| `--learning-rate`               | Initial SGD learning rate. |
+| `--lr-schedule`                 | Enable the validation-accuracy-triggered learning-rate scheduler. |
+| `--lr-step-size`                | StepLR step size used when `--lr-schedule true`. Default: 1. |
+| `--lr-gamma`                    | StepLR multiplicative decay factor used when `--lr-schedule true`. Default: 0.1. |
+| `--early-stop-patience`         | Number of validation epochs without sufficient loss improvement before early stopping. Default: 5. |
+| `--early-stop-min-delta`        | Minimum validation-loss improvement required to reset early-stopping patience. Default: 0.001. |
+| `--early-stop-warmup-epochs`    | Number of initial epochs before early stopping is allowed. Default: 3. |
+| `--loss-print-samples`          | Approximate sample interval used to derive the validation/logging batch interval. |
 | `--patches-per-training-sample` | Number of sampled patch centres per training image. Must be at least `num_points * len(sampling_variances)`. |
-| `--grid-spacing` | Grid stride for validation patch-centre creation. |
-| `--network-name` | Model backbone name from the model registry. |
-| `--branch-features` | Number of features output by each branch before concatenation. |
-| `--frozen-stages` | Number of pretrained ResNet stages to freeze. Use `0` for untrained models and `small_cnn`. |
-| `--small-input-stem` | Use the small-input ResNet stem when true. Use `false` for `small_cnn`. |
-| `--run-name` | Optional custom run name. When omitted, a deterministic name is generated from the run configuration. |
+| `--val-grid-spacing`            | Grid stride for validation patch-centre creation. |
+| `--network-name`                | Model backbone name from the model registry. |
+| `--branch-features`             | Number of features output by each branch before concatenation. |
+| `--frozen-stages`               | Number of pretrained ResNet stages to freeze. Use `0` for untrained models and `small_cnn`. |
+| `--small-input-stem`            | Use the small-input ResNet stem when true. Use `false` for `small_cnn`. |
+| `--run-name`                    | Optional custom run name. When omitted, a deterministic name is generated from the run configuration. |
 
-## Ubuntu example script
-
-Save as `run_prostate_transverse_ubuntu.sh`, edit the paths at the top, then run
-with `bash run_prostate_transverse_ubuntu.sh`.
-
-```bash
-#!/usr/bin/env bash
-set -euo pipefail
-
-PROJECT_DIR="$HOME/LandmarkIdentificationFrameworks/IPV"
-RUN_DIR="$HOME/IPV_TRAINING"
-SAVE_DIR="$HOME/IPV_SAVING"
-
-FOLD_LISTS_DIR="$HOME/DATA/folds"
-MARK_LIST_FILE="$HOME/DATA/transverse_points_list.txt"
-IMAGE_DATA_DIR="$HOME/DATA/transverse"
-
-FOLD=1
-TASK_NAME="transverse"
-NUM_POINTS=4
-
-CREATE_DATA="true"
-TRAIN_MODEL="true"
-COPY_FILES="true"
-DELETE_FILES="false"
-KEEP_PART_CSVS="false"
-
-DATA_CREATION_WORKERS=8
-PATCHES_PER_TRAINING_SAMPLE=200
-GRID_SPACING=10
-RANDOM_SEED=42
-
-TRAIN_WORKERS=8
-BATCH_SIZE=64
-MAX_TRAINING_EPOCHS=15
-LEARNING_RATE=0.01
-LR_SCHEDULE="true"
-LR_STEP_SIZE=1
-LR_GAMMA=0.1
-EARLY_STOP_PATIENCE=5
-EARLY_STOP_MIN_DELTA=0.001
-EARLY_STOP_WARMUP_EPOCHS=3
-LOSS_PRINT_SAMPLES=1600
-
-NETWORK_NAME="small_cnn"
-BRANCH_FEATURES=128
-FROZEN_STAGES=0
-SMALL_INPUT_STEM="false"
-
-RUN_NAME="${NETWORK_NAME}_fs${FROZEN_STAGES}_stem${SMALL_INPUT_STEM}_ppts${PATCHES_PER_TRAINING_SAMPLE}_gs${GRID_SPACING}"
-
-cd "$PROJECT_DIR"
-
-python -m IPV.create_dataset_and_train_model \
-    "$FOLD" "$TASK_NAME" "$CREATE_DATA" "$TRAIN_MODEL" "$COPY_FILES" "$DELETE_FILES" \
-    --run-dir "$RUN_DIR" \
-    --save-dir "$SAVE_DIR" \
-    --run-name "$RUN_NAME" \
-    --num-points "$NUM_POINTS" \
-    --fold-lists-path "$FOLD_LISTS_DIR" \
-    --mark-list-file "$MARK_LIST_FILE" \
-    --image-data-dir "$IMAGE_DATA_DIR" \
-    --data-creation-workers "$DATA_CREATION_WORKERS" \
-    --train-workers "$TRAIN_WORKERS" \
-    --random-seed "$RANDOM_SEED" \
-    --keep-part-csvs "$KEEP_PART_CSVS" \
-    --batch-size "$BATCH_SIZE" \
-    --max-training-epochs "$MAX_TRAINING_EPOCHS" \
-    --learning-rate "$LEARNING_RATE" \
-    --lr-schedule "$LR_SCHEDULE" \
-    --lr-step-size "$LR_STEP_SIZE" \
-    --lr-gamma "$LR_GAMMA" \
-    --early-stop-patience "$EARLY_STOP_PATIENCE" \
-    --early-stop-min-delta "$EARLY_STOP_MIN_DELTA" \
-    --early-stop-warmup-epochs "$EARLY_STOP_WARMUP_EPOCHS" \
-    --loss-print-samples "$LOSS_PRINT_SAMPLES" \
-    --patches-per-training-sample "$PATCHES_PER_TRAINING_SAMPLE" \
-    --grid-spacing "$GRID_SPACING" \
-    --network-name "$NETWORK_NAME" \
-    --branch-features "$BRANCH_FEATURES" \
-    --frozen-stages "$FROZEN_STAGES" \
-    --small-input-stem "$SMALL_INPUT_STEM"
-```
-
-If `COPY_FILES="false"`, remove the `--save-dir "$SAVE_DIR"` line or leave it
-in place knowing the current code will ignore it after normalising arguments.
-
-## Windows PowerShell example script
-
-Save as `run_prostate_transverse_windows.ps1`, edit the paths at the top, then
-run from PowerShell.
-
-```powershell
-$PROJECT_DIR = "D:\LandmarkIdentificationFrameworks\IPV"
-$RUN_DIR = "D:\IPV_TRAINING"
-$SAVE_DIR = "D:\IPV_SAVING"
-
-$FOLD_LISTS_DIR = "D:\DATA\folds"
-$MARK_LIST_FILE = "D:\DATA\transverse_points_list.txt"
-$IMAGE_DATA_DIR = "D:\DATA\transverse"
-
-$FOLD = 1
-$TASK_NAME = "transverse"
-$NUM_POINTS = 4
-
-$CREATE_DATA = "true"
-$TRAIN_MODEL = "true"
-$COPY_FILES = "true"
-$DELETE_FILES = "false"
-$KEEP_PART_CSVS = "false"
-
-$DATA_CREATION_WORKERS = 8
-$PATCHES_PER_TRAINING_SAMPLE = 200
-$GRID_SPACING = 10
-$RANDOM_SEED = 42
-
-$TRAIN_WORKERS = 8
-$BATCH_SIZE = 64
-$MAX_TRAINING_EPOCHS = 15
-$LEARNING_RATE = 0.01
-$LR_SCHEDULE = "true"
-$LR_STEP_SIZE = 1
-$LR_GAMMA = 0.1
-$EARLY_STOP_PATIENCE = 5
-$EARLY_STOP_MIN_DELTA = 0.001
-$EARLY_STOP_WARMUP_EPOCHS = 3
-$LOSS_PRINT_SAMPLES = 1600
-
-$NETWORK_NAME = "small_cnn"
-$BRANCH_FEATURES = 128
-$FROZEN_STAGES = 0
-$SMALL_INPUT_STEM = "false"
-
-$RUN_NAME = "${NETWORK_NAME}_fs${FROZEN_STAGES}_stem${SMALL_INPUT_STEM}_ppts${PATCHES_PER_TRAINING_SAMPLE}_gs${GRID_SPACING}"
-
-Set-Location $PROJECT_DIR
-
-ipv-train $FOLD $TASK_NAME $CREATE_DATA $TRAIN_MODEL $COPY_FILES $DELETE_FILES `
-    --run-dir $RUN_DIR `
-    --save-dir $SAVE_DIR `
-    --run-name $RUN_NAME `
-    --num-points $NUM_POINTS `
-    --fold-lists-path $FOLD_LISTS_DIR `
-    --mark-list-file $MARK_LIST_FILE `
-    --image-data-dir $IMAGE_DATA_DIR `
-    --data-creation-workers $DATA_CREATION_WORKERS `
-    --train-workers $TRAIN_WORKERS `
-    --random-seed $RANDOM_SEED `
-    --keep-part-csvs $KEEP_PART_CSVS `
-    --batch-size $BATCH_SIZE `
-    --max-training-epochs $MAX_TRAINING_EPOCHS `
-    --learning-rate $LEARNING_RATE `
-    --lr-schedule $LR_SCHEDULE `
-    --lr-step-size $LR_STEP_SIZE `
-    --lr-gamma $LR_GAMMA `
-    --early-stop-patience $EARLY_STOP_PATIENCE `
-    --early-stop-min-delta $EARLY_STOP_MIN_DELTA `
-    --early-stop-warmup-epochs $EARLY_STOP_WARMUP_EPOCHS `
-    --loss-print-samples $LOSS_PRINT_SAMPLES `
-    --patches-per-training-sample $PATCHES_PER_TRAINING_SAMPLE `
-    --grid-spacing $GRID_SPACING `
-    --network-name $NETWORK_NAME `
-    --branch-features $BRANCH_FEATURES `
-    --frozen-stages $FROZEN_STAGES `
-    --small-input-stem $SMALL_INPUT_STEM
-```
 
 ## Outputs
 
