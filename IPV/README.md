@@ -284,6 +284,8 @@ The command has the following structure:
 ipv-train FOLD TASK_NAME CREATE_DATA TRAIN_MODEL COPY_FILES DELETE_FILES [OPTIONS]
 ```
 
+Sample powershell (.ps1) and bash (.sh) scripts are given.
+
 Positional arguments:
 
 | Argument | Values | Description |
