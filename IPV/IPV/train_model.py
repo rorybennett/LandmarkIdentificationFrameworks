@@ -846,23 +846,23 @@ class TrainModel:
 
     def get_log_path(self):
         """Return the log CSV path."""
-        return self.output_path / f'train_log_f{self.fold}_{self.get_run_name()}.csv'
+        return self.output_path / f'train_log_f{self.fold}.csv'
 
     def get_checkpoint_path(self, checkpoint_type):
         """Return the latest or best checkpoint path."""
-        return self.output_path / f'model_f{self.fold}_{self.get_run_name()}_{checkpoint_type}.pth'
+        return self.output_path / f'model_f{self.fold}_{checkpoint_type}.pth'
 
     def get_checkpoint_summary_path(self):
         """Return the checkpoint summary JSON path."""
-        return self.output_path / f'checkpoint_summary_f{self.fold}_{self.get_run_name()}.json'
+        return self.output_path / f'checkpoint_summary_f{self.fold}.json'
 
     def get_plot_path(self):
         """Return the plot path."""
-        return self.output_path / f'train_plot_f{self.fold}_{self.get_run_name()}.png'
+        return self.output_path / f'train_plot_f{self.fold}.png'
 
     def get_validation_output_path(self):
         """Return the validation-image inference output directory."""
-        return self.output_path / f'validation_inference_f{self.fold}_{self.get_run_name()}'
+        return self.output_path / f'validation_inference_f{self.fold}'
 
     @staticmethod
     def format_number(value):
