@@ -378,7 +378,7 @@ def create_patch_job(job):
                 io.imsave(patch_path, patch_image, check_contrast=False)
                 csv_writer.writerow([patch_id, patch_path.as_posix(), job.sample_name, x, y, *labels])
 
-            cv2.circle(display_image, (x, y), 1, (255, 0, 0), 1)
+            # cv2.circle(display_image, (x, y), 1, (255, 0, 0), 1) # Can be uncommented to show patch centres.
 
     for point in job.points:
         cv2.drawMarker(display_image, point, (255, 255, 255), markerType=cv2.MARKER_TILTED_CROSS, markerSize=12, thickness=2, line_type=cv2.LINE_AA)
