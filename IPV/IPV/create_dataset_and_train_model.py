@@ -590,7 +590,7 @@ class CreateTrain:
         print(f'\t\tNumber of folds: {self.data_config.num_of_folds}', flush=True)
         print(f'\t\tSub-patch scales: {self.data_config.sub_patch_scales}', flush=True)
         print(f'\t\tPatches per training sample: {self.data_config.patches_per_training_sample}', flush=True)
-        print(f'\t\tGrid data step: {self.data_config.val_grid_spacing}', flush=True)
+        print(f'\t\tValidation grid data step: {self.data_config.val_grid_spacing}', flush=True)
         print(f'\t\tSampling variances: {self.data_config.sampling_variances}', flush=True)
         print(f'\t\tData workers: {self.data_config.num_workers}', flush=True)
         print(f'\t\tTraining workers: {self.train_config.num_workers}', flush=True)
