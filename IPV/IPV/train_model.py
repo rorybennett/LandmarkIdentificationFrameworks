@@ -13,6 +13,7 @@ from torch.optim.lr_scheduler import StepLR
 from torch.utils.data import DataLoader
 
 from .custom_dataset import CustomDataset, ToTensor
+from .landmark_inference import LandmarkInferenceConfig, run_validation_inference_for_trained_model
 
 MIN_POINTS_PER_IMAGE = 1
 MAX_POINTS_PER_IMAGE = 30
@@ -44,6 +45,10 @@ class TrainConfig:
     early_stop_patience: int = 5
     early_stop_min_delta: float = 0.001
     early_stop_warmup_epochs: int = 3
+    save_validation_results: bool = True
+    validation_inference_batch_size: int = 2048
+    validation_vote_smoothing_sigma: float = 7.0
+    validation_save_raw_vote_maps: bool = False
 
 
 class TrainModel:
@@ -128,9 +133,65 @@ class TrainModel:
                         print(f"\tEarly stop: validation loss stopped improving. Best val loss: {previous_best_val_loss:.6f}", flush=True)
                         break
 
+        validation_results_path = None
+
+        if self.train_config.save_validation_results:
+            validation_results_path = self.run_validation_inference(model=model, best_checkpoint_path=best_checkpoint_path, last_checkpoint_path=last_checkpoint_path)
+
         self.write_checkpoint_summary(best_epoch=best_epoch, last_epoch=last_epoch, best_val_loss=best_val_loss, last_val_loss=last_val_loss,
-                                      best_checkpoint_path=best_checkpoint_path, last_checkpoint_path=last_checkpoint_path)
+                                      best_checkpoint_path=best_checkpoint_path, last_checkpoint_path=last_checkpoint_path, validation_results_path=validation_results_path)
         plt.clf()
+
+    def run_validation_inference(self, model, best_checkpoint_path=None, last_checkpoint_path=None):
+        """Run full-image inference on validation images and save overlays and Excel metrics."""
+        checkpoint_path = best_checkpoint_path or last_checkpoint_path
+        checkpoint_type = 'best' if best_checkpoint_path is not None else 'last'
+
+        if checkpoint_path is not None:
+            self.load_checkpoint_state(model=model, checkpoint_path=checkpoint_path)
+
+        data_metadata = self.read_data_creation_metadata()
+        validation_output_path = self.get_validation_output_path()
+        config = LandmarkInferenceConfig(
+            fold=int(self.fold),
+            task_name=str(data_metadata.get('task_name') or ''),
+            data_save_path=self.train_path,
+            output_dir=validation_output_path,
+            mark_list_file=Path(self.require_metadata_value(data_metadata, 'mark_list_file')),
+            image_data_dir=Path(self.require_metadata_value(data_metadata, 'image_data_dir')),
+            num_points=int(self.num_of_pts),
+            sub_patch_scales=self.require_metadata_value(data_metadata, 'sub_patch_scales'),
+            distance_intervals=self.tasks_classes[0],
+            angle_intervals=self.tasks_classes[1],
+            grid_spacing=int(self.require_metadata_value(data_metadata, 'grid_spacing')),
+            input_channels=int(self.input_channels),
+            batch_size=int(self.train_config.validation_inference_batch_size),
+            smoothing_sigma=float(self.train_config.validation_vote_smoothing_sigma),
+            save_raw_vote_maps=bool(self.train_config.validation_save_raw_vote_maps),
+            checkpoint_path=checkpoint_path,
+            checkpoint_type=checkpoint_type
+        )
+
+        print(f'	Running validation image inference with {checkpoint_type} checkpoint...', flush=True)
+        run_validation_inference_for_trained_model(model=model, config=config, device=self.device)
+        print(f'	Validation image inference outputs saved to {validation_output_path}', flush=True)
+        return validation_output_path
+
+    @staticmethod
+    def load_checkpoint_state(model, checkpoint_path):
+        """Load checkpoint weights into an existing model."""
+        try:
+            checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
+        except TypeError:
+            checkpoint = torch.load(checkpoint_path, map_location='cpu')
+
+        state_dict = checkpoint.get('state_dict') if isinstance(checkpoint, dict) else None
+
+        if state_dict is None:
+            raise ValueError(f'Checkpoint does not contain a state_dict: {checkpoint_path}')
+
+        model.load_state_dict(state_dict)
+        model.eval()
 
     def validate_training_inputs(self):
         """Validate generated fold data before model construction."""
@@ -552,6 +613,8 @@ class TrainModel:
         """Build inference-specific metadata."""
         data_metadata = data_metadata or self.read_data_creation_metadata()
         grid_spacing = int(self.require_metadata_value(data_metadata, 'grid_spacing'))
+        smoothing_sigma = float(self.train_config.validation_vote_smoothing_sigma)
+        batch_size = int(self.train_config.validation_inference_batch_size)
 
         return {
             'grid_spacing': grid_spacing,
@@ -565,7 +628,8 @@ class TrainModel:
             'vote_accumulation': {
                 'class_prediction': 'top_1_softmax_class',
                 'use_probability_weights': True,
-                'smoothing_sigma': 7
+                'smoothing_sigma': smoothing_sigma,
+                'batch_size': batch_size
             }
         }
 
@@ -640,7 +704,7 @@ class TrainModel:
             'sub_patch_scales': sub_patch_scales,
             'patch_size': sub_patch_scales[0] if sub_patch_scales else None,
             'patches_per_training_sample': data_config.get('patches_per_training_sample'),
-            'grid_spacing': data_config.get('grid_spacing'),
+            'grid_spacing': data_config.get('val_grid_spacing', data_config.get('grid_spacing')),
             'sampling_variances': data_config.get('sampling_variances'),
             'random_seed': data_config.get('random_seed'),
             'mark_list_file': data_config.get('mark_list_file'),
@@ -668,7 +732,7 @@ class TrainModel:
 
         return value
 
-    def write_checkpoint_summary(self, best_epoch, last_epoch, best_val_loss, last_val_loss, best_checkpoint_path, last_checkpoint_path):
+    def write_checkpoint_summary(self, best_epoch, last_epoch, best_val_loss, last_val_loss, best_checkpoint_path, last_checkpoint_path, validation_results_path=None):
         """Write a compact run-level checkpoint summary."""
         summary_path = self.get_checkpoint_summary_path()
         metadata = self.build_checkpoint_metadata(
@@ -698,6 +762,10 @@ class TrainModel:
                     'val_loss': last_val_loss,
                     'path': str(last_checkpoint_path) if last_checkpoint_path is not None else None
                 }
+            },
+            'validation_inference': {
+                'enabled': bool(self.train_config.save_validation_results),
+                'path': str(validation_results_path) if validation_results_path is not None else None
             }
         }
 
@@ -791,6 +859,10 @@ class TrainModel:
     def get_plot_path(self):
         """Return the plot path."""
         return self.output_path / f'train_plot_f{self.fold}_{self.get_run_name()}.png'
+
+    def get_validation_output_path(self):
+        """Return the validation-image inference output directory."""
+        return self.output_path / f'validation_inference_f{self.fold}_{self.get_run_name()}'
 
     @staticmethod
     def format_number(value):

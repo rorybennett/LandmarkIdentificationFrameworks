@@ -3,42 +3,6 @@ from numba import njit
 
 
 @njit(cache=True)
-def check_current_labels(labels_count, current_labels):
-    """Check whether current labels are usable against the current label counts."""
-    for point_index in range(len(current_labels)):
-        current_label = current_labels[point_index]
-
-        if current_label == 0:
-            return False
-
-        if labels_count[point_index][current_label] == labels_count[point_index][0]:
-            return False
-
-    return True
-
-
-@njit(cache=True)
-def check_labels(labels_count):
-    """Check whether label counts are sufficiently balanced."""
-    good_count = 0
-
-    for point_index in range(len(labels_count)):
-        good_count_for_point = 0
-        reference_count = labels_count[point_index][0]
-
-        for class_index in range(len(labels_count[point_index])):
-            class_count = labels_count[point_index][class_index]
-
-            if reference_count <= class_count <= reference_count * 2:
-                good_count_for_point += 1
-
-        if good_count_for_point == len(labels_count[point_index]):
-            good_count += 1
-
-    return good_count != len(labels_count)
-
-
-@njit(cache=True)
 def get_label(value, intervals):
     """Return the class index for a value given interval boundaries."""
     for interval_index in range(len(intervals)):
@@ -96,12 +60,3 @@ def create_patch(image, x, y, patch_size):
     patch[patch_row_start:patch_row_end, patch_col_start:patch_col_end, ...] = image[source_row_start:source_row_end, source_col_start:source_col_end, ...]
 
     return patch
-
-
-@njit(cache=True)
-def concat_patches(patches):
-    """Concatenate four patches into a two-by-two grid."""
-    top_row = np.concatenate((patches[0], patches[1]), axis=1)
-    bottom_row = np.concatenate((patches[2], patches[3]), axis=1)
-
-    return np.concatenate((top_row, bottom_row), axis=0)

@@ -156,7 +156,7 @@ class CreateTrain:
             raise ValueError(f'QuadrupletConfig requested {configured_channels} input channels, but generated patches contain {detected_channels}.')
 
         self.quadruplet_config.input_channels = detected_channels
-        print(f'	Detected {detected_channels} input channel(s) per patch from generated data.', flush=True)
+        print(f'\tDetected {detected_channels} input channel(s) per patch from generated data.', flush=True)
 
     @staticmethod
     def infer_patch_input_channels_from_csv(csv_path):
@@ -306,11 +306,19 @@ class CreateTrain:
             raise ValueError(f'Run results path does not exist: {self.run_results_path}')
 
         save_path.mkdir(exist_ok=True, parents=True)
-        files = [file_path for file_path in self.run_results_path.iterdir() if file_path.is_file()]
-        print(f'\tCopying {len(files)} files from {self.run_results_path} to {save_path}...', flush=True)
+        entries = list(self.run_results_path.iterdir())
+        print(f'\tCopying {len(entries)} result entries from {self.run_results_path} to {save_path}...', flush=True)
 
-        for file_path in files:
-            shutil.copy(file_path, save_path / file_path.name)
+        for entry_path in entries:
+            destination_path = save_path / entry_path.name
+
+            if entry_path.is_dir():
+                if destination_path.exists():
+                    shutil.rmtree(destination_path)
+
+                shutil.copytree(entry_path, destination_path)
+            else:
+                shutil.copy2(entry_path, destination_path)
 
         end_time = dt.datetime.now()
         print(f'\tFold {self.fold} {self.task_name} outputs copied in {self.format_runtime(start_time, end_time)}.', flush=True)
@@ -588,6 +596,10 @@ class CreateTrain:
         print(f'\t\tTraining workers: {self.train_config.num_workers}', flush=True)
         print(f'\t\tBatch size: {self.train_config.batch_size}', flush=True)
         print(f'\t\tValidation/logging interval: {self.train_config.loss_print_interval} batches', flush=True)
+        print(f'\t\tSave validation results: {self.train_config.save_validation_results}', flush=True)
+        print(f'\t\tValidation inference batch size: {self.train_config.validation_inference_batch_size}', flush=True)
+        print(f'\t\tValidation vote smoothing sigma: {self.train_config.validation_vote_smoothing_sigma}', flush=True)
+        print(f'\t\tValidation save raw vote maps: {self.train_config.validation_save_raw_vote_maps}', flush=True)
         print(f'\t\tRandom seed: {self.data_config.random_seed}', flush=True)
         print(f'\t\tNetwork: {self.quadruplet_config.network_name}', flush=True)
         print(f'\t\tBranch features: {self.quadruplet_config.branch_features}', flush=True)
@@ -707,6 +719,14 @@ def parse_args():
     parser.add_argument('--early-stop-warmup-epochs', type=int, default=3, help='Number of initial epochs before early stopping is allowed.')
     parser.add_argument('--loss-print-samples', type=int, required=True,
                         help='Approximate number of training samples between validation/logging events. Converted internally to a batch interval.')
+    parser.add_argument('--save-validation-results', type=str_to_bool, default=True,
+                        help='Whether to run full validation-image inference after training and save overlays plus Excel error metrics.')
+    parser.add_argument('--validation-inference-batch-size', type=int, default=2048,
+                        help='Batch size used when passing full validation image grids through the trained model.')
+    parser.add_argument('--validation-vote-smoothing-sigma', type=float, default=7.0,
+                        help='Gaussian smoothing sigma used before selecting validation vote-map peaks.')
+    parser.add_argument('--validation-save-raw-vote-maps', type=str_to_bool, default=False,
+                        help='Whether to save raw per-image vote maps as NPY arrays. These files can be large.')
     parser.add_argument('--patches-per-training-sample', type=int, required=True,
                         help='Total number of sampled patch centres created per training image, distributed across all landmarks and sampling variances.')
     parser.add_argument('--val-grid-spacing', type=int, required=True, help='Pixel stride used to create grid patch centres for validation and test images.')
@@ -761,6 +781,12 @@ def validate_args(args, num_of_folds):
 
     if args.loss_print_samples < 1:
         raise ValueError('--loss-print-samples must be at least 1.')
+
+    if args.validation_inference_batch_size < 1:
+        raise ValueError('--validation-inference-batch-size must be at least 1.')
+
+    if args.validation_vote_smoothing_sigma < 0:
+        raise ValueError('--validation-vote-smoothing-sigma must be at least 0.')
 
     if args.patches_per_training_sample < 1:
         raise ValueError('--patches-per-training-sample must be at least 1.')
@@ -1012,7 +1038,11 @@ def build_configs(args):
         lr_gamma=args.lr_gamma,
         early_stop_patience=args.early_stop_patience,
         early_stop_min_delta=args.early_stop_min_delta,
-        early_stop_warmup_epochs=args.early_stop_warmup_epochs
+        early_stop_warmup_epochs=args.early_stop_warmup_epochs,
+        save_validation_results=args.save_validation_results,
+        validation_inference_batch_size=args.validation_inference_batch_size,
+        validation_vote_smoothing_sigma=args.validation_vote_smoothing_sigma,
+        validation_save_raw_vote_maps=args.validation_save_raw_vote_maps
     )
 
     quadruplet_config = QuadrupletConfig(

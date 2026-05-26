@@ -570,7 +570,7 @@ class DataCreator:
             self.validate_fold_split(fold_index=fold_index, phase_lists=phase_lists)
             self.fold_list.append(phase_lists)
 
-        print(f'	All {self.folds} folds read...', flush=True)
+        print(f'\tAll {self.folds} folds read...', flush=True)
 
     def read_points(self, phase):
         """Read image paths and landmark coordinates for the current fold and phase."""
@@ -623,7 +623,7 @@ class DataCreator:
 
         self.input_channels = next(iter(channel_counts))
         image_text = 'image' if len(sample_names) == 1 else 'images'
-        print(f'	Input channels detected for fold {self.current_fold} {self.task_name}: {self.input_channels} ({len(sample_names)} {image_text}).', flush=True)
+        print(f'\tInput channels detected for fold {self.current_fold} {self.task_name}: {self.input_channels} ({len(sample_names)} {image_text}).', flush=True)
 
     def get_current_fold_sample_names(self):
         """Return all sample names used by the current fold."""
