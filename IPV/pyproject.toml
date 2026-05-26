@@ -31,5 +31,5 @@ dev = [
 include = ["IPV*"]
 
 [project.scripts]
-ipv-train = "IPV.create_dataset_and_train_model:main"
+ipv-train = "IPV.ipv_training_pipeline:main"
 ipv-infer = "IPV.infer_landmarks:main"

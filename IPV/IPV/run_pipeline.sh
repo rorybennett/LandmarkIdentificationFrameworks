@@ -43,7 +43,7 @@ SMALL_INPUT_STEM="false"
 
 RUN_NAME="${NETWORK_NAME}_fs${FROZEN_STAGES}_stem${SMALL_INPUT_STEM}_ppts${PATCHES_PER_TRAINING_SAMPLE}"
 
-python -m IPV.create_dataset_and_train_model \
+ipv-train \
     "$FOLD" "$TASK_NAME" "$CREATE_DATA" "$TRAIN_MODEL" "$COPY_FILES" "$DELETE_FILES" \
     --run-dir "$RUN_DIR" \
     --save-dir "$SAVE_DIR" \
