@@ -4,6 +4,7 @@ Reusable IPV landmark inference, validation inference, and visualisation utiliti
 import csv
 import json
 import re
+import sys
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -69,6 +70,77 @@ class LoadedInferenceCheckpoint:
     metadata: dict
 
 
+class ProgressBar:
+    """Render one terminal-line progress bar for image-level inference."""
+
+    def __init__(self, total, label, width=40):
+        self.total = int(total)
+        self.safe_total = max(self.total, 1)
+        self.label = label
+        self.width = int(width)
+        self.current = 0
+        self.status = ''
+        self.start_time = None
+
+    def __enter__(self):
+        self.start_time = time.time()
+        self.render()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        sys.stdout.write('\n')
+        sys.stdout.flush()
+
+    def update(self, increment=1):
+        """Advance the progress bar and redraw the current line."""
+        self.current = min(self.current + int(increment), self.safe_total)
+        self.render()
+
+    def set_status(self, status):
+        """Update the current sample label without advancing progress."""
+        self.status = str(status)
+        self.render()
+
+    def render(self):
+        """Write the current progress state to stdout."""
+        fraction = min(self.current / self.safe_total, 1.0)
+        filled = int(self.width * fraction)
+        bar = '#' * filled + '-' * (self.width - filled)
+        elapsed = time.time() - self.start_time if self.start_time else 0.0
+        rate = self.current / elapsed if elapsed > 0 else 0.0
+        remaining = (self.safe_total - self.current) / rate if rate > 0 else 0.0
+        status_text = f' current={truncate_text(self.status, 45)}' if self.status else ''
+        message = (
+            f'\r\t{self.label}: '
+            f'[{bar}] '
+            f'{self.current}/{self.total} '
+            f'({fraction * 100:6.2f}%) '
+            f'elapsed={self.format_seconds(elapsed)} '
+            f'eta={self.format_seconds(remaining)}'
+            f'{status_text}\033[K'
+        )
+        sys.stdout.write(message)
+        sys.stdout.flush()
+
+    @staticmethod
+    def format_seconds(seconds):
+        """Format seconds as HH:MM:SS."""
+        seconds = int(seconds)
+        hours, remainder = divmod(seconds, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        return f'{hours:02d}:{minutes:02d}:{seconds:02d}'
+
+
+def truncate_text(value, max_length):
+    """Return text shortened for use inside terminal progress lines."""
+    value = str(value)
+
+    if len(value) <= max_length:
+        return value
+
+    return f'{value[:max_length - 3]}...'
+
+
 class LandmarkImageInferer:
     def __init__(self, model, config, device=None):
         self.model = model
@@ -120,10 +192,13 @@ class LandmarkImageInferer:
         records = list(records)
         results = []
         start_time = time.perf_counter()
+        progress_label = f'{self.config.run_label} inference'
 
-        for image_index, record in enumerate(records, start=1):
-            print(f'\t{self.config.run_label} inference {image_index}/{len(records)}: {record.sample_name}', flush=True)
-            results.append(self.infer_record(record))
+        with ProgressBar(total=len(records), label=progress_label) as progress_bar:
+            for record in records:
+                progress_bar.set_status(record.sample_name)
+                results.append(self.infer_record(record))
+                progress_bar.update()
 
         self.save_combined_summaries(results)
         self.save_run_metadata(records=records, results=results, total_seconds=time.perf_counter() - start_time)
