@@ -1,5 +1,5 @@
 """
-Create train/validation fold data, train a model, optionally copy outputs, and safely delete generated training data.
+Create train/validation/test fold data, train a model, optionally copy outputs, and safely delete generated training data.
 """
 import argparse
 import csv
@@ -65,6 +65,7 @@ class RunConfig:
     train_model: bool
     copy_files: bool
     delete_files: bool
+    generate_test_data: bool
     run_dir: Path
     save_dir: Path | None
     run_name: str
@@ -111,7 +112,7 @@ class CreateTrain:
             keep_part_csvs=self.data_config.keep_part_csvs
         )
 
-        data_creator.create(val_grid_spacing=self.data_config.val_grid_spacing, current_fold=self.fold)
+        data_creator.create(val_grid_spacing=self.data_config.val_grid_spacing, current_fold=self.fold, generate_test_data=self.run_config.generate_test_data)
         self.update_quadruplet_input_channels_from_generated_data()
         self.write_metadata()
 
@@ -122,19 +123,40 @@ class CreateTrain:
 
     def update_quadruplet_input_channels_from_generated_data(self):
         """Infer generated patch channels and store them in the model config."""
-        train_channels = self.infer_patch_input_channels_from_csv(self.get_phase_csv_path('Train'))
-        val_channels = self.infer_patch_input_channels_from_csv(self.get_phase_csv_path('Val'))
+        phase_channels = {}
 
-        if train_channels != val_channels:
-            raise ValueError(f'Train patches have {train_channels} channels, but validation patches have {val_channels} channels.')
+        missing_csvs = []
 
+        for phase in self.get_fold_phases():
+            csv_path = self.get_phase_csv_path(phase)
+
+            if not csv_path.is_file():
+                missing_csvs.append(str(csv_path))
+                continue
+
+            phase_channels[phase] = self.infer_patch_input_channels_from_csv(csv_path)
+
+        if missing_csvs:
+            missing_text = '\n'.join(missing_csvs)
+            raise ValueError(f'Expected generated phase CSV files are missing for fold {self.fold}:\n{missing_text}')
+
+        if not phase_channels:
+            raise ValueError(f'No generated phase CSV files were found for fold {self.fold} in {self.data_save_path}.')
+
+        unique_channels = sorted(set(phase_channels.values()))
+
+        if len(unique_channels) != 1:
+            details = ', '.join(f'{phase}: {channels}' for phase, channels in phase_channels.items())
+            raise ValueError(f'Generated patch channel counts differ across phases: {details}.')
+
+        detected_channels = int(unique_channels[0])
         configured_channels = self.quadruplet_config.input_channels
 
-        if configured_channels is not None and int(configured_channels) != train_channels:
-            raise ValueError(f'QuadrupletConfig requested {configured_channels} input channels, but generated patches contain {train_channels}.')
+        if configured_channels is not None and int(configured_channels) != detected_channels:
+            raise ValueError(f'QuadrupletConfig requested {configured_channels} input channels, but generated patches contain {detected_channels}.')
 
-        self.quadruplet_config.input_channels = int(train_channels)
-        print(f'\tDetected {train_channels} input channel(s) per patch from generated data.', flush=True)
+        self.quadruplet_config.input_channels = detected_channels
+        print(f'	Detected {detected_channels} input channel(s) per patch from generated data.', flush=True)
 
     @staticmethod
     def infer_patch_input_channels_from_csv(csv_path):
@@ -181,7 +203,7 @@ class CreateTrain:
         deleted_count = 0
         training_root = self.run_training_root.resolve()
 
-        for target in self.get_fold_data_paths(include_metadata=True):
+        for target in self.get_fold_data_paths(include_metadata=True, phases=self.get_all_fold_phases()):
             resolved_target = target.resolve()
 
             if not target.exists():
@@ -233,19 +255,23 @@ class CreateTrain:
         self.print_section_end()
 
     def validate_training_data_point_count(self):
-        """Check that train and validation CSV files match the requested point count."""
+        """Check that expected generated CSV files match the requested point count."""
         tasks_per_point = len(self.data_config.tasks_classes)
-        train_csv_path = self.get_phase_csv_path('Train')
-        val_csv_path = self.get_phase_csv_path('Val')
+        phase_points = {}
 
-        train_points = infer_num_points_from_csv(csv_path=train_csv_path, tasks_per_point=tasks_per_point)
-        val_points = infer_num_points_from_csv(csv_path=val_csv_path, tasks_per_point=tasks_per_point)
+        for phase in self.get_fold_phases():
+            phase_points[phase] = infer_num_points_from_csv(csv_path=self.get_phase_csv_path(phase), tasks_per_point=tasks_per_point)
 
-        if train_points != val_points:
-            raise ValueError(f'Train data has {train_points} points but validation data has {val_points} points.')
+        unique_points = sorted(set(phase_points.values()))
 
-        if train_points != self.num_of_points:
-            raise ValueError(f'Model requested {self.num_of_points} points but generated data contains {train_points} points.')
+        if len(unique_points) != 1:
+            details = ', '.join(f'{phase}: {points}' for phase, points in phase_points.items())
+            raise ValueError(f'Generated point counts differ across phases: {details}.')
+
+        detected_points = int(unique_points[0])
+
+        if detected_points != self.num_of_points:
+            raise ValueError(f'Model requested {self.num_of_points} points but generated data contains {detected_points} points.')
 
         self.validate_run_metadata_point_count()
 
@@ -370,26 +396,40 @@ class CreateTrain:
                 'Delete the partial fold data or regenerate it before training.'
             )
 
-    def get_fold_data_paths(self, include_metadata=False):
+    def get_fold_data_paths(self, include_metadata=False, phases=None):
         """Return fold-specific generated data paths inside the shared data directory."""
-        paths = [
-            self.get_phase_csv_path('Train'),
-            self.get_phase_csv_path('Val'),
-            self.get_phase_patch_dir('Train'),
-            self.get_phase_patch_dir('Val'),
-            self.get_phase_image_dir('Train'),
-            self.get_phase_image_dir('Val')
-        ]
+        phases = phases or self.get_fold_phases()
+        paths = []
+
+        for phase in phases:
+            paths.extend([
+                self.get_phase_csv_path(phase),
+                self.get_phase_patch_dir(phase),
+                self.get_phase_image_dir(phase)
+            ])
 
         if include_metadata:
             paths.extend([
                 self.data_save_path / f'data_info_f{self.fold}.csv',
-                self.data_save_path / f'run_info_{self.task_name}_f{self.fold}.json',
-                self.data_save_path / f'Train_csv_parts_F{self.fold}',
-                self.data_save_path / f'Val_csv_parts_F{self.fold}'
+                self.data_save_path / f'run_info_{self.task_name}_f{self.fold}.json'
             ])
 
+            for phase in phases:
+                paths.append(self.data_save_path / f'{phase}_csv_parts_F{self.fold}')
+
         return paths
+
+    def get_fold_phases(self):
+        """Return phases expected to have generated CSVs and patch files for this run."""
+        if self.run_config.generate_test_data:
+            return ('Train', 'Val', 'Test')
+
+        return ('Train', 'Val')
+
+    @staticmethod
+    def get_all_fold_phases():
+        """Return all possible fold phases, including the optional test phase."""
+        return ('Train', 'Val', 'Test')
 
     def get_phase_csv_path(self, phase):
         """Return the generated phase CSV path for this fold."""
@@ -430,7 +470,8 @@ class CreateTrain:
                 'NUM_WORKERS',
                 'RANDOM_SEED',
                 'MARK_LIST_FILE',
-                'IMAGE_DATA_DIR'
+                'IMAGE_DATA_DIR',
+                'GENERATE_TEST_DATA'
             ])
             writer.writerow([
                 str(self.data_config.distance_intervals),
@@ -446,7 +487,8 @@ class CreateTrain:
                 self.data_config.num_workers,
                 self.data_config.random_seed,
                 self.data_config.mark_list_file,
-                self.data_config.image_data_dir
+                self.data_config.image_data_dir,
+                self.run_config.generate_test_data
             ])
 
     def write_run_info(self, write_to_data_dir=False):
@@ -536,6 +578,7 @@ class CreateTrain:
         print(f'\t\tTrain model: {self.run_config.train_model}', flush=True)
         print(f'\t\tCopy files: {self.run_config.copy_files}', flush=True)
         print(f'\t\tDelete files: {self.run_config.delete_files}', flush=True)
+        print(f'\t\tGenerate test data: {self.run_config.generate_test_data}', flush=True)
         print(f'\t\tNumber of folds: {self.data_config.num_of_folds}', flush=True)
         print(f'\t\tSub-patch scales: {self.data_config.sub_patch_scales}', flush=True)
         print(f'\t\tPatches per training sample: {self.data_config.patches_per_training_sample}', flush=True)
@@ -625,7 +668,7 @@ def normalise_save_dir(args):
 
 def parse_args():
     """Parse terminal arguments."""
-    parser = argparse.ArgumentParser(description='Create train/validation fold data, train a model, copy selected outputs, and delete generated training data.',
+    parser = argparse.ArgumentParser(description='Create train/validation/test fold data, train a model, copy selected outputs, and delete generated training data.',
                                      formatter_class=argparse.ArgumentDefaultsHelpFormatter)
 
     parser.add_argument('fold', type=int, metavar='FOLD', help='Fold number to run. Must match an available train_fN.txt file in --fold-lists-path.')
@@ -643,7 +686,7 @@ def parse_args():
                         help='Optional external directory for copied result files. Required when COPY_FILES is true and ignored when COPY_FILES is false.')
     parser.add_argument('--num-points', type=validate_num_points, required=True,
                         help=f'Number of ordered landmark points per image. Must be between {MIN_POINTS_PER_IMAGE} and {MAX_POINTS_PER_IMAGE}.')
-    parser.add_argument('--fold-lists-path', type=Path, required=True, help='Directory containing train_fN.txt files and val.txt.')
+    parser.add_argument('--fold-lists-path', type=Path, required=True, help='Directory containing train_fN.txt, val_fN.txt, and test_fN.txt files for each fold.')
     parser.add_argument('--mark-list-file', type=Path, required=True, help='Text file containing image filenames followed by landmark coordinate pairs.')
     parser.add_argument('--image-data-dir', type=Path, required=True, help='Directory containing the source image files referenced by the mark-list file.')
     parser.add_argument('--data-creation-workers', type=int, required=True, help='Number of worker processes used during patch/data creation.')
@@ -651,6 +694,8 @@ def parse_args():
     parser.add_argument('--random-seed', type=int, required=True, help='Random seed used for deterministic training-centre sampling.')
     parser.add_argument('--keep-part-csvs', type=str_to_bool, required=True,
                         help='Whether to keep temporary per-sample CSV part files after merging. Accepted values: true/false, yes/no, 1/0.')
+    parser.add_argument('--generate-test-data', type=str_to_bool, default=True,
+                        help='Whether to generate Test_fN.csv and test patch/image artefacts. Test fold-list checks are still performed when false.')
     parser.add_argument('--batch-size', type=int, required=True, help='Training batch size.')
     parser.add_argument('--max-training-epochs', type=int, required=True, help='Maximum number of training epochs.')
     parser.add_argument('--learning-rate', type=float, required=True, help='Initial SGD learning rate.')
@@ -664,7 +709,7 @@ def parse_args():
                         help='Approximate number of training samples between validation/logging events. Converted internally to a batch interval.')
     parser.add_argument('--patches-per-training-sample', type=int, required=True,
                         help='Total number of sampled patch centres created per training image, distributed across all landmarks and sampling variances.')
-    parser.add_argument('--val-grid-spacing', type=int, required=True, help='Pixel stride used to create grid patch centres for validation images.')
+    parser.add_argument('--val-grid-spacing', type=int, required=True, help='Pixel stride used to create grid patch centres for validation and test images.')
     parser.add_argument('--run-name', type=str, default=None,
                         help='Optional custom run name. When omitted, a deterministic name is generated from the run configuration.')
 
@@ -934,6 +979,7 @@ def build_configs(args):
         train_model=args.train_model,
         copy_files=args.copy_files,
         delete_files=args.delete_files,
+        generate_test_data=args.generate_test_data,
         run_dir=args.run_dir,
         save_dir=args.save_dir,
         run_name=run_name

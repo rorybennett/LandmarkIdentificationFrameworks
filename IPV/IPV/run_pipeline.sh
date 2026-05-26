@@ -17,6 +17,7 @@ TRAIN_MODEL="true"
 COPY_FILES="true"
 DELETE_FILES="true"
 KEEP_PART_CSVS="false"
+GENERATE_TEST_DATA="false"
 
 DATA_CREATION_WORKERS=8
 PATCHES_PER_TRAINING_SAMPLE=200
@@ -55,6 +56,7 @@ python -m IPV.create_dataset_and_train_model \
     --train-workers "$TRAIN_WORKERS" \
     --random-seed "$RANDOM_SEED" \
     --keep-part-csvs "$KEEP_PART_CSVS" \
+    --generate-test-data "$GENERATE_TEST_DATA" \
     --batch-size "$BATCH_SIZE" \
     --max-training-epochs "$MAX_TRAINING_EPOCHS" \
     --learning-rate "$LEARNING_RATE" \
