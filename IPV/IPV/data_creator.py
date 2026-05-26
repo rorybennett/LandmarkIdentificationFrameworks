@@ -1,8 +1,6 @@
 import csv
 import re
 import shutil
-import sys
-import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
@@ -14,7 +12,8 @@ from skimage import io
 from skimage.transform import resize
 from skimage.util import img_as_float32, img_as_ubyte
 
-from .gpu_utils import create_patch, get_angle, get_label
+from .utils.patch_utils import create_patch, get_angle, get_label
+from .utils.progress_bar import ProgressBar
 
 TRAIN_LIST_PATTERN = re.compile(r'^train_f(\d+)\.txt$')
 FOLD_PHASES = ('Train', 'Val', 'Test')
@@ -49,62 +48,6 @@ class PatchJob:
     image_save_path: Path
     part_csv_path: Path
     seed: int
-
-
-class ProgressBar:
-    """Simple terminal progress bar for phase-level patch creation."""
-
-    def __init__(self, total, label, width=40):
-        self.total = max(total, 1)
-        self.label = label
-        self.width = width
-        self.current = 0
-        self.start_time = None
-
-    def __enter__(self):
-        self.start_time = time.time()
-        self.render()
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        sys.stdout.write('\n')
-        sys.stdout.flush()
-
-    def update(self, increment=1):
-        """Advance the progress bar."""
-        self.current += increment
-        self.render()
-
-    def render(self):
-        """Render the progress bar on one terminal line."""
-        fraction = min(self.current / self.total, 1.0)
-        filled = int(self.width * fraction)
-        bar = '#' * filled + '-' * (self.width - filled)
-
-        elapsed = time.time() - self.start_time if self.start_time else 0
-        rate = self.current / elapsed if elapsed > 0 else 0
-        remaining = (self.total - self.current) / rate if rate > 0 else 0
-
-        message = (
-            f'\r\t{self.label}: '
-            f'[{bar}] '
-            f'{self.current}/{self.total} '
-            f'({fraction * 100:6.2f}%) '
-            f'elapsed={self.format_seconds(elapsed)} '
-            f'eta={self.format_seconds(remaining)}'
-        )
-
-        sys.stdout.write(message)
-        sys.stdout.flush()
-
-    @staticmethod
-    def format_seconds(seconds):
-        """Format seconds as HH:MM:SS."""
-        seconds = int(seconds)
-        hours, remainder = divmod(seconds, 3600)
-        minutes, seconds = divmod(remainder, 60)
-
-        return f'{hours:02d}:{minutes:02d}:{seconds:02d}'
 
 
 def natural_key(value):
@@ -378,7 +321,7 @@ def create_patch_job(job):
                 io.imsave(patch_path, patch_image, check_contrast=False)
                 csv_writer.writerow([patch_id, patch_path.as_posix(), job.sample_name, x, y, *labels])
 
-            cv2.circle(display_image, (x, y), 1, (255, 0, 0), 1) # Can be uncommented to show patch centres.
+            cv2.circle(display_image, (x, y), 1, (255, 0, 0), 1)  # Can be uncommented to show patch centres.
 
     for point in job.points:
         cv2.drawMarker(display_image, point, (255, 255, 255), markerType=cv2.MARKER_TILTED_CROSS, markerSize=12, thickness=2, line_type=cv2.LINE_AA)
@@ -408,9 +351,9 @@ class DataCreator:
                  keep_part_csvs=False):
 
         self.task_name = self.resolve_task_name(task_name=task_name)
-        self.num_of_pts = self.validate_num_points(num_of_points)
+        self.num_of_points = self.validate_num_points(num_of_points)
         self.sampling_variances = self.validate_sampling_variances(sampling_variances)
-        self.patches_per_training_sample = self.validate_patches_per_training_sample(patches_per_training_sample, self.num_of_pts, self.sampling_variances)
+        self.patches_per_training_sample = self.validate_patches_per_training_sample(patches_per_training_sample, self.num_of_points, self.sampling_variances)
         self.validate_required_paths(data_save_path=data_save_path, fold_lists_path=fold_lists_path, mark_list_path=mark_list_path, image_data_path=image_data_path)
         self.validate_subpatch_scales(subpatch_scales)
 
@@ -594,7 +537,7 @@ class DataCreator:
             self.validate_mark_points(sample_name=sample_name, points=points, image_shape=image_shape)
 
             self.paths_dict[sample_name] = image_path
-            self.points_dict[sample_name] = points[:self.num_of_pts]
+            self.points_dict[sample_name] = points[:self.num_of_points]
 
     def report_current_fold_input_channels(self):
         """Report and validate the input channel count for the current fold."""
@@ -636,8 +579,8 @@ class DataCreator:
 
     def validate_mark_points(self, sample_name, points, image_shape=None):
         """Validate landmark count and optional image bounds for one mark-list row."""
-        if len(points) < self.num_of_pts:
-            raise ValueError(f'{sample_name} has {len(points)} points but {self.num_of_pts} are required.')
+        if len(points) < self.num_of_points:
+            raise ValueError(f'{sample_name} has {len(points)} points but {self.num_of_points} are required.')
 
         if len(points) > MAX_POINTS_PER_IMAGE:
             raise ValueError(f'{sample_name} has {len(points)} points; the maximum supported number is {MAX_POINTS_PER_IMAGE}.')
@@ -647,7 +590,7 @@ class DataCreator:
 
         height, width = image_shape[:2]
 
-        for point_index, (x, y) in enumerate(points[:self.num_of_pts], start=1):
+        for point_index, (x, y) in enumerate(points[:self.num_of_points], start=1):
             if not is_point_inside_image(x=x, y=y, width=width, height=height):
                 raise ValueError(f'{sample_name} point {point_index} is outside image bounds: ({x}, {y}) for width={width}, height={height}.')
 
@@ -688,7 +631,7 @@ class DataCreator:
     def validate_patch_csv(self, csv_path):
         """Validate that each patch group contains one row per sub-patch scale and valid labels."""
         expected_rows = len(self.sub_patch_scales)
-        expected_label_count = self.num_of_pts * TASKS_PER_POINT
+        expected_label_count = self.num_of_points * TASKS_PER_POINT
         expected_columns = 5 + expected_label_count
         group_counts = {}
 
@@ -707,7 +650,7 @@ class DataCreator:
 
                 labels = [int(value) for value in row[5:]]
 
-                for point_index in range(self.num_of_pts):
+                for point_index in range(self.num_of_points):
                     distance_label = labels[point_index * 2]
                     angle_label = labels[point_index * 2 + 1]
 

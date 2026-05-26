@@ -211,12 +211,12 @@ def build_branch(network_name, output_features=128, frozen_stages=0, small_input
 
 class Quadruplet(nn.Module):
 
-    def __init__(self, num_of_pts, tasks_classes, network_name='resnet18_pretrained', branch_features=128, frozen_stages=0, small_input_stem=True, input_channels=3):
+    def __init__(self, num_of_points, tasks_classes, network_name='resnet18_pretrained', branch_features=128, frozen_stages=0, small_input_stem=True, input_channels=3):
         super(Quadruplet, self).__init__()
         validate_input_channels(input_channels)
 
-        if num_of_pts < 1 or num_of_pts > 30:
-            raise ValueError('num_of_pts must be between 1 and 30.')
+        if num_of_points < 1 or num_of_points > 30:
+            raise ValueError('num_of_points must be between 1 and 30.')
 
         self.input_channels = int(input_channels)
         self.net1 = build_branch(network_name=network_name, output_features=branch_features, frozen_stages=frozen_stages, small_input_stem=small_input_stem, input_channels=self.input_channels)
@@ -224,9 +224,9 @@ class Quadruplet(nn.Module):
         self.net3 = build_branch(network_name=network_name, output_features=branch_features, frozen_stages=frozen_stages, small_input_stem=small_input_stem, input_channels=self.input_channels)
         self.net4 = build_branch(network_name=network_name, output_features=branch_features, frozen_stages=frozen_stages, small_input_stem=small_input_stem, input_channels=self.input_channels)
 
-        self.num_of_pts = num_of_pts
+        self.num_of_points = num_of_points
         self.num_of_tasks = len(tasks_classes)
-        self.num_of_classes = [len(task_classes) for _ in range(self.num_of_pts) for task_classes in tasks_classes]
+        self.num_of_classes = [len(task_classes) for _ in range(self.num_of_points) for task_classes in tasks_classes]
 
         combined_features = branch_features * 4
         self.output_heads = nn.ModuleList([nn.Linear(combined_features, class_count) for class_count in self.num_of_classes])

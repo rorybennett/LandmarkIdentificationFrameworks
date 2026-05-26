@@ -13,7 +13,7 @@ from torch.optim.lr_scheduler import StepLR
 from torch.utils.data import DataLoader
 
 from .custom_dataset import CustomDataset, ToTensor
-from .landmark_inference_utils import LandmarkInferenceConfig, run_validation_inference_for_trained_model
+from .utils.landmark_inference_utils import LandmarkInferenceConfig, run_validation_inference_for_trained_model
 
 MIN_POINTS_PER_IMAGE = 1
 MAX_POINTS_PER_IMAGE = 30
@@ -54,19 +54,19 @@ class TrainConfig:
 class TrainModel:
     def __init__(self, current_fold, num_of_points, data_save_path, tasks_classes, train_config, quadruplet_config, output_save_path=None, device=None):
         self.fold = current_fold
-        self.num_of_pts = num_of_points
+        self.num_of_points = num_of_points
         self.train_path = Path(data_save_path)
         self.output_path = Path(output_save_path) if output_save_path is not None else self.train_path
         self.tasks_classes = tasks_classes
         self.train_config = train_config
         self.quadruplet_config = quadruplet_config
         self.device = device or torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        self.validate_num_of_points(self.num_of_pts)
+        self.validate_num_of_points(self.num_of_points)
         self.validate_tasks_classes_structure(self.tasks_classes)
         self.tasks_per_point = len(self.tasks_classes)
-        self.expected_label_count = self.num_of_pts * self.tasks_per_point
+        self.expected_label_count = self.num_of_points * self.tasks_per_point
         self.input_channels = None
-        self.num_of_classes = [len(task_classes) for _ in range(self.num_of_pts) for task_classes in self.tasks_classes]
+        self.num_of_classes = [len(task_classes) for _ in range(self.num_of_points) for task_classes in self.tasks_classes]
 
     def train(self):
         """Run training for one fold."""
@@ -139,7 +139,8 @@ class TrainModel:
             validation_results_path = self.run_validation_inference(model=model, best_checkpoint_path=best_checkpoint_path, last_checkpoint_path=last_checkpoint_path)
 
         self.write_checkpoint_summary(best_epoch=best_epoch, last_epoch=last_epoch, best_val_loss=best_val_loss, last_val_loss=last_val_loss,
-                                      best_checkpoint_path=best_checkpoint_path, last_checkpoint_path=last_checkpoint_path, validation_results_path=validation_results_path)
+                                      best_checkpoint_path=best_checkpoint_path, last_checkpoint_path=last_checkpoint_path,
+                                      validation_results_path=validation_results_path)
         plt.clf()
 
     def run_validation_inference(self, model, best_checkpoint_path=None, last_checkpoint_path=None):
@@ -159,7 +160,7 @@ class TrainModel:
             output_dir=validation_output_path,
             mark_list_file=Path(self.require_metadata_value(data_metadata, 'mark_list_file')),
             image_data_dir=Path(self.require_metadata_value(data_metadata, 'image_data_dir')),
-            num_points=int(self.num_of_pts),
+            num_points=int(self.num_of_points),
             sub_patch_scales=self.require_metadata_value(data_metadata, 'sub_patch_scales'),
             distance_intervals=self.tasks_classes[0],
             angle_intervals=self.tasks_classes[1],
@@ -208,10 +209,10 @@ class TrainModel:
         if train_points != val_points:
             raise ValueError(f'Train data has {train_points} points, but validation data has {val_points} points.')
 
-        if train_points != self.num_of_pts:
-            raise ValueError(f'Model requested {self.num_of_pts} points, but generated data contains {train_points} points.')
+        if train_points != self.num_of_points:
+            raise ValueError(f'Model requested {self.num_of_points} points, but generated data contains {train_points} points.')
 
-        print(f'\tTraining data validated: {self.num_of_pts} points, {self.tasks_per_point} tasks per point, {self.expected_label_count} label columns.', flush=True)
+        print(f'\tTraining data validated: {self.num_of_points} points, {self.tasks_per_point} tasks per point, {self.expected_label_count} label columns.', flush=True)
 
     def validate_metadata_point_count(self):
         """Validate data-creation metadata when run_info JSON files are available."""
@@ -233,8 +234,8 @@ class TrainModel:
             created_points = int(metadata['num_of_points'])
             metadata_point_counts.append(created_points)
 
-            if created_points != self.num_of_pts:
-                raise ValueError(f'Model requested {self.num_of_pts} points, but {metadata_path} says the data was created with {created_points} points.')
+            if created_points != self.num_of_points:
+                raise ValueError(f'Model requested {self.num_of_points} points, but {metadata_path} says the data was created with {created_points} points.')
 
         if len(set(metadata_point_counts)) != 1:
             raise ValueError(f'Conflicting num_of_points values found in metadata files: {metadata_point_counts}')
@@ -270,7 +271,7 @@ class TrainModel:
                 if label_count != self.expected_label_count:
                     detected_points = label_count // self.tasks_per_point
                     raise ValueError(
-                        f'{phase} CSV row {row_number} in {csv_path} has {detected_points} points and {label_count} labels; model expects {self.num_of_pts} points and {self.expected_label_count} labels.')
+                        f'{phase} CSV row {row_number} in {csv_path} has {detected_points} points and {label_count} labels; model expects {self.num_of_points} points and {self.expected_label_count} labels.')
 
         if row_count == 0 or detected_label_count is None:
             raise ValueError(f'{phase} CSV is empty: {csv_path}')
@@ -336,7 +337,7 @@ class TrainModel:
         from .quadruplet import Quadruplet
 
         model = Quadruplet(
-            num_of_pts=self.num_of_pts,
+            num_of_points=self.num_of_points,
             tasks_classes=self.tasks_classes,
             network_name=self.quadruplet_config.network_name,
             branch_features=self.quadruplet_config.branch_features,
@@ -543,13 +544,13 @@ class TrainModel:
         task_names = self.get_task_names()
         output_heads = []
 
-        for point_index in range(1, self.num_of_pts + 1):
+        for point_index in range(1, self.num_of_points + 1):
             for task_name in task_names:
                 output_heads.append({'head_index': len(output_heads), 'point_index': point_index, 'task': task_name})
 
         return {
             'name': data_metadata.get('task_name'),
-            'num_points': int(self.num_of_pts),
+            'num_points': int(self.num_of_points),
             'task_names': task_names,
             'output_heads': output_heads,
             'num_output_heads': int(self.expected_label_count),
@@ -567,7 +568,7 @@ class TrainModel:
     def build_model_init_args(self):
         """Return the exact arguments needed to rebuild the model."""
         return {
-            'num_of_pts': int(self.num_of_pts),
+            'num_of_points': int(self.num_of_points),
             'tasks_classes': self.serialise_tasks_classes(self.tasks_classes),
             'network_name': self.quadruplet_config.network_name,
             'branch_features': int(self.quadruplet_config.branch_features),
@@ -822,7 +823,7 @@ class TrainModel:
         lr_gamma_label = self.format_number(self.train_config.lr_gamma)
         early_delta_label = self.format_number(self.train_config.early_stop_min_delta)
 
-        return (f'points{self.num_of_pts}_'
+        return (f'points{self.num_of_points}_'
                 f'{self.quadruplet_config.network_name}_'
                 f'bf{self.quadruplet_config.branch_features}_'
                 f'fs{self.quadruplet_config.frozen_stages}_'

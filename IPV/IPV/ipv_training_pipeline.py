@@ -71,7 +71,7 @@ class RunConfig:
     run_name: str
 
 
-class CreateTrain:
+class IPVTrainingPipeline:
     def __init__(self, run_config, data_config, train_config, quadruplet_config):
         self.run_config = run_config
         self.data_config = data_config
@@ -1060,7 +1060,7 @@ def main():
     """Run the fold creation and training workflow."""
     args = parse_args()
     run_config, data_config, train_config, quadruplet_config = build_configs(args)
-    create_train = CreateTrain(run_config, data_config, train_config, quadruplet_config)
+    create_train = IPVTrainingPipeline(run_config, data_config, train_config, quadruplet_config)
     create_train.run()
 
 

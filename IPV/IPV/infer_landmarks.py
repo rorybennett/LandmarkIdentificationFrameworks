@@ -6,14 +6,15 @@ python -m IPV.infer_landmarks
 """
 from pathlib import Path
 
-from IPV.IPV.landmark_inference_utils import build_config_from_checkpoint_metadata, build_image_records, load_model_from_checkpoint, run_landmark_inference_for_records
+from .utils.landmark_inference_utils import build_config_from_checkpoint_metadata, build_image_records, load_model_from_checkpoint, run_landmark_inference_for_records
 
 # ======================================================================================================================
 # Paths
 # ======================================================================================================================
-MODEL_PATH = Path(r'')
-INPUT_PATH = Path(r'')
-OUTPUT_DIR = Path(r'')
+MODEL_PATH = Path(r'D:\Coding\Testing\IPV_SAVING\prostate_transverse\small_cnn_fs0_stemfalse_ppts200'
+                  r'\model_f1_best.pth')
+INPUT_PATH = Path(r'D:\Coding\Testing\Val_Images_F1')
+OUTPUT_DIR = Path(r'D:\Coding\Testing\InferenceResults')
 GROUND_TRUTH_MARK_LIST_PATH = None
 
 # ======================================================================================================================
@@ -33,6 +34,8 @@ RUN_LABEL = 'inference'
 # Optional dimension summaries
 # ======================================================================================================================
 DIMENSION_POINT_MAP = None
+
+
 # Example for a non-prostate four-point task:
 # DIMENSION_POINT_MAP = {'vertical': (1, 3), 'horizontal': (2, 4)}
 
