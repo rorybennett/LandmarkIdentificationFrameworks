@@ -18,7 +18,8 @@ dependencies = [
     "opencv-python",
     "scipy",
     "numba",
-    "matplotlib"
+    "matplotlib",
+    "openpyxl"
 ]
 
 [project.optional-dependencies]
@@ -31,3 +32,4 @@ include = ["IPV*"]
 
 [project.scripts]
 ipv-train = "IPV.create_dataset_and_train_model:main"
+ipv-infer = "IPV.infer_landmarks:main"

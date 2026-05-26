@@ -25,15 +25,18 @@ The package is expected to be laid out as follows:
 │   ├── custom_dataset.py
 │   ├── data_creator.py
 │   ├── gpu_utils.py
+│   ├── infer_landmarks.py
+│   ├── landmark_inference.py
 │   ├── model_registry.py
 │   ├── parameters.py
 │   ├── quadruplet.py
-│   └── train_model.py
+│   ├── train_model.py
+│   └── validation_inference.py
 ├── pyproject.toml
 └── README.md
 ```
 
-`pyproject.toml` exposes the command-line entry point `ipv-train`.
+`pyproject.toml` exposes `ipv-train` for data creation/training and `ipv-infer` for example checkpoint inference.
 
 ## Installation
 
@@ -75,16 +78,18 @@ cd LandmarkIdentificationFrameworks/IPV
 pip install -e .
 ```
 
-After installation, the CLI entry point should be available as:
+After installation, the CLI entry points should be available as:
 
 ```bash
 ipv-train --help
+ipv-infer
 ```
 
-You can also run the module directly:
+You can also run the modules directly:
 
 ```bash
 python -m IPV.create_dataset_and_train_model --help
+python -m IPV.infer_landmarks
 ```
 
 ## Image handling
@@ -119,11 +124,12 @@ prostate IPV data layout is:
 DATA/
 ├── folds/
 │   ├── train_f1.txt
+│   ├── val_f1.txt
+│   ├── test_f1.txt
 │   ├── train_f2.txt
-│   ├── train_f3.txt
-│   ├── train_f4.txt
-│   ├── train_f5.txt
-│   └── val.txt
+│   ├── val_f2.txt
+│   ├── test_f2.txt
+│   └── ...
 ├── transverse/
 │   ├── A1.jpg
 │   ├── A2.jpg
@@ -152,8 +158,9 @@ A7
 ```
 
 The pipeline discovers folds from files named `train_fN.txt`. Fold numbers must
-be contiguous from `train_f1.txt`, and `val.txt` must exist for training-time
-validation.
+be contiguous from `train_f1.txt`. For every discovered fold number `N`, the
+folder must also contain `val_fN.txt` and `test_fN.txt`. The three lists for a
+fold must not overlap.
 
 ### Mark-list files
 
@@ -189,8 +196,9 @@ patch_id, patch_path, sample_name, centre_x, centre_y, point_1_distance,
 point_1_angle, point_2_distance, point_2_angle, ...
 ```
 
-Training checks that `Train_f<FOLD>.csv` and `Val_f<FOLD>.csv` contain the same
-number of points as requested by `--num-points`.
+Training checks that the generated phase CSVs contain the same number of points as requested by `--num-points`. The training loop uses only the training and validation CSVs. Test CSV and patch generation can be enabled or disabled with `--generate-test-data`; the test fold-list, image, channel-count, and landmark checks still run even when test patch generation is disabled.
+
+The same mark-list format can optionally be supplied during standalone inference when ground-truth endpoints are available for a held-out test set. If no mark-list is supplied, inference still saves predictions, heatmap overlays, and vote-map overlays, but error columns are left empty.
 
 ## Configuration
 
@@ -237,7 +245,7 @@ Use `--save-dir` only when you want a copy of selected result files outside the
 run directory. When `COPY_FILES=true`, `--save-dir` is required. When
 `COPY_FILES=false`, any supplied `--save-dir` is ignored.
 
-When `COPY_FILES=true`, files from:
+When `COPY_FILES=true`, files and result subdirectories from:
 
 ```text
 <RUN_DIR>/TRAINING_RESULTS/<TASK_NAME>/<RUN_NAME>/
@@ -256,7 +264,8 @@ in `<RUN_DIR>/TRAINING_RESULTS` and the optional save directory are not deleted.
 When `TRAIN_MODEL=true` and `CREATE_DATA=false`, the pipeline checks for partial
 fold data before training. If some expected fold-specific files exist and others
 are missing, training stops so stale or incomplete data are not accidentally
-reused.
+reused. Expected generated phases are `Train` and `Val`, plus `Test` only when
+`--generate-test-data true`.
 
 ## Supported models
 
@@ -276,7 +285,7 @@ of four of the chosen model, one for each patch scale.
 For untrained models, use `--frozen-stages 0`. For `small_cnn`, use
 `--small-input-stem false` and `--frozen-stages 0`.
 
-## Running the pipeline
+## Running the training pipeline
 
 The command has the following structure:
 
@@ -306,13 +315,14 @@ Important options:
 | `--run-dir`                     | Required directory used for generated training data and run results. |
 | `--save-dir`                    | Required only when `COPY_FILES=true`; used for copies of selected result files after training. |
 | `--num-points`                  | Number of ordered landmark points per image. Must be between 1 and 30. |
-| `--fold-lists-path`             | Directory containing `train_fN.txt` files and `val.txt`. |
+| `--fold-lists-path`             | Directory containing `train_fN.txt`, `val_fN.txt`, and `test_fN.txt` files for each fold. |
 | `--mark-list-file`              | Text file containing image filenames and point coordinates. |
 | `--image-data-dir`              | Directory containing the source images. |
 | `--data-creation-workers`       | Number of worker processes used for patch/data creation. Must be at least 1. |
 | `--train-workers`               | Number of PyTorch DataLoader workers used during training. Use 0 for single-process loading. |
 | `--random-seed`                 | Seed used for deterministic sampled training centres. |
 | `--keep-part-csvs`              | Keep per-sample temporary CSV part files if true. |
+| `--generate-test-data`          | Generate `Test_f<FOLD>.csv`, test patches, and test overlay images when true. Test fold-list checks still run when false. Default: true. |
 | `--batch-size`                  | Training batch size. |
 | `--max-training-epochs`         | Maximum training epochs. |
 | `--learning-rate`               | Initial SGD learning rate. |
@@ -323,14 +333,74 @@ Important options:
 | `--early-stop-min-delta`        | Minimum validation-loss improvement required to reset early-stopping patience. Default: 0.001. |
 | `--early-stop-warmup-epochs`    | Number of initial epochs before early stopping is allowed. Default: 3. |
 | `--loss-print-samples`          | Approximate sample interval used to derive the validation/logging batch interval. |
+| `--save-validation-results`     | Run full validation-image inference after training and save overlays plus Excel metrics. Default: true. |
+| `--validation-inference-batch-size` | Batch size used for full-image validation inference. Default: 2048. |
+| `--validation-vote-smoothing-sigma` | Gaussian smoothing sigma used before selecting vote-map peaks. Default: 7.0. |
+| `--validation-save-raw-vote-maps` | Save raw per-image vote maps as `.npy` files. Default: false. |
 | `--patches-per-training-sample` | Number of sampled patch centres per training image. Must be at least `num_points * len(sampling_variances)`. |
-| `--val-grid-spacing`            | Grid stride for validation patch-centre creation. |
+| `--val-grid-spacing`            | Grid stride for validation patch-centre creation, and test patch-centre creation when `--generate-test-data true`. |
 | `--network-name`                | Model backbone name from the model registry. |
 | `--branch-features`             | Number of features output by each branch before concatenation. |
 | `--frozen-stages`               | Number of pretrained ResNet stages to freeze. Use `0` for untrained models and `small_cnn`. |
 | `--small-input-stem`            | Use the small-input ResNet stem when true. Use `false` for `small_cnn`. |
 | `--run-name`                    | Optional custom run name. When omitted, a deterministic name is generated from the run configuration. |
 
+
+
+## Running inference on new images
+
+`IPV/infer_landmarks.py` is a short example script for applying a trained checkpoint to a user image or a folder of images. It is intended to be copied and adapted for new datasets. Edit the path variables and switches at the top of the file:
+
+```python
+MODEL_PATH = Path(r'D:\path\to\model_best.pth')
+INPUT_PATH = Path(r'D:\path\to\test_images')
+OUTPUT_DIR = Path(r'D:\path\to\inference_outputs')
+GROUND_TRUTH_MARK_LIST_PATH = None
+```
+
+Then run:
+
+```bash
+python -m IPV.infer_landmarks
+```
+
+or, after installing the package:
+
+```bash
+ipv-infer
+```
+
+The script loads the self-describing checkpoint metadata saved during training, so `num_points`, patch scales, class intervals, image channel count, grid spacing, and model constructor arguments are inferred automatically. The main runtime overrides are `BATCH_SIZE`, `GRID_SPACING_OVERRIDE`, `VOTE_SMOOTH_SIGMA_OVERRIDE`, `SAVE_RAW_VOTE_MAPS`, and `RECURSIVE_IMAGE_SEARCH`.
+
+Reusable inference functions live in `IPV/landmark_inference.py`. Typical custom code only needs to call:
+
+```python
+from IPV.landmark_inference import build_config_from_checkpoint_metadata, build_image_records, load_model_from_checkpoint, run_landmark_inference_for_records
+```
+
+For non-prostate landmark tasks, leave `DIMENSION_POINT_MAP = None` or provide a custom one-indexed endpoint pairing dictionary such as:
+
+```python
+DIMENSION_POINT_MAP = {'vertical': (1, 3), 'horizontal': (2, 4)}
+```
+
+Without a custom map, prostate-style dimension summaries are only produced when the task name contains `transverse` or `sagittal`. Endpoint predictions are always saved.
+
+Standalone inference outputs are written under `OUTPUT_DIR`:
+
+```text
+OUTPUT_DIR/
+├── heatmap_overlays/
+├── point_overlays/
+├── vote_maps/
+├── raw_vote_maps/        # only when enabled
+├── metrics/
+├── logs/
+├── inference_summary.xlsx
+├── inference_image_summary.csv
+├── inference_endpoint_predictions.csv
+└── inference_dimension_predictions.csv
+```
 
 ## Outputs
 
@@ -350,10 +420,13 @@ Common generated training-data files include:
 
 - `Train_f<FOLD>.csv`
 - `Val_f<FOLD>.csv`
+- `Test_f<FOLD>.csv`
 - `Train_Patches_F<FOLD>/`
 - `Val_Patches_F<FOLD>/`
+- `Test_Patches_F<FOLD>/`
 - `Train_Images_F<FOLD>/`
 - `Val_Images_F<FOLD>/`
+- `Test_Images_F<FOLD>/`
 - `data_info_f<FOLD>.csv`
 - `run_info_<TASK_NAME>_f<FOLD>.json`
 
@@ -362,6 +435,7 @@ also be retained:
 
 - `Train_csv_parts_F<FOLD>/`
 - `Val_csv_parts_F<FOLD>/`
+- `Test_csv_parts_F<FOLD>/`
 
 Common result files include:
 
@@ -372,6 +446,14 @@ Common result files include:
 - `model_f<FOLD>_<TRAINING_NAME>_last.pth`
 - `checkpoint_summary_f<FOLD>_<TRAINING_NAME>.json`
 
+When validation-image inference is enabled, the best checkpoint is used after training. The shared utilities in `IPV/landmark_inference.py` are used, and outputs are written to:
+
+```text
+<RUN_DIR>/TRAINING_RESULTS/<TASK_NAME>/<RUN_NAME>/validation_inference_f<FOLD>_<TRAINING_NAME>/
+```
+
+This directory contains combined heatmap overlays, predicted-versus-ground-truth endpoint overlays, per-endpoint vote-map overlays, one Excel metrics workbook per validation image, combined CSV/XLSX summaries, and run metadata.
+
 ## Notes and limits
 
 - Each image must have at least `--num-points` coordinate pairs in the mark-list file.
@@ -381,6 +463,8 @@ Common result files include:
 - `--num-points` must be between 1 and 30.
 - The current model expects exactly four sub-patch scales because each sample is represented as a quadruplet.
 - The current label structure is distance plus angle per point, so each point adds two model output heads.
+- Standalone inference requires checkpoints saved with the current self-describing metadata format.
+- Generic tasks can use endpoint predictions directly; dimension summaries require a task name recognised by the prostate defaults or a custom `DIMENSION_POINT_MAP`.
 - Generated metadata and CSV label counts are checked before training starts.
 - Training from existing data checks for partial fold data before model training starts.
 - Keep generated data, checkpoints, logs, and copied outputs out of Git.
