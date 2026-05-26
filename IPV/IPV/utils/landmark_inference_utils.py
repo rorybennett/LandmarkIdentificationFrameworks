@@ -4,7 +4,6 @@ Reusable IPV landmark inference, validation inference, and visualisation utiliti
 import csv
 import json
 import re
-import sys
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -17,7 +16,8 @@ from skimage import io
 from skimage.transform import resize
 from skimage.util import img_as_float32
 
-from .gpu_utils import create_patch
+from .patch_utils import create_patch
+from .progress_bar import ProgressBar
 
 POINT_PATTERN = re.compile(r'\((-?\d+(?:\.\d+)?),\s*(-?\d+(?:\.\d+)?)\)')
 TASKS_PER_POINT = 2
@@ -68,67 +68,6 @@ class LoadedInferenceCheckpoint:
     model: torch.nn.Module
     checkpoint: dict
     metadata: dict
-
-
-class ProgressBar:
-    """Render one terminal-line progress bar for image-level inference."""
-
-    def __init__(self, total, label, width=40):
-        self.total = int(total)
-        self.safe_total = max(self.total, 1)
-        self.label = label
-        self.width = int(width)
-        self.current = 0
-        self.status = ''
-        self.start_time = None
-
-    def __enter__(self):
-        self.start_time = time.time()
-        self.render()
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        sys.stdout.write('\n')
-        sys.stdout.flush()
-
-    def update(self, increment=1):
-        """Advance the progress bar and redraw the current line."""
-        self.current = min(self.current + int(increment), self.safe_total)
-        self.render()
-
-    def set_status(self, status):
-        """Update the current sample label without advancing progress."""
-        self.status = str(status)
-        self.render()
-
-    def render(self):
-        """Write the current progress state to stdout."""
-        fraction = min(self.current / self.safe_total, 1.0)
-        filled = int(self.width * fraction)
-        bar = '#' * filled + '-' * (self.width - filled)
-        elapsed = time.time() - self.start_time if self.start_time else 0.0
-        rate = self.current / elapsed if elapsed > 0 else 0.0
-        remaining = (self.safe_total - self.current) / rate if rate > 0 else 0.0
-        status_text = f' current={truncate_text(self.status, 45)}' if self.status else ''
-        message = (
-            f'\r\t{self.label}: '
-            f'[{bar}] '
-            f'{self.current}/{self.total} '
-            f'({fraction * 100:6.2f}%) '
-            f'elapsed={self.format_seconds(elapsed)} '
-            f'eta={self.format_seconds(remaining)}'
-            f'{status_text}\033[K'
-        )
-        sys.stdout.write(message)
-        sys.stdout.flush()
-
-    @staticmethod
-    def format_seconds(seconds):
-        """Format seconds as HH:MM:SS."""
-        seconds = int(seconds)
-        hours, remainder = divmod(seconds, 3600)
-        minutes, seconds = divmod(remainder, 60)
-        return f'{hours:02d}:{minutes:02d}:{seconds:02d}'
 
 
 def truncate_text(value, max_length):
@@ -260,7 +199,8 @@ class LandmarkImageInferer:
         for point_index in range(self.config.num_points):
             distance_head_index = point_index * TASKS_PER_POINT
             angle_head_index = distance_head_index + 1
-            scores = confidence[distance_head_index] * confidence[angle_head_index] if self.config.use_probability_weights else np.ones_like(confidence[distance_head_index], dtype=np.float32)
+            scores = confidence[distance_head_index] * confidence[angle_head_index] if self.config.use_probability_weights else np.ones_like(
+                confidence[distance_head_index], dtype=np.float32)
             vote_inputs[point_index]['distance_classes'].append(predictions[distance_head_index])
             vote_inputs[point_index]['angle_classes'].append(predictions[angle_head_index])
             vote_inputs[point_index]['scores'].append(scores.astype(np.float32))
@@ -824,7 +764,7 @@ def load_checkpoint(checkpoint_path):
 
 def load_model_from_checkpoint(checkpoint_path, device='auto'):
     """Load a self-describing IPV checkpoint and return the model plus inference metadata."""
-    from .quadruplet import Quadruplet
+    from ..quadruplet import Quadruplet
 
     device = resolve_device(device)
     checkpoint = load_checkpoint(checkpoint_path)
@@ -867,7 +807,7 @@ def extract_inference_metadata_from_checkpoint(checkpoint):
     vote_accumulation = inference_metadata.get('vote_accumulation', {}) if isinstance(inference_metadata.get('vote_accumulation', {}), dict) else {}
     smoothing_sigma = vote_accumulation.get('smoothing_sigma')
     checkpoint_info = metadata.get('checkpoint', {}) if isinstance(metadata.get('checkpoint', {}), dict) else {}
-    required_init_keys = ['num_of_pts', 'tasks_classes', 'network_name', 'branch_features', 'frozen_stages', 'small_input_stem', 'input_channels']
+    required_init_keys = ['num_of_points', 'tasks_classes', 'network_name', 'branch_features', 'frozen_stages', 'small_input_stem', 'input_channels']
     missing_init_keys = [key for key in required_init_keys if key not in init_args]
 
     if missing_init_keys:
@@ -876,7 +816,7 @@ def extract_inference_metadata_from_checkpoint(checkpoint):
     return {
         'raw_checkpoint_metadata': json_safe_metadata(metadata),
         'init_args': {
-            'num_of_pts': int(init_args['num_of_pts']),
+            'num_of_points': int(init_args['num_of_points']),
             'tasks_classes': tasks_classes,
             'network_name': str(init_args['network_name']),
             'branch_features': int(init_args['branch_features']),
@@ -998,4 +938,3 @@ def safe_file_stem(value):
         raise ValueError(f'Could not create a safe output name from: {value}')
 
     return safe_value
-
