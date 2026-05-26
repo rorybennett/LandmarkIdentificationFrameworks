@@ -6,14 +6,14 @@ python -m IPV.infer_landmarks
 """
 from pathlib import Path
 
-from IPV.landmark_inference import build_config_from_checkpoint_metadata, build_image_records, load_model_from_checkpoint, run_landmark_inference_for_records
+from IPV.IPV.landmark_inference_utils import build_config_from_checkpoint_metadata, build_image_records, load_model_from_checkpoint, run_landmark_inference_for_records
 
 # ======================================================================================================================
 # Paths
 # ======================================================================================================================
-MODEL_PATH = Path(r'D:\Coding\Testing\IPV_SAVING\transverse\model_best.pth')
-INPUT_PATH = Path(r'D:\Coding\Testing\InferenceImages')
-OUTPUT_DIR = Path(r'D:\Coding\Testing\InferenceResults')
+MODEL_PATH = Path(r'')
+INPUT_PATH = Path(r'')
+OUTPUT_DIR = Path(r'')
 GROUND_TRUTH_MARK_LIST_PATH = None
 
 # ======================================================================================================================
@@ -21,7 +21,7 @@ GROUND_TRUTH_MARK_LIST_PATH = None
 # ======================================================================================================================
 DEVICE = 'auto'
 BATCH_SIZE = 4096
-GRID_SPACING_OVERRIDE = None
+GRID_SPACING_OVERRIDE = 10
 VOTE_SMOOTH_SIGMA_OVERRIDE = None
 USE_PROBABILITY_WEIGHTS = True
 SAVE_RAW_VOTE_MAPS = False
