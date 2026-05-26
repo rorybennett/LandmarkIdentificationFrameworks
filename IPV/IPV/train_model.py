@@ -13,7 +13,7 @@ from torch.optim.lr_scheduler import StepLR
 from torch.utils.data import DataLoader
 
 from .custom_dataset import CustomDataset, ToTensor
-from .landmark_inference import LandmarkInferenceConfig, run_validation_inference_for_trained_model
+from .landmark_inference_utils import LandmarkInferenceConfig, run_validation_inference_for_trained_model
 
 MIN_POINTS_PER_IMAGE = 1
 MAX_POINTS_PER_IMAGE = 30

@@ -1,5 +1,5 @@
 from .model_registry import AVAILABLE_MODELS, get_available_model_names, print_available_models
-from .landmark_inference import LandmarkInferenceConfig
+from .landmark_inference_utils import LandmarkInferenceConfig
 
 __version__ = "0.1.0"
 
