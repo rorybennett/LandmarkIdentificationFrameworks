@@ -17,8 +17,14 @@ from skimage.util import img_as_float32, img_as_ubyte
 from .gpu_utils import create_patch, get_angle, get_label
 
 TRAIN_LIST_PATTERN = re.compile(r'^train_f(\d+)\.txt$')
+FOLD_PHASES = ('Train', 'Val', 'Test')
+FOLD_LIST_FILE_PREFIXES = {
+    'Train': 'train',
+    'Val': 'val',
+    'Test': 'test'
+}
 
-GRID_PHASES = {'Val'}
+GRID_PHASES = {'Val', 'Test'}
 SAMPLED_PHASES = {'Train'}
 
 MIN_POINTS_PER_IMAGE = 1
@@ -33,7 +39,7 @@ class PatchJob:
     image_path: Path
     points: list
     phase: str
-    val_grid_spacing: int
+    grid_spacing: int
     sub_patch_scales: list
     distance_intervals: list
     angle_intervals: list
@@ -117,7 +123,7 @@ def safe_file_stem(value):
 
 
 def discover_fold_numbers(fold_lists_path):
-    """Return contiguous fold numbers discovered from train_fN.txt files."""
+    """Return contiguous fold numbers and validate train/val/test files for each fold."""
     fold_lists_path = Path(fold_lists_path)
 
     if not fold_lists_path.is_dir():
@@ -144,10 +150,18 @@ def discover_fold_numbers(fold_lists_path):
     if fold_numbers != expected_fold_numbers:
         raise ValueError(f'Fold files must be contiguous from train_f1.txt. Found {fold_numbers}, expected {expected_fold_numbers}')
 
-    val_file = fold_lists_path / 'val.txt'
+    missing_files = []
 
-    if not val_file.is_file():
-        raise ValueError(f'Validation list file not found: {val_file}')
+    for fold_number in fold_numbers:
+        for prefix in FOLD_LIST_FILE_PREFIXES.values():
+            fold_file = fold_lists_path / f'{prefix}_f{fold_number}.txt'
+
+            if not fold_file.is_file():
+                missing_files.append(str(fold_file))
+
+    if missing_files:
+        missing_text = '\n'.join(missing_files)
+        raise ValueError(f'Every fold must have train_fN.txt, val_fN.txt, and test_fN.txt files. Missing files:\n{missing_text}')
 
     return fold_numbers
 
@@ -341,7 +355,7 @@ def create_patch_job(job):
     patch_creator = PatchCreator(image, sub_patch_scales=job.sub_patch_scales)
 
     if job.phase in GRID_PHASES:
-        centres = create_grid_centres(image_shape=image.shape, step=job.val_grid_spacing)
+        centres = create_grid_centres(image_shape=image.shape, step=job.grid_spacing)
     elif job.phase in SAMPLED_PHASES:
         centres = create_training_centres(points=job.points, image_shape=image.shape, patches_per_training_sample=job.patches_per_training_sample,
                                           sampling_variances=job.sampling_variances, rng=rng)
@@ -375,7 +389,7 @@ def create_patch_job(job):
 
 
 class DataCreator:
-    """Create train and validation patch data for one landmark task."""
+    """Create train, validation, and test patch data for one landmark task."""
 
     def __init__(self,
                  distance_intervals,
@@ -518,8 +532,8 @@ class DataCreator:
         if sorted(subpatch_scales) != list(subpatch_scales):
             raise ValueError(f'subpatch_scales should be in ascending order because the first value is the output patch size. Got: {subpatch_scales}')
 
-    def create(self, val_grid_spacing, current_fold):
-        """Create training and validation data for the requested fold."""
+    def create(self, val_grid_spacing, current_fold, generate_test_data=True):
+        """Create training and validation data, with optional test data, for the requested fold."""
         self.current_fold = current_fold
 
         if not self.fold_list:
@@ -527,21 +541,36 @@ class DataCreator:
 
         self.report_current_fold_input_channels()
 
-        self.create_data(val_grid_spacing=val_grid_spacing, phase='Train')
-        self.create_data(val_grid_spacing=val_grid_spacing, phase='Val')
+        phases_to_create = self.get_phases_to_create(generate_test_data=generate_test_data)
+
+        for phase in phases_to_create:
+            self.create_data(grid_spacing=val_grid_spacing, phase=phase)
+
+        if not generate_test_data:
+            print(f'\tTest fold inputs checked for fold {self.current_fold}, but test patch generation was skipped.', flush=True)
+
+    @staticmethod
+    def get_phases_to_create(generate_test_data=True):
+        """Return fold phases that should have patches and CSVs generated."""
+        if generate_test_data:
+            return FOLD_PHASES
+
+        return tuple(phase for phase in FOLD_PHASES if phase != 'Test')
 
     def read_fold_lists(self):
-        """Read train and validation sample names for all folds."""
+        """Read train, validation, and test sample names for all folds."""
         self.fold_list = []
 
         for fold_index in self.fold_numbers:
-            train_list = self.read_name_list(self.fold_lists_path / f'train_f{fold_index}.txt')
-            val_list = self.read_name_list(self.fold_lists_path / 'val.txt')
+            phase_lists = {}
 
-            self.validate_fold_split(fold_index, train_list, val_list)
-            self.fold_list.append([train_list, val_list])
+            for phase, prefix in FOLD_LIST_FILE_PREFIXES.items():
+                phase_lists[phase] = self.read_name_list(self.fold_lists_path / f'{prefix}_f{fold_index}.txt')
 
-        print(f'\tAll {self.folds} folds read...', flush=True)
+            self.validate_fold_split(fold_index=fold_index, phase_lists=phase_lists)
+            self.fold_list.append(phase_lists)
+
+        print(f'	All {self.folds} folds read...', flush=True)
 
     def read_points(self, phase):
         """Read image paths and landmark coordinates for the current fold and phase."""
@@ -577,13 +606,15 @@ class DataCreator:
             if sample_name not in mark_records:
                 raise KeyError(f'{sample_name} was found in the fold list but not in {self.mark_list_path}.')
 
-            image_name, _ = mark_records[sample_name]
+            image_name, points = mark_records[sample_name]
             image_path = self.image_data_path / image_name
 
             if not image_path.is_file():
                 raise FileNotFoundError(f'Image for {sample_name} was not found: {image_path}')
 
-            input_channels = infer_image_channel_count(image_path)
+            image = io.imread(image_path)
+            self.validate_mark_points(sample_name=sample_name, points=points, image_shape=image.shape)
+            input_channels = get_image_channel_count(image=image, image_path=image_path)
             channel_counts.setdefault(input_channels, []).append(sample_name)
 
         if len(channel_counts) != 1:
@@ -598,7 +629,7 @@ class DataCreator:
         """Return all sample names used by the current fold."""
         sample_names = []
 
-        for phase in ('Train', 'Val'):
+        for phase in FOLD_PHASES:
             sample_names.extend(self.get_phase_names(phase))
 
         return sorted(set(sample_names), key=natural_key)
@@ -620,7 +651,7 @@ class DataCreator:
             if not is_point_inside_image(x=x, y=y, width=width, height=height):
                 raise ValueError(f'{sample_name} point {point_index} is outside image bounds: ({x}, {y}) for width={width}, height={height}.')
 
-    def create_data(self, val_grid_spacing, phase):
+    def create_data(self, grid_spacing, phase):
         """Create and save patches and labels for one phase."""
         self.read_points(phase)
 
@@ -640,7 +671,7 @@ class DataCreator:
 
         part_csv_dir.mkdir(exist_ok=True, parents=True)
 
-        jobs = self.create_patch_jobs(phase=phase, val_grid_spacing=val_grid_spacing, patch_save_path=patch_save_path, image_save_path=image_save_path, part_csv_dir=part_csv_dir)
+        jobs = self.create_patch_jobs(phase=phase, grid_spacing=grid_spacing, patch_save_path=patch_save_path, image_save_path=image_save_path, part_csv_dir=part_csv_dir)
         progress_label = f'{phase} phase patch creation'
 
         if self.num_workers <= 1:
@@ -696,7 +727,7 @@ class DataCreator:
 
         print(f'\tValidated {csv_path.name}: {len(group_counts)} patch groups.', flush=True)
 
-    def create_patch_jobs(self, phase, val_grid_spacing, patch_save_path, image_save_path, part_csv_dir):
+    def create_patch_jobs(self, phase, grid_spacing, patch_save_path, image_save_path, part_csv_dir):
         """Create one worker job per sample in natural alphabetical order."""
         jobs = []
         sample_names = sorted(self.points_dict.keys(), key=natural_key)
@@ -710,7 +741,7 @@ class DataCreator:
                 image_path=self.paths_dict[sample_name],
                 points=self.points_dict[sample_name],
                 phase=phase,
-                val_grid_spacing=val_grid_spacing,
+                grid_spacing=grid_spacing,
                 sub_patch_scales=self.sub_patch_scales,
                 distance_intervals=self.distance_intervals,
                 angle_intervals=self.angle_intervals,
@@ -769,15 +800,10 @@ class DataCreator:
 
     def get_phase_names(self, phase):
         """Return the sample names for a phase."""
-        phase_indexes = {
-            'Train': 0,
-            'Val': 1
-        }
-
-        if phase not in phase_indexes:
+        if phase not in FOLD_PHASES:
             raise ValueError(f'Unknown phase: {phase}')
 
-        return self.fold_list[self.current_fold - 1][phase_indexes[phase]]
+        return self.fold_list[self.current_fold - 1][phase]
 
     def read_mark_list(self):
         """Read landmark markings from the mark list file."""
@@ -812,12 +838,23 @@ class DataCreator:
         return sorted(names, key=natural_key)
 
     @staticmethod
-    def validate_fold_split(fold_index, train_list, val_list):
-        """Check that train and validation splits do not overlap."""
-        train_set = set(train_list)
-        val_set = set(val_list)
+    def validate_fold_split(fold_index, phase_lists):
+        """Check that train, validation, and test splits do not overlap."""
+        seen = {}
+        overlaps = []
 
-        overlap = train_set & val_set
+        for phase, names in phase_lists.items():
+            duplicates = sorted({name for name in names if names.count(name) > 1})
 
-        if overlap:
-            raise ValueError(f'Fold {fold_index} has overlapping samples: {sorted(overlap)}')
+            if duplicates:
+                raise ValueError(f'Fold {fold_index} {phase} list contains duplicate samples: {duplicates}')
+
+            for name in names:
+                if name in seen:
+                    overlaps.append((name, seen[name], phase))
+                else:
+                    seen[name] = phase
+
+        if overlaps:
+            overlap_text = ', '.join(f'{name} ({first_phase}/{second_phase})' for name, first_phase, second_phase in overlaps[:20])
+            raise ValueError(f'Fold {fold_index} has overlapping samples between phases: {overlap_text}')
