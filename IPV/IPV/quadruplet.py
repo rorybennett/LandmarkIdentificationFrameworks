@@ -1,7 +1,17 @@
 import torch
 from torch import nn
-from torchvision.models import ResNet18_Weights, ResNet34_Weights, resnet18, resnet34
-from torchvision.models.resnet import BasicBlock, ResNet
+
+
+def import_torchvision_resnet_tools():
+    """Import torchvision ResNet tools only when a ResNet branch is requested."""
+    try:
+        from torchvision.models import ResNet18_Weights, ResNet34_Weights, resnet18, resnet34
+        from torchvision.models.resnet import BasicBlock, ResNet
+    except Exception as error:
+        raise RuntimeError('A ResNet backbone requires a working torchvision installation that matches the installed PyTorch build. '
+                           'Install compatible torch and torchvision builds, or use network_name=small_cnn.') from error
+
+    return ResNet18_Weights, ResNet34_Weights, resnet18, resnet34, BasicBlock, ResNet
 
 
 class SmallCNN(nn.Module):
@@ -134,6 +144,7 @@ def freeze_resnet_stages(network, frozen_stages):
 
 def build_custom_resnet(layer_config, output_features, small_input_stem, input_channels):
     """Build an untrained BasicBlock ResNet branch."""
+    _, _, _, _, BasicBlock, ResNet = import_torchvision_resnet_tools()
     network = ResNet(block=BasicBlock, layers=layer_config, num_classes=output_features)
 
     if small_input_stem:
@@ -144,12 +155,14 @@ def build_custom_resnet(layer_config, output_features, small_input_stem, input_c
     return network
 
 
+
 def build_branch(network_name, output_features=128, frozen_stages=0, small_input_stem=True, input_channels=3):
     """Build one quadruplet branch and return a feature vector."""
     network_name = network_name.lower()
     validate_input_channels(input_channels)
 
     if network_name == 'resnet18_pretrained':
+        ResNet18_Weights, _, resnet18, _, _, _ = import_torchvision_resnet_tools()
         network = resnet18(weights=ResNet18_Weights.DEFAULT)
         if small_input_stem:
             network = update_resnet_for_small_inputs(network, input_channels=input_channels, pretrained_stem=True)
@@ -162,6 +175,7 @@ def build_branch(network_name, output_features=128, frozen_stages=0, small_input
     if network_name == 'resnet18_untrained':
         if frozen_stages != 0:
             raise ValueError('Do not freeze stages in an untrained ResNet unless you intentionally want fixed random filters.')
+        _, _, resnet18, _, _, _ = import_torchvision_resnet_tools()
         network = resnet18(weights=None)
         if small_input_stem:
             network = update_resnet_for_small_inputs(network, input_channels=input_channels, pretrained_stem=False)
@@ -171,6 +185,7 @@ def build_branch(network_name, output_features=128, frozen_stages=0, small_input
         return network
 
     if network_name == 'resnet34_pretrained':
+        _, ResNet34_Weights, _, resnet34, _, _ = import_torchvision_resnet_tools()
         network = resnet34(weights=ResNet34_Weights.DEFAULT)
         if small_input_stem:
             network = update_resnet_for_small_inputs(network, input_channels=input_channels, pretrained_stem=True)
@@ -183,6 +198,7 @@ def build_branch(network_name, output_features=128, frozen_stages=0, small_input
     if network_name == 'resnet34_untrained':
         if frozen_stages != 0:
             raise ValueError('Do not freeze stages in an untrained ResNet unless you intentionally want fixed random filters.')
+        _, _, _, resnet34, _, _ = import_torchvision_resnet_tools()
         network = resnet34(weights=None)
         if small_input_stem:
             network = update_resnet_for_small_inputs(network, input_channels=input_channels, pretrained_stem=False)
@@ -219,10 +235,14 @@ class Quadruplet(nn.Module):
             raise ValueError('num_of_points must be between 1 and 30.')
 
         self.input_channels = int(input_channels)
-        self.net1 = build_branch(network_name=network_name, output_features=branch_features, frozen_stages=frozen_stages, small_input_stem=small_input_stem, input_channels=self.input_channels)
-        self.net2 = build_branch(network_name=network_name, output_features=branch_features, frozen_stages=frozen_stages, small_input_stem=small_input_stem, input_channels=self.input_channels)
-        self.net3 = build_branch(network_name=network_name, output_features=branch_features, frozen_stages=frozen_stages, small_input_stem=small_input_stem, input_channels=self.input_channels)
-        self.net4 = build_branch(network_name=network_name, output_features=branch_features, frozen_stages=frozen_stages, small_input_stem=small_input_stem, input_channels=self.input_channels)
+        self.net1 = build_branch(network_name=network_name, output_features=branch_features, frozen_stages=frozen_stages, small_input_stem=small_input_stem,
+                                 input_channels=self.input_channels)
+        self.net2 = build_branch(network_name=network_name, output_features=branch_features, frozen_stages=frozen_stages, small_input_stem=small_input_stem,
+                                 input_channels=self.input_channels)
+        self.net3 = build_branch(network_name=network_name, output_features=branch_features, frozen_stages=frozen_stages, small_input_stem=small_input_stem,
+                                 input_channels=self.input_channels)
+        self.net4 = build_branch(network_name=network_name, output_features=branch_features, frozen_stages=frozen_stages, small_input_stem=small_input_stem,
+                                 input_channels=self.input_channels)
 
         self.num_of_points = num_of_points
         self.num_of_tasks = len(tasks_classes)
