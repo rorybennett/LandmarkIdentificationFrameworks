@@ -53,7 +53,6 @@ class LandmarkInferenceConfig:
     checkpoint_path: Path | None = None
     checkpoint_type: str | None = None
     run_label: str = 'inference'
-    dimension_point_map: dict | None = None
 
 
 @dataclass
@@ -101,7 +100,6 @@ class LandmarkImageInferer:
         config.sub_patch_scales = [int(scale) for scale in config.sub_patch_scales]
         config.distance_intervals = [[float(lower), float(upper)] for lower, upper in config.distance_intervals]
         config.angle_intervals = [[float(lower), float(upper)] for lower, upper in config.angle_intervals]
-        config.dimension_point_map = normalise_dimension_point_map(config.dimension_point_map)
         config.run_label = safe_file_stem(config.run_label)
         return config
 
@@ -122,7 +120,6 @@ class LandmarkImageInferer:
             'point_overlays': self.config.output_dir / 'point_overlays',
             'vote_maps': self.config.output_dir / 'vote_maps',
             'raw_vote_maps': self.config.output_dir / 'raw_vote_maps',
-            'metrics': self.config.output_dir / 'metrics',
             'logs': self.config.output_dir / 'logs'
         }
 
@@ -169,12 +166,10 @@ class LandmarkImageInferer:
                                          angle_intervals=self.config.angle_intervals, num_points=self.config.num_points)
         detected_points, peak_values, smoothed_vote_maps = detect_points(vote_maps=vote_maps, smoothing_sigma=self.config.smoothing_sigma)
         result = build_result(record=record, detected_points=detected_points, ground_truth_points=record.ground_truth_points, peak_values=peak_values,
-                              num_centres=len(centres), grid_spacing=self.config.grid_spacing, checkpoint_type=self.config.checkpoint_type,
-                              task_name=self.config.task_name, dimension_point_map=self.config.dimension_point_map)
+                              num_centres=len(centres), grid_spacing=self.config.grid_spacing, checkpoint_type=self.config.checkpoint_type)
         output_stem = safe_file_stem(record.sample_name)
         self.save_visual_outputs(output_stem=output_stem, display_image=display_image, detected_points=detected_points, ground_truth_points=record.ground_truth_points,
                                  smoothed_vote_maps=smoothed_vote_maps)
-        self.save_metrics_excel(output_stem=output_stem, result=result)
 
         if self.config.save_raw_vote_maps:
             np.save(self.output_dirs['raw_vote_maps'] / f'{output_stem}_{self.config.run_label}_raw_vote_maps.npy', vote_maps)
@@ -230,22 +225,9 @@ class LandmarkImageInferer:
             vote_overlay = create_single_vote_map_overlay(display_image=display_image, vote_map=vote_map)
             cv2.imwrite(str(self.output_dirs['vote_maps'] / f'{output_stem}_{self.config.run_label}_vote_map_p{point_index}.png'), vote_overlay)
 
-    def save_metrics_excel(self, output_stem, result):
-        """Save one Excel workbook containing endpoint and dimension errors for one image."""
-        output_path = self.output_dirs['metrics'] / f'{output_stem}_{self.config.run_label}_metrics.xlsx'
-        endpoint_df = pd.DataFrame(result['endpoint_rows'])
-        dimension_df = pd.DataFrame(result['dimension_rows'])
-        summary_df = pd.DataFrame([result['summary']])
-
-        with pd.ExcelWriter(output_path, engine='openpyxl') as writer:
-            summary_df.to_excel(writer, sheet_name='summary', index=False)
-            endpoint_df.to_excel(writer, sheet_name='endpoints', index=False)
-            dimension_df.to_excel(writer, sheet_name='dimensions', index=False)
-
     def save_combined_summaries(self, results):
         """Save combined inference summaries across images."""
         endpoint_rows = [row for result in results for row in result['endpoint_rows']]
-        dimension_rows = [row for result in results for row in result['dimension_rows']]
         summary_rows = [result['summary'] for result in results]
         summary_prefix = build_summary_prefix(self.config.run_label)
         output_path = self.config.output_dir / f'{summary_prefix}_summary.xlsx'
@@ -253,11 +235,6 @@ class LandmarkImageInferer:
         with pd.ExcelWriter(output_path, engine='openpyxl') as writer:
             pd.DataFrame(summary_rows).to_excel(writer, sheet_name='image_summary', index=False)
             pd.DataFrame(endpoint_rows).to_excel(writer, sheet_name='endpoints', index=False)
-            pd.DataFrame(dimension_rows).to_excel(writer, sheet_name='dimensions', index=False)
-
-        pd.DataFrame(summary_rows).to_csv(self.config.output_dir / f'{summary_prefix}_image_summary.csv', index=False)
-        pd.DataFrame(endpoint_rows).to_csv(self.config.output_dir / f'{summary_prefix}_endpoint_predictions.csv', index=False)
-        pd.DataFrame(dimension_rows).to_csv(self.config.output_dir / f'{summary_prefix}_dimension_predictions.csv', index=False)
 
     def save_run_metadata(self, records, results, total_seconds):
         """Save inference run metadata."""
@@ -633,11 +610,9 @@ def draw_points(image, points, colour, prefix):
         cv2.putText(image, f'{prefix}{point_index}', (centre[0] + 6, centre[1] - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.5, colour, 1, cv2.LINE_AA)
 
 
-def build_result(record, detected_points, ground_truth_points, peak_values, num_centres, grid_spacing, checkpoint_type, task_name, dimension_point_map=None):
-    """Build per-image endpoint, dimension, and summary metrics."""
+def build_result(record, detected_points, ground_truth_points, peak_values, num_centres, grid_spacing, checkpoint_type):
+    """Build per-image endpoint and summary metrics."""
     endpoint_rows = build_endpoint_rows(record=record, detected_points=detected_points, ground_truth_points=ground_truth_points, peak_values=peak_values)
-    dimension_rows = build_dimension_rows(record=record, detected_points=detected_points, ground_truth_points=ground_truth_points,
-                                          task_name=task_name, dimension_point_map=dimension_point_map)
     point_errors = [row['point_error_px'] for row in endpoint_rows if row['point_error_px'] is not None]
     summary = {
         'sample_name': record.sample_name,
@@ -651,7 +626,9 @@ def build_result(record, detected_points, ground_truth_points, peak_values, num_
         'max_point_error_px': float(np.max(point_errors)) if point_errors else None
     }
 
-    return {'summary': summary, 'endpoint_rows': endpoint_rows, 'dimension_rows': dimension_rows}
+    return {'summary': summary, 'endpoint_rows': endpoint_rows}
+
+    return {'summary': summary, 'endpoint_rows': endpoint_rows}
 
 
 def build_endpoint_rows(record, detected_points, ground_truth_points, peak_values):
@@ -673,66 +650,6 @@ def build_endpoint_rows(record, detected_points, ground_truth_points, peak_value
         })
 
     return rows
-
-
-def build_dimension_rows(record, detected_points, ground_truth_points, task_name, dimension_point_map=None):
-    """Build recognised dimension metric rows for one image."""
-    rows = []
-
-    for dimension_name, point_pair in get_dimension_point_map(task_name=task_name, detected_points=detected_points, dimension_point_map=dimension_point_map).items():
-        pred_length = get_dimension_length(detected_points, point_pair)
-        gt_length = get_dimension_length(ground_truth_points, point_pair) if ground_truth_points is not None else None
-        rows.append({
-            'sample_name': record.sample_name,
-            'dimension_name': dimension_name,
-            'point_a': point_pair[0],
-            'point_b': point_pair[1],
-            'pred_length_px': pred_length,
-            'gt_length_px': gt_length,
-            'absolute_error_px': abs(pred_length - gt_length) if gt_length is not None else None
-        })
-
-    return rows
-
-
-def get_dimension_point_map(task_name, detected_points, dimension_point_map=None):
-    """Return configured or prostate IPV dimension endpoint pairings."""
-    if dimension_point_map:
-        return normalise_dimension_point_map(dimension_point_map)
-
-    point_count = len(detected_points)
-    name_text = str(task_name).lower()
-
-    if 'transverse' in name_text and point_count >= 4:
-        return {'AP': (1, 3), 'RL': (2, 4)}
-
-    if 'sagittal' in name_text and point_count >= 2:
-        return {'SI': (1, 2)}
-
-    return {}
-
-
-def normalise_dimension_point_map(dimension_point_map):
-    """Return dimension point pairs as one-indexed integer tuples."""
-    if not dimension_point_map:
-        return None
-
-    normalised = {}
-
-    for dimension_name, point_pair in dimension_point_map.items():
-        if len(point_pair) != 2:
-            raise ValueError(f'Dimension {dimension_name} must contain exactly two point indices.')
-
-        normalised[str(dimension_name)] = (int(point_pair[0]), int(point_pair[1]))
-
-    return normalised
-
-
-def get_dimension_length(points, point_pair):
-    """Return Euclidean distance between two one-indexed endpoints."""
-    point_a = points[point_pair[0] - 1]
-    point_b = points[point_pair[1] - 1]
-    return float(np.hypot(float(point_b[0]) - float(point_a[0]), float(point_b[1]) - float(point_a[1])))
 
 
 def get_point_error(detected_points, ground_truth_points, point_index):
