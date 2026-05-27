@@ -775,8 +775,7 @@ def build_config_from_checkpoint_metadata(metadata, output_dir, batch_size=2048,
         save_raw_vote_maps=bool(save_raw_vote_maps),
         checkpoint_path=checkpoint_path,
         checkpoint_type=metadata.get('checkpoint_type'),
-        run_label=run_label,
-        dimension_point_map=dimension_point_map
+        run_label=run_label
     )
 
 
