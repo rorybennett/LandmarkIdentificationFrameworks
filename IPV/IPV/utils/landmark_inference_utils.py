@@ -628,8 +628,6 @@ def build_result(record, detected_points, ground_truth_points, peak_values, num_
 
     return {'summary': summary, 'endpoint_rows': endpoint_rows}
 
-    return {'summary': summary, 'endpoint_rows': endpoint_rows}
-
 
 def build_endpoint_rows(record, detected_points, ground_truth_points, peak_values):
     """Build endpoint metric rows for one image."""
