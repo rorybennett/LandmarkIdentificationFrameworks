@@ -493,9 +493,6 @@ OUTPUT_DIR/
 The summary workbook contains `image_summary` and `endpoints` sheets. If `GROUND_TRUTH_MARK_LIST_PATH` is supplied, endpoint pixel-error metrics are included. Without
 ground truth, predicted endpoint coordinates and peak vote values are still saved.
 
-`DIMENSION_POINT_MAP` is present in the example script as a placeholder for future/custom dimension workflows, but the current reusable inference config does not store or
-use it. Do not rely on automatic dimension-summary files until that feature is implemented.
-
 ## Checkpoint metadata
 
 Training checkpoints include metadata that describes the task, model constructor arguments, preprocessing settings, input channel count, and inference defaults.
