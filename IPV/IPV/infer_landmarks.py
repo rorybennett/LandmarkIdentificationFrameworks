@@ -6,14 +6,15 @@ python -m IPV.infer_landmarks
 """
 from pathlib import Path
 
+import cv2
+
 from .utils.landmark_inference_utils import build_config_from_checkpoint_metadata, build_image_records, load_model_from_checkpoint, run_landmark_inference_for_records
 
 # ======================================================================================================================
 # Paths
 # ======================================================================================================================
-MODEL_PATH = Path(r'D:\Coding\Testing\IPV_SAVING\prostate_transverse\small_cnn_fs0_stemfalse_ppts200'
-                  r'\model_f1_best.pth')
-INPUT_PATH = Path(r'D:\Coding\Testing\Val_Images_F1')
+MODEL_PATH = Path(r'D:\Coding\Testing\IPV_SAVING\prostate_transverse\small_cnn_fs0_stemfalse_ppts200\model_f1_best.pth')
+INPUT_PATH = Path(r'D:\Datasets\IPV\OriginalData\TRANSVERSE')
 OUTPUT_DIR = Path(r'D:\Coding\Testing\InferenceResults')
 GROUND_TRUTH_MARK_LIST_PATH = None
 
@@ -22,30 +23,37 @@ GROUND_TRUTH_MARK_LIST_PATH = None
 # ======================================================================================================================
 DEVICE = 'auto'
 BATCH_SIZE = 4096
-GRID_SPACING_OVERRIDE = 10
-VOTE_SMOOTH_SIGMA_OVERRIDE = None
+GRID_SPACING_OVERRIDE = None
+VOTE_SMOOTH_SIGMA_OVERRIDE = 3
 USE_PROBABILITY_WEIGHTS = True
 SAVE_RAW_VOTE_MAPS = False
+CLEAR_CUDA_CACHE_BETWEEN_IMAGES = True
 RECURSIVE_IMAGE_SEARCH = False
 SUPPORTED_IMAGE_SUFFIXES = ('.png', '.jpg', '.jpeg', '.bmp', '.tif', '.tiff')
 RUN_LABEL = 'inference'
+PATCH_RESIZE_INTERPOLATION = cv2.INTER_AREA
 
 # ======================================================================================================================
-# Optional dimension summaries
+# Multiprocessing switches
 # ======================================================================================================================
-DIMENSION_POINT_MAP = None
-
-
-# Example for a non-prostate four-point task:
-# DIMENSION_POINT_MAP = {'vertical': (1, 3), 'horizontal': (2, 4)}
+PARALLEL_PATCH_GENERATION = True
+PATCH_WORKERS = 4
+PATCH_CHUNKSIZE = 32
+PARALLEL_VOTE_ACCUMULATION = True
+VOTE_WORKERS = None
+MULTIPROCESS_CONTEXT = 'spawn'
 
 
 def build_inference_config(checkpoint_metadata):
     """Build the runtime config using checkpoint settings plus local overrides."""
     return build_config_from_checkpoint_metadata(metadata=checkpoint_metadata, output_dir=OUTPUT_DIR, batch_size=BATCH_SIZE, grid_spacing=GRID_SPACING_OVERRIDE,
                                                  smoothing_sigma=VOTE_SMOOTH_SIGMA_OVERRIDE, use_probability_weights=USE_PROBABILITY_WEIGHTS,
-                                                 save_raw_vote_maps=SAVE_RAW_VOTE_MAPS, checkpoint_path=MODEL_PATH, run_label=RUN_LABEL,
-                                                 dimension_point_map=DIMENSION_POINT_MAP)
+                                                 save_raw_vote_maps=SAVE_RAW_VOTE_MAPS, clear_cuda_cache_between_images=CLEAR_CUDA_CACHE_BETWEEN_IMAGES,
+                                                 checkpoint_path=MODEL_PATH, run_label=RUN_LABEL,
+                                                 parallel_patch_generation=PARALLEL_PATCH_GENERATION, patch_workers=PATCH_WORKERS,
+                                                 patch_chunksize=PATCH_CHUNKSIZE, parallel_vote_accumulation=PARALLEL_VOTE_ACCUMULATION,
+                                                 vote_workers=VOTE_WORKERS, multiprocess_context=MULTIPROCESS_CONTEXT,
+                                                 patch_resize_interpolation=PATCH_RESIZE_INTERPOLATION)
 
 
 def main():
