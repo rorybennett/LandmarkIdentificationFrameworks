@@ -3,6 +3,9 @@ Configurable heatmap-regression models for landmark localisation.
 """
 
 import torch
+
+MIN_POINTS_PER_IMAGE = 1
+MAX_POINTS_PER_IMAGE = 30
 from torch import nn
 from torch.nn import functional as F
 
@@ -158,8 +161,8 @@ def build_channels(base_channels, depth, channel_multiplier, max_channels):
 
 def validate_unet_args(num_of_points, input_channels, base_channels, depth, channel_multiplier, final_kernel_size):
     """Validate U-Net construction values."""
-    if int(num_of_points) < 1:
-        raise ValueError('num_of_points must be at least 1.')
+    if int(num_of_points) < MIN_POINTS_PER_IMAGE or int(num_of_points) > MAX_POINTS_PER_IMAGE:
+        raise ValueError(f'num_of_points must be between {MIN_POINTS_PER_IMAGE} and {MAX_POINTS_PER_IMAGE}. Got: {num_of_points}')
 
     if int(input_channels) < 1:
         raise ValueError('input_channels must be at least 1.')

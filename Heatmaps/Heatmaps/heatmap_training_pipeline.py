@@ -16,6 +16,8 @@ from .train_model import HeatmapDataConfig, HeatmapModelConfig, TrainConfig, Tra
 from .utils.io_utils import discover_fold_numbers, str_to_bool
 
 RESULTS_DIR_NAME = 'TRAINING_RESULTS'
+MIN_POINTS_PER_IMAGE = 1
+MAX_POINTS_PER_IMAGE = 30
 
 
 @dataclass
@@ -120,9 +122,7 @@ class HeatmapTrainingPipeline:
 
     def write_run_info(self):
         """Write full run metadata."""
-        run_info = {'created_at': dt.datetime.now().isoformat(), 'run_results_root': self.run_results_root, 'run_results_path': self.run_results_path,
-                    'save_copy_path': self.get_save_copy_path(), 'run_config': asdict(self.run_config), 'data_config': asdict(self.data_config),
-                    'train_config': asdict(self.train_config), 'model_config': asdict(self.model_config)}
+        run_info = {'created_at': dt.datetime.now().isoformat(), 'run_results_root': self.run_results_root, 'run_results_path': self.run_results_path, 'save_copy_path': self.get_save_copy_path(), 'run_config': asdict(self.run_config), 'data_config': asdict(self.data_config), 'train_config': asdict(self.train_config), 'model_config': asdict(self.model_config)}
         run_info_path = self.run_results_path / f'run_info_{self.run_config.task_name}_f{self.run_config.fold}.json'
 
         with open(run_info_path, 'w', encoding='utf-8') as run_info_file:
@@ -183,6 +183,49 @@ class HeatmapTrainingPipeline:
         return f'{hours:02d}:{minutes:02d}:{seconds:02d}'
 
 
+def validate_num_points(value):
+    """Validate the number of landmark points for each image."""
+    value = int(value)
+
+    if value < MIN_POINTS_PER_IMAGE or value > MAX_POINTS_PER_IMAGE:
+        raise argparse.ArgumentTypeError(f'num-points must be between {MIN_POINTS_PER_IMAGE} and {MAX_POINTS_PER_IMAGE}.')
+
+    return value
+
+
+def format_number(value):
+    """Format numeric values safely for run folder names."""
+    return f'{value:g}'.replace('-', 'm').replace('.', 'p')
+
+
+def build_run_name(args, num_of_folds):
+    """Build a deterministic folder name shared by every fold in the same experiment."""
+    height, width = args.image_size
+    parts = [
+        'heatmap',
+        f'{num_of_folds}fold',
+        f'{args.num_points}points',
+        args.network_name,
+        f'im{height}x{width}',
+        f'sigma{format_number(args.heatmap_sigma)}',
+        f'bc{args.base_channels}',
+        f'depth{args.depth}',
+        f'cm{args.channel_multiplier}',
+        f'mc{args.max_channels}',
+        f'norm{args.normalisation}',
+        f'act{args.activation}',
+        f'drop{format_number(args.dropout)}',
+        f'up{args.upsampling}',
+        f'loss{args.loss_name}',
+        f'pw{format_number(args.positive_weight)}',
+        f'bs{args.batch_size}',
+        f'lr{format_number(args.learning_rate)}',
+        f'ep{args.max_training_epochs}'
+    ]
+
+    return clean_run_name('_'.join(parts))
+
+
 def clean_run_name(run_name):
     """Return a safe run-name string."""
     run_name = re.sub(r'[^A-Za-z0-9._-]+', '_', str(run_name)).strip('._-')
@@ -195,7 +238,7 @@ def clean_run_name(run_name):
 
 def parse_args():
     """Parse command-line arguments."""
-    parser = argparse.ArgumentParser(description='Train a heatmap landmark model using fold lists and mark-list annotations.')
+    parser = argparse.ArgumentParser(description='Train a heatmap landmark model using fold lists and mark-list annotations.', formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument('fold', type=int)
     parser.add_argument('task_name', type=str)
     parser.add_argument('train_model', type=str_to_bool, nargs='?', default=True)
@@ -203,14 +246,13 @@ def parse_args():
     parser.add_argument('delete_files', type=str_to_bool, nargs='?', default=False)
     parser.add_argument('--run-dir', type=Path, required=True)
     parser.add_argument('--save-dir', type=Path, default=None)
-    parser.add_argument('--run-name', type=str, default='unet_basic')
-    parser.add_argument('--num-points', type=int, required=True)
+    parser.add_argument('--run-name', type=str, default=None, help='Optional output-folder override. If omitted, a deterministic name is generated from the model and training settings.')
+    parser.add_argument('--num-points', type=validate_num_points, required=True, help=f'Number of ordered landmark points per image. Must be between {MIN_POINTS_PER_IMAGE} and {MAX_POINTS_PER_IMAGE}.')
     parser.add_argument('--fold-lists-path', type=Path, required=True)
     parser.add_argument('--mark-list-file', type=Path, required=True)
     parser.add_argument('--image-data-dir', type=Path, required=True)
     parser.add_argument('--image-size', type=int, nargs=2, default=list(pms.image_size), metavar=('HEIGHT', 'WIDTH'))
     parser.add_argument('--heatmap-sigma', type=float, default=pms.heatmap_sigma)
-    parser.add_argument('--pixels-per-cm', type=float, default=pms.pixels_per_cm)
     parser.add_argument('--recursive-image-search', type=str_to_bool, default=False)
     parser.add_argument('--batch-size', type=int, default=4)
     parser.add_argument('--learning-rate', type=float, default=1e-3)
@@ -247,24 +289,12 @@ def parse_args():
 
 def build_configs(args):
     """Build dataclass configurations from terminal arguments."""
-    discover_fold_numbers(args.fold_lists_path)
-    run_name = clean_run_name(args.run_name)
-    run_config = RunConfig(fold=args.fold, task_name=args.task_name, num_of_points=args.num_points, train_model=args.train_model, copy_files=args.copy_files,
-                           delete_files=args.delete_files, run_dir=args.run_dir, save_dir=args.save_dir, run_name=run_name)
-    data_config = HeatmapDataConfig(fold=args.fold, task_name=args.task_name, num_of_points=args.num_points, fold_lists_path=args.fold_lists_path,
-                                    mark_list_file=args.mark_list_file, image_data_dir=args.image_data_dir, image_size=tuple(args.image_size),
-                                    heatmap_sigma=args.heatmap_sigma, pixels_per_cm=args.pixels_per_cm,
-                                    recursive_image_search=args.recursive_image_search)
-    train_config = TrainConfig(batch_size=args.batch_size, learning_rate=args.learning_rate, max_training_epochs=args.max_training_epochs, num_workers=args.train_workers,
-                               optimiser_name=args.optimiser_name, loss_name=args.loss_name, positive_weight=args.positive_weight, weight_decay=args.weight_decay,
-                               momentum=args.momentum, lr_schedule=args.lr_schedule, lr_step_size=args.lr_step_size, lr_gamma=args.lr_gamma,
-                               early_stop_patience=args.early_stop_patience, early_stop_min_delta=args.early_stop_min_delta,
-                               early_stop_warmup_epochs=args.early_stop_warmup_epochs, use_amp=args.use_amp, save_validation_predictions=args.save_validation_predictions,
-                               save_validation_overlays=args.save_validation_overlays)
-    model_config = HeatmapModelConfig(network_name=args.network_name, base_channels=args.base_channels, depth=args.depth, channel_multiplier=args.channel_multiplier,
-                                      max_channels=args.max_channels, normalisation=None if args.normalisation == 'none' else args.normalisation,
-                                      activation=args.activation, dropout=args.dropout, upsampling=args.upsampling, output_activation=args.output_activation,
-                                      padding_mode=args.padding_mode, final_kernel_size=args.final_kernel_size)
+    num_of_folds = len(discover_fold_numbers(args.fold_lists_path))
+    run_name = clean_run_name(args.run_name) if args.run_name else build_run_name(args=args, num_of_folds=num_of_folds)
+    run_config = RunConfig(fold=args.fold, task_name=args.task_name, num_of_points=args.num_points, train_model=args.train_model, copy_files=args.copy_files, delete_files=args.delete_files, run_dir=args.run_dir, save_dir=args.save_dir, run_name=run_name)
+    data_config = HeatmapDataConfig(fold=args.fold, task_name=args.task_name, num_of_points=args.num_points, fold_lists_path=args.fold_lists_path, mark_list_file=args.mark_list_file, image_data_dir=args.image_data_dir, image_size=tuple(args.image_size), heatmap_sigma=args.heatmap_sigma, input_channels=None, recursive_image_search=args.recursive_image_search)
+    train_config = TrainConfig(batch_size=args.batch_size, learning_rate=args.learning_rate, max_training_epochs=args.max_training_epochs, num_workers=args.train_workers, optimiser_name=args.optimiser_name, loss_name=args.loss_name, positive_weight=args.positive_weight, weight_decay=args.weight_decay, momentum=args.momentum, lr_schedule=args.lr_schedule, lr_step_size=args.lr_step_size, lr_gamma=args.lr_gamma, early_stop_patience=args.early_stop_patience, early_stop_min_delta=args.early_stop_min_delta, early_stop_warmup_epochs=args.early_stop_warmup_epochs, use_amp=args.use_amp, save_validation_predictions=args.save_validation_predictions, save_validation_overlays=args.save_validation_overlays)
+    model_config = HeatmapModelConfig(network_name=args.network_name, base_channels=args.base_channels, depth=args.depth, channel_multiplier=args.channel_multiplier, max_channels=args.max_channels, normalisation=None if args.normalisation == 'none' else args.normalisation, activation=args.activation, dropout=args.dropout, upsampling=args.upsampling, output_activation=args.output_activation, padding_mode=args.padding_mode, final_kernel_size=args.final_kernel_size)
     return run_config, data_config, train_config, model_config
 
 

@@ -6,28 +6,23 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-from skimage import io
-from skimage.util import img_as_ubyte
 
-POINT_COLOURS = ((0, 0, 255), (255, 0, 0), (0, 255, 255), (0, 255, 0), (255, 255, 0), (255, 0, 255), (128, 0, 255), (255, 128, 0))
-GROUND_TRUTH_COLOUR = (0, 255, 0)
-PREDICTED_COLOUR = (0, 0, 255)
+GROUND_TRUTH_POINT_COLOUR = (0, 255, 0)
+PREDICTED_POINT_COLOUR = (0, 0, 255)
+POINT_MARKER_SIZE = 16
+POINT_MARKER_THICKNESS = 2
+HEATMAP_IMAGE_WEIGHT = 0.55
+HEATMAP_COLOUR_WEIGHT = 0.90
 
 
 def load_display_image(image_path):
-    """Load an image as BGR uint8 for OpenCV drawing."""
-    image = io.imread(image_path)
+    """Load one source image as BGR uint8 for OpenCV drawing."""
+    display_image = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
 
-    if image.ndim == 2:
-        image = cv2.cvtColor(image, cv2.COLOR_GRAY2RGB)
+    if display_image is None:
+        raise FileNotFoundError(f'Could not read image for display: {image_path}')
 
-    if image.ndim == 3 and image.shape[2] == 4:
-        image = image[:, :, :3]
-
-    if image.dtype != np.uint8:
-        image = img_as_ubyte(image)
-
-    return cv2.cvtColor(np.ascontiguousarray(image), cv2.COLOR_RGB2BGR)
+    return display_image
 
 
 def normalise_map(value_map):
@@ -64,8 +59,8 @@ def resize_heatmaps_to_display(heatmaps, display_shape):
     return np.stack(resized_heatmaps, axis=0)
 
 
-def create_combined_heatmap_overlay(display_image, heatmaps, alpha=0.55):
-    """Overlay all predicted heatmaps on one image."""
+def create_combined_heatmap_overlay(display_image, heatmaps, predicted_points=None):
+    """Overlay all predicted heatmaps on one image and label predicted endpoints."""
     heatmaps = resize_heatmaps_to_display(heatmaps=heatmaps, display_shape=display_image.shape)
     combined = np.max(heatmaps, axis=0)
     heatmap = cv2.applyColorMap(normalise_map(combined), cv2.COLORMAP_JET)
@@ -73,33 +68,44 @@ def create_combined_heatmap_overlay(display_image, heatmaps, alpha=0.55):
     if heatmap.shape != display_image.shape:
         raise ValueError(f'Heatmap overlay shape {heatmap.shape} does not match display image shape {display_image.shape}.')
 
-    return cv2.addWeighted(display_image, 1.0 - float(alpha), heatmap, float(alpha), 0)
+    overlay = cv2.addWeighted(display_image, HEATMAP_IMAGE_WEIGHT, heatmap, HEATMAP_COLOUR_WEIGHT, 0)
 
-
-def create_endpoint_overlay(display_image, target_points, predicted_points):
-    """Draw ground truth and predicted landmarks on one image."""
-    overlay = display_image.copy()
-
-    for point in target_points:
-        cv2.drawMarker(overlay, (int(round(point[0])), int(round(point[1]))), GROUND_TRUTH_COLOUR, markerType=cv2.MARKER_TILTED_CROSS, markerSize=16, thickness=2, line_type=cv2.LINE_AA)
-
-    for point in predicted_points:
-        cv2.circle(overlay, (int(round(point[0])), int(round(point[1]))), 4, PREDICTED_COLOUR, thickness=-1, lineType=cv2.LINE_AA)
+    if predicted_points is not None:
+        draw_points(image=overlay, points=predicted_points, colour=PREDICTED_POINT_COLOUR, prefix='P')
 
     return overlay
 
 
+def create_point_overlay(display_image, detected_points, ground_truth_points=None):
+    """Create one image containing IPV-style predicted and optional ground-truth endpoints."""
+    overlay = display_image.copy()
+
+    if ground_truth_points is not None:
+        draw_points(image=overlay, points=ground_truth_points, colour=GROUND_TRUTH_POINT_COLOUR, prefix='G')
+
+    draw_points(image=overlay, points=detected_points, colour=PREDICTED_POINT_COLOUR, prefix='P')
+    return overlay
+
+
+def draw_points(image, points, colour, prefix):
+    """Draw labelled endpoints onto an image."""
+    for point_index, (x, y) in enumerate(points, start=1):
+        centre = (int(round(x)), int(round(y)))
+        cv2.drawMarker(image, centre, colour, markerType=cv2.MARKER_TILTED_CROSS, markerSize=POINT_MARKER_SIZE, thickness=POINT_MARKER_THICKNESS, line_type=cv2.LINE_AA)
+        cv2.putText(image, f'{prefix}{point_index}', (centre[0] + 6, centre[1] - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.5, colour, 1, cv2.LINE_AA)
+
+
 def save_validation_overlays(image_path, output_dir, output_stem, target_points, predicted_points, predicted_heatmaps):
-    """Save heatmap and endpoint overlays for one validation image."""
+    """Save heatmap and point overlays for one validation image."""
     output_dir = Path(output_dir)
     heatmap_dir = output_dir / 'heatmap_overlays'
-    endpoint_dir = output_dir / 'endpoint_overlays'
+    point_dir = output_dir / 'point_overlays'
     heatmap_dir.mkdir(exist_ok=True, parents=True)
-    endpoint_dir.mkdir(exist_ok=True, parents=True)
+    point_dir.mkdir(exist_ok=True, parents=True)
 
     display_image = load_display_image(image_path)
-    heatmap_overlay = create_combined_heatmap_overlay(display_image=display_image, heatmaps=predicted_heatmaps)
-    endpoint_overlay = create_endpoint_overlay(display_image=display_image, target_points=target_points, predicted_points=predicted_points)
+    heatmap_overlay = create_combined_heatmap_overlay(display_image=display_image, heatmaps=predicted_heatmaps, predicted_points=predicted_points)
+    point_overlay = create_point_overlay(display_image=display_image, detected_points=predicted_points, ground_truth_points=target_points)
 
-    cv2.imwrite(str(heatmap_dir / f'{output_stem}_heatmap_overlay.png'), heatmap_overlay)
-    cv2.imwrite(str(endpoint_dir / f'{output_stem}_endpoint_overlay.png'), endpoint_overlay)
+    cv2.imwrite(str(heatmap_dir / f'{output_stem}_validation_heatmap_overlay.png'), heatmap_overlay)
+    cv2.imwrite(str(point_dir / f'{output_stem}_validation_points_overlay.png'), point_overlay)

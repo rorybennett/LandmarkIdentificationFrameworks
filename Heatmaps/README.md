@@ -63,7 +63,6 @@ Example transverse prostate run:
 ```bash
 heatmaps-train 1 prostate_transverse true false false \
     --run-dir "$HOME/HEATMAP_TRAINING" \
-    --run-name "unet_basic" \
     --num-points 4 \
     --fold-lists-path "$HOME/DATA/folds" \
     --mark-list-file "$HOME/DATA/doctors_resampled_transverseMarkList.txt" \
@@ -111,7 +110,7 @@ train_plot_f1.png
 validation_predictions_f1.csv
 ```
 
-If `--save-validation-overlays true` is used, validation endpoint and heatmap overlay images are also saved.
+If `--save-validation-overlays true` is used, validation images are saved under `validation_results_FOLD/heatmap_overlays` and `validation_results_FOLD/point_overlays`. Point overlays use the same labelled ground-truth/predicted endpoint style as the IPV package.
 
 ## Model registry
 
@@ -122,3 +121,10 @@ unet_basic
 ```
 
 Additional models can be added later in `model_registry.py` and `models.py` without changing the training pipeline.
+
+## Run names
+
+`--network-name` selects the model architecture. `--run-name` is only an optional output-folder override.
+
+If `--run-name` is omitted, the package builds a deterministic run folder from the fold count, point count, selected network, image size, heatmap sigma, U-Net settings, loss settings, batch size, learning rate, and epoch count.
+

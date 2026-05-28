@@ -24,6 +24,8 @@ from .utils.io_utils import heatmaps_to_points, infer_image_channel_count, safe_
 from .utils.visualisation_utils import save_validation_overlays
 
 CHECKPOINT_FORMAT_VERSION = 1
+MIN_POINTS_PER_IMAGE = 1
+MAX_POINTS_PER_IMAGE = 30
 
 
 @dataclass
@@ -36,7 +38,6 @@ class HeatmapDataConfig:
     image_data_dir: Path
     image_size: tuple[int, int]
     heatmap_sigma: float = 8.0
-    pixels_per_cm: float = 40.0
     input_channels: int | None = None
     recursive_image_search: bool = False
 
@@ -125,7 +126,7 @@ class TrainModel:
 
         with open(log_path, 'w', newline='', encoding='utf-8') as log_file:
             log_writer = csv.writer(log_file)
-            log_writer.writerow(['epoch', 'lr', 'train_loss', 'train_error_px', 'train_error_mm', 'val_loss', 'val_error_px', 'val_error_mm'])
+            log_writer.writerow(['epoch', 'lr', 'train_loss', 'train_error_px', 'val_loss', 'val_error_px'])
 
             for epoch in range(1, self.train_config.max_training_epochs + 1):
                 print(f"\t{dt.datetime.now().strftime('%d/%m/%Y %H:%M:%S')} - Epoch {epoch}/{self.train_config.max_training_epochs}", flush=True)
@@ -136,7 +137,7 @@ class TrainModel:
                     scheduler.step(val_metrics['loss']) if isinstance(scheduler, ReduceLROnPlateau) else scheduler.step()
 
                 current_lr = self.get_current_lr(optimiser)
-                log_writer.writerow([epoch, current_lr, train_metrics['loss'], train_metrics['error_px'], train_metrics['error_mm'], val_metrics['loss'], val_metrics['error_px'], val_metrics['error_mm']])
+                log_writer.writerow([epoch, current_lr, train_metrics['loss'], train_metrics['error_px'], val_metrics['loss'], val_metrics['error_px']])
                 log_file.flush()
                 self.update_history(history=history, epoch=epoch, train_metrics=train_metrics, val_metrics=val_metrics)
                 self.save_history_plot(history)
@@ -385,10 +386,8 @@ class TrainModel:
         return torch.linalg.norm(predicted_original - points_original, dim=2)
 
     def format_metrics(self, loss, error_px):
-        """Return loss, pixel error, and millimetre error."""
-        pixels_per_mm = float(self.data_config.pixels_per_cm) / 10.0
-        error_mm = float(error_px) / pixels_per_mm if pixels_per_mm > 0 else float('nan')
-        return {'loss': float(loss), 'error_px': float(error_px), 'error_mm': float(error_mm)}
+        """Return loss and pixel endpoint error."""
+        return {'loss': float(loss), 'error_px': float(error_px)}
 
     def save_checkpoint(self, model, optimiser, checkpoint_type, epoch, metrics):
         """Save one model checkpoint."""
@@ -440,8 +439,8 @@ class TrainModel:
 
     def validate_configs(self):
         """Validate core configuration values."""
-        if int(self.data_config.num_of_points) < 1:
-            raise ValueError('num_of_points must be at least 1.')
+        if int(self.data_config.num_of_points) < MIN_POINTS_PER_IMAGE or int(self.data_config.num_of_points) > MAX_POINTS_PER_IMAGE:
+            raise ValueError(f'num_of_points must be between {MIN_POINTS_PER_IMAGE} and {MAX_POINTS_PER_IMAGE}. Got: {self.data_config.num_of_points}')
 
         if len(tuple(self.data_config.image_size)) != 2:
             raise ValueError('image_size must be a two-item tuple: height, width.')
@@ -478,7 +477,7 @@ class TrainModel:
 
     def get_validation_overlay_path(self):
         """Return the validation overlay path."""
-        return self.output_path / f'validation_overlays_F{self.data_config.fold}'
+        return self.output_path / f'validation_results_F{self.data_config.fold}'
 
     @staticmethod
     def get_current_lr(optimiser):
