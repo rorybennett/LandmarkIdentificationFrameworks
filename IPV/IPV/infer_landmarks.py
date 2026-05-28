@@ -13,9 +13,9 @@ from .utils.landmark_inference_utils import build_config_from_checkpoint_metadat
 # ======================================================================================================================
 # Paths
 # ======================================================================================================================
-MODEL_PATH = Path(r'D:\Coding\Testing\IPV_SAVING\prostate_transverse\small_cnn_fs0_stemfalse_ppts200\model_f1_best.pth')
-INPUT_PATH = Path(r'D:\Datasets\IPV\OriginalData\TRANSVERSE')
-OUTPUT_DIR = Path(r'D:\Coding\Testing\InferenceResults')
+MODEL_PATH = Path(r'')
+INPUT_PATH = Path(r'')
+OUTPUT_DIR = Path(r'')
 GROUND_TRUTH_MARK_LIST_PATH = None
 
 # ======================================================================================================================
