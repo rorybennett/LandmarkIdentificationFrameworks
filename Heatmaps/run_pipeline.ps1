@@ -1,0 +1,56 @@
+$RUN_DIR = "$HOME\HEATMAP_TRAINING"
+$SAVE_DIR = "$HOME\HEATMAP_SAVING"
+$FOLD_LISTS_DIR = "$HOME\DATA\folds"
+$MARK_LIST_FILE = "$HOME\DATA\doctors_resampled_transverseMarkList.txt"
+$IMAGE_DATA_DIR = "$HOME\DATA\TRANSVERSE"
+
+$FOLD = 1
+$TASK_NAME = "prostate_transverse"
+$NUM_POINTS = 4
+
+$TRAIN_MODEL = "true"
+$COPY_FILES = "false"
+$DELETE_FILES = "false"
+
+$RUN_NAME = "unet_basic"
+$INPUT_CHANNELS = 1
+$IMAGE_HEIGHT = 512
+$IMAGE_WIDTH = 512
+$HEATMAP_SIGMA = 8
+$PIXELS_PER_CM = 40
+
+$BATCH_SIZE = 4
+$MAX_TRAINING_EPOCHS = 80
+$LEARNING_RATE = 0.001
+$TRAIN_WORKERS = 8
+$LOSS_NAME = "weighted_mse"
+$POSITIVE_WEIGHT = 20
+$EARLY_STOP_PATIENCE = 15
+$EARLY_STOP_WARMUP_EPOCHS = 10
+$SAVE_VALIDATION_OVERLAYS = "false"
+
+$argsList = @(
+    "$FOLD", "$TASK_NAME", "$TRAIN_MODEL", "$COPY_FILES", "$DELETE_FILES",
+    "--run-dir", "$RUN_DIR",
+    "--save-dir", "$SAVE_DIR",
+    "--run-name", "$RUN_NAME",
+    "--num-points", "$NUM_POINTS",
+    "--fold-lists-path", "$FOLD_LISTS_DIR",
+    "--mark-list-file", "$MARK_LIST_FILE",
+    "--image-data-dir", "$IMAGE_DATA_DIR",
+    "--image-size", "$IMAGE_HEIGHT", "$IMAGE_WIDTH",
+    "--heatmap-sigma", "$HEATMAP_SIGMA",
+    "--pixels-per-cm", "$PIXELS_PER_CM",
+    "--input-channels", "$INPUT_CHANNELS",
+    "--batch-size", "$BATCH_SIZE",
+    "--learning-rate", "$LEARNING_RATE",
+    "--max-training-epochs", "$MAX_TRAINING_EPOCHS",
+    "--train-workers", "$TRAIN_WORKERS",
+    "--loss-name", "$LOSS_NAME",
+    "--positive-weight", "$POSITIVE_WEIGHT",
+    "--early-stop-patience", "$EARLY_STOP_PATIENCE",
+    "--early-stop-warmup-epochs", "$EARLY_STOP_WARMUP_EPOCHS",
+    "--save-validation-overlays", "$SAVE_VALIDATION_OVERLAYS"
+)
+
+heatmaps-train @argsList
