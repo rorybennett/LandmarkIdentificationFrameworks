@@ -44,9 +44,36 @@ def normalise_map(value_map):
 
 def create_combined_heatmap_overlay(display_image, heatmaps, alpha=0.55):
     """Overlay all predicted heatmaps on one image."""
-    combined = np.max(np.asarray(heatmaps), axis=0)
+    heatmaps = resize_heatmaps_to_display(heatmaps=heatmaps, display_shape=display_image.shape)
+    combined = np.max(heatmaps, axis=0)
     heatmap = cv2.applyColorMap(normalise_map(combined), cv2.COLORMAP_JET)
+
+    if heatmap.shape != display_image.shape:
+        raise ValueError(f'Heatmap overlay shape {heatmap.shape} does not match display image shape {display_image.shape}.')
+
     return cv2.addWeighted(display_image, 1.0 - float(alpha), heatmap, float(alpha), 0)
+
+
+def resize_heatmaps_to_display(heatmaps, display_shape):
+    """Resize heatmaps from model resolution to display-image resolution."""
+    heatmaps = np.asarray(heatmaps, dtype=np.float32)
+
+    if heatmaps.ndim == 2:
+        heatmaps = heatmaps[np.newaxis, :, :]
+
+    if heatmaps.ndim != 3:
+        raise ValueError(f'Expected heatmaps with shape [points, height, width], got {heatmaps.shape}.')
+
+    display_height, display_width = int(display_shape[0]), int(display_shape[1])
+    resized_heatmaps = []
+
+    for heatmap in heatmaps:
+        if heatmap.shape != (display_height, display_width):
+            heatmap = cv2.resize(heatmap, (display_width, display_height), interpolation=cv2.INTER_LINEAR)
+
+        resized_heatmaps.append(heatmap.astype(np.float32))
+
+    return np.stack(resized_heatmaps, axis=0)
 
 
 def create_endpoint_overlay(display_image, target_points, predicted_points):
@@ -54,7 +81,8 @@ def create_endpoint_overlay(display_image, target_points, predicted_points):
     overlay = display_image.copy()
 
     for point in target_points:
-        cv2.drawMarker(overlay, (int(round(point[0])), int(round(point[1]))), GROUND_TRUTH_COLOUR, markerType=cv2.MARKER_TILTED_CROSS, markerSize=16, thickness=2, line_type=cv2.LINE_AA)
+        cv2.drawMarker(overlay, (int(round(point[0])), int(round(point[1]))), GROUND_TRUTH_COLOUR, markerType=cv2.MARKER_TILTED_CROSS, markerSize=16, thickness=2,
+                       line_type=cv2.LINE_AA)
 
     for point in predicted_points:
         cv2.circle(overlay, (int(round(point[0])), int(round(point[1]))), 4, PREDICTED_COLOUR, thickness=-1, lineType=cv2.LINE_AA)
