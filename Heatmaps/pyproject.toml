@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "landmark-heatmaps"
+version = "0.1.0"
+description = "Heatmap-regression landmark localisation package."
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [
+    { name = "Rory Bennett" }
+]
+dependencies = [
+    "numpy",
+    "matplotlib",
+    "opencv-python",
+    "scikit-image"
+]
+
+[project.scripts]
+heatmaps-train = "Heatmaps.heatmap_training_pipeline:main"
+
+[tool.setuptools.packages.find]
+include = ["Heatmaps*"]
