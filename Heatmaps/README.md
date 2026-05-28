@@ -70,13 +70,27 @@ heatmaps-train 1 prostate_transverse true false false \
     --image-data-dir "$HOME/DATA/TRANSVERSE" \
     --image-size 512 512 \
     --heatmap-sigma 8 \
-    --input-channels 1 \
     --batch-size 4 \
     --learning-rate 0.001 \
     --max-training-epochs 80
 ```
 
 For sagittal prostate images, change `--num-points 2` and use the sagittal mark list and image directory.
+
+## Input channels
+
+Input channels are detected automatically from the train and validation images for the selected fold. There is no command-line option for this.
+
+The package assumes that every image for a given task has the same number of source channels. The detected source channel count is used directly to configure the first U-Net layer:
+
+| Source images | Model input channels |
+| --- | --- |
+| All greyscale | 1 |
+| All RGB | 3 |
+| All RGBA | 4 |
+
+If any image has a different number of channels from the rest of the train/validation images, the run stops with a clear error. The loader does not silently convert greyscale, RGB, or RGBA images to another channel count.
+
 
 ## Outputs
 

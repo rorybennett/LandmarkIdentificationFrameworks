@@ -13,7 +13,6 @@ $COPY_FILES = "false"
 $DELETE_FILES = "false"
 
 $RUN_NAME = "unet_basic"
-$INPUT_CHANNELS = 1
 $IMAGE_HEIGHT = 512
 $IMAGE_WIDTH = 512
 $HEATMAP_SIGMA = 8
@@ -41,7 +40,6 @@ $argsList = @(
     "--image-size", "$IMAGE_HEIGHT", "$IMAGE_WIDTH",
     "--heatmap-sigma", "$HEATMAP_SIGMA",
     "--pixels-per-cm", "$PIXELS_PER_CM",
-    "--input-channels", "$INPUT_CHANNELS",
     "--batch-size", "$BATCH_SIZE",
     "--learning-rate", "$LEARNING_RATE",
     "--max-training-epochs", "$MAX_TRAINING_EPOCHS",

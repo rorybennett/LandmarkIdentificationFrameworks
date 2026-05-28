@@ -22,7 +22,7 @@ class HeatmapDatasetConfig:
     image_data_dir: Path
     image_size: tuple[int, int]
     heatmap_sigma: float
-    input_channels: int = 1
+    input_channels: int | None = None
     recursive_image_search: bool = False
 
 

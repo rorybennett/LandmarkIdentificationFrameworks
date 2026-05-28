@@ -156,6 +156,7 @@ class HeatmapTrainingPipeline:
         print(f'\tMark list: {self.data_config.mark_list_file}', flush=True)
         print(f'\tImages: {self.data_config.image_data_dir}', flush=True)
         print(f'\tImage size: {self.data_config.image_size}', flush=True)
+        print('\tInput channels: automatic', flush=True)
         print(f'\tModel: {self.model_config.network_name}', flush=True)
         self.print_section_end()
 
@@ -208,7 +209,6 @@ def parse_args():
     parser.add_argument('--image-size', type=int, nargs=2, default=list(pms.image_size), metavar=('HEIGHT', 'WIDTH'))
     parser.add_argument('--heatmap-sigma', type=float, default=pms.heatmap_sigma)
     parser.add_argument('--pixels-per-cm', type=float, default=pms.pixels_per_cm)
-    parser.add_argument('--input-channels', type=int, choices=[1, 3], default=1)
     parser.add_argument('--recursive-image-search', type=str_to_bool, default=False)
     parser.add_argument('--batch-size', type=int, default=4)
     parser.add_argument('--learning-rate', type=float, default=1e-3)

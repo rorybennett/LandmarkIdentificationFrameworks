@@ -42,18 +42,6 @@ def normalise_map(value_map):
     return ((value_map - value_min) / (value_max - value_min) * 255).astype(np.uint8)
 
 
-def create_combined_heatmap_overlay(display_image, heatmaps, alpha=0.55):
-    """Overlay all predicted heatmaps on one image."""
-    heatmaps = resize_heatmaps_to_display(heatmaps=heatmaps, display_shape=display_image.shape)
-    combined = np.max(heatmaps, axis=0)
-    heatmap = cv2.applyColorMap(normalise_map(combined), cv2.COLORMAP_JET)
-
-    if heatmap.shape != display_image.shape:
-        raise ValueError(f'Heatmap overlay shape {heatmap.shape} does not match display image shape {display_image.shape}.')
-
-    return cv2.addWeighted(display_image, 1.0 - float(alpha), heatmap, float(alpha), 0)
-
-
 def resize_heatmaps_to_display(heatmaps, display_shape):
     """Resize heatmaps from model resolution to display-image resolution."""
     heatmaps = np.asarray(heatmaps, dtype=np.float32)
@@ -76,13 +64,24 @@ def resize_heatmaps_to_display(heatmaps, display_shape):
     return np.stack(resized_heatmaps, axis=0)
 
 
+def create_combined_heatmap_overlay(display_image, heatmaps, alpha=0.55):
+    """Overlay all predicted heatmaps on one image."""
+    heatmaps = resize_heatmaps_to_display(heatmaps=heatmaps, display_shape=display_image.shape)
+    combined = np.max(heatmaps, axis=0)
+    heatmap = cv2.applyColorMap(normalise_map(combined), cv2.COLORMAP_JET)
+
+    if heatmap.shape != display_image.shape:
+        raise ValueError(f'Heatmap overlay shape {heatmap.shape} does not match display image shape {display_image.shape}.')
+
+    return cv2.addWeighted(display_image, 1.0 - float(alpha), heatmap, float(alpha), 0)
+
+
 def create_endpoint_overlay(display_image, target_points, predicted_points):
     """Draw ground truth and predicted landmarks on one image."""
     overlay = display_image.copy()
 
     for point in target_points:
-        cv2.drawMarker(overlay, (int(round(point[0])), int(round(point[1]))), GROUND_TRUTH_COLOUR, markerType=cv2.MARKER_TILTED_CROSS, markerSize=16, thickness=2,
-                       line_type=cv2.LINE_AA)
+        cv2.drawMarker(overlay, (int(round(point[0])), int(round(point[1]))), GROUND_TRUTH_COLOUR, markerType=cv2.MARKER_TILTED_CROSS, markerSize=16, thickness=2, line_type=cv2.LINE_AA)
 
     for point in predicted_points:
         cv2.circle(overlay, (int(round(point[0])), int(round(point[1]))), 4, PREDICTED_COLOUR, thickness=-1, lineType=cv2.LINE_AA)
@@ -97,8 +96,10 @@ def save_validation_overlays(image_path, output_dir, output_stem, target_points,
     endpoint_dir = output_dir / 'endpoint_overlays'
     heatmap_dir.mkdir(exist_ok=True, parents=True)
     endpoint_dir.mkdir(exist_ok=True, parents=True)
+
     display_image = load_display_image(image_path)
-    heatmap_overlay = create_combined_heatmap_overlay(display_image, predicted_heatmaps)
-    endpoint_overlay = create_endpoint_overlay(display_image, target_points, predicted_points)
+    heatmap_overlay = create_combined_heatmap_overlay(display_image=display_image, heatmaps=predicted_heatmaps)
+    endpoint_overlay = create_endpoint_overlay(display_image=display_image, target_points=target_points, predicted_points=predicted_points)
+
     cv2.imwrite(str(heatmap_dir / f'{output_stem}_heatmap_overlay.png'), heatmap_overlay)
     cv2.imwrite(str(endpoint_dir / f'{output_stem}_endpoint_overlay.png'), endpoint_overlay)

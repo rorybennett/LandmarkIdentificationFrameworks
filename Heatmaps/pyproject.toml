@@ -8,11 +8,10 @@ version = "0.1.0"
 description = "Heatmap-regression landmark localisation package."
 readme = "README.md"
 requires-python = ">=3.10"
-authors = [
-    { name = "Rory Bennett" }
-]
+authors = [{name = "LandmarkIdentificationFrameworks"}]
 dependencies = [
     "numpy",
+    "torch",
     "matplotlib",
     "opencv-python",
     "scikit-image"

@@ -168,34 +168,60 @@ def resolve_image_path(image_data_dir, image_name, sample_stem, recursive=False,
     raise FileNotFoundError(f'Image for {sample_stem} was not found under {image_data_dir}')
 
 
-def load_image_as_float(image_path, input_channels):
-    """Load an image as channel-first float32 in the requested channel count."""
-    image = img_as_float32(io.imread(image_path))
+def get_image_channel_count(image, image_path=None):
+    """Return the number of source channels in an image."""
+    path_text = f' for {image_path}' if image_path is not None else ''
+
+    if image.ndim == 2:
+        return 1
+
+    if image.ndim == 3 and image.shape[2] in (1, 3, 4):
+        return int(image.shape[2])
+
+    raise ValueError(f'Unsupported image shape{path_text}: {image.shape}. Expected greyscale, RGB, or RGBA.')
+
+
+def infer_image_channel_count(image_path):
+    """Read one image and return its source channel count."""
+    image = io.imread(image_path)
+    return get_image_channel_count(image=image, image_path=image_path)
+
+
+def validate_resolved_input_channels(input_channels):
+    """Validate internally resolved model input channels."""
+    if input_channels is None:
+        raise ValueError('input_channels has not been resolved. Call the automatic channel resolver before creating the DataLoader.')
+
+    input_channels = int(input_channels)
+
+    if input_channels not in (1, 3, 4):
+        raise ValueError(f'input_channels must resolve to 1, 3, or 4. Got: {input_channels}')
+
+    return input_channels
+
+
+def convert_channels_if_needed(image, input_channels, image_path=None):
+    """Validate that an image matches the internally resolved channel count."""
+    expected_channels = validate_resolved_input_channels(input_channels)
+    actual_channels = get_image_channel_count(image=image, image_path=image_path)
+
+    if actual_channels != expected_channels:
+        raise ValueError(
+            f'Image channel mismatch for {image_path}: expected {expected_channels} channel(s), '
+            f'but found {actual_channels}. All train and validation images must have the same number of source channels.'
+        )
 
     if image.ndim == 2:
         image = image[:, :, np.newaxis]
 
-    if image.ndim != 3:
-        raise ValueError(f'Unsupported image shape for {image_path}: {image.shape}')
+    return image
 
-    if image.shape[2] == 4 and int(input_channels) in (1, 3):
-        image = image[:, :, :3]
 
-    if int(input_channels) == 1:
-        if image.shape[2] == 1:
-            image = image[:, :, 0]
-        else:
-            image = cv2.cvtColor(image[:, :, :3], cv2.COLOR_RGB2GRAY)
-        return image[np.newaxis, :, :].astype(np.float32)
-
-    if int(input_channels) == 3:
-        if image.shape[2] == 1:
-            image = np.repeat(image, 3, axis=2)
-        elif image.shape[2] != 3:
-            raise ValueError(f'Cannot convert {image_path} with {image.shape[2]} channels to 3 channels.')
-        return np.moveaxis(image, -1, 0).astype(np.float32)
-
-    raise ValueError(f'input_channels must be 1 or 3. Got: {input_channels}')
+def load_image_as_float(image_path, input_channels):
+    """Load an image as channel-first float32 in the requested channel count."""
+    image = img_as_float32(io.imread(image_path))
+    image = convert_channels_if_needed(image=image, input_channels=input_channels, image_path=image_path)
+    return np.moveaxis(image, -1, 0).astype(np.float32)
 
 
 def resize_channel_first(image, image_size):

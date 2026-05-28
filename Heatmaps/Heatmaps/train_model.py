@@ -20,7 +20,7 @@ from torch.utils.data import DataLoader
 from .custom_dataset import HeatmapDataset, HeatmapDatasetConfig
 from .model_registry import build_heatmap_model
 from .models import count_trainable_parameters
-from .utils.io_utils import heatmaps_to_points, safe_file_stem, scale_points_to_original
+from .utils.io_utils import heatmaps_to_points, infer_image_channel_count, safe_file_stem, scale_points_to_original
 from .utils.visualisation_utils import save_validation_overlays
 
 CHECKPOINT_FORMAT_VERSION = 1
@@ -37,7 +37,7 @@ class HeatmapDataConfig:
     image_size: tuple[int, int]
     heatmap_sigma: float = 8.0
     pixels_per_cm: float = 40.0
-    input_channels: int = 1
+    input_channels: int | None = None
     recursive_image_search: bool = False
 
 
@@ -255,12 +255,58 @@ class TrainModel:
         return output_csv
 
     def build_data_loaders(self):
-        """Build train and validation data loaders."""
+        """Build train and validation data loaders after resolving input channels."""
         train_dataset = HeatmapDataset(self.build_dataset_config(split_name='train'))
         val_dataset = HeatmapDataset(self.build_dataset_config(split_name='val'))
+        self.resolve_input_channels(train_dataset=train_dataset, val_dataset=val_dataset)
         train_loader = DataLoader(train_dataset, batch_size=self.train_config.batch_size, shuffle=True, num_workers=self.train_config.num_workers, pin_memory=self.device.type == 'cuda')
         val_loader = DataLoader(val_dataset, batch_size=self.train_config.batch_size, shuffle=False, num_workers=self.train_config.num_workers, pin_memory=self.device.type == 'cuda')
         return train_loader, val_loader
+
+    def resolve_input_channels(self, train_dataset, val_dataset):
+        """Automatically resolve and validate image input channels before model construction."""
+        phase_counts = {
+            'train': self.infer_dataset_channel_counts(train_dataset),
+            'val': self.infer_dataset_channel_counts(val_dataset),
+        }
+        unique_source_channels = sorted({channel_count for counts in phase_counts.values() for channel_count in counts})
+        counts_text = ', '.join(f'{phase}: {counts}' for phase, counts in phase_counts.items())
+
+        if not unique_source_channels:
+            raise ValueError('No source images were available for input-channel detection.')
+
+        unsupported_sources = [channel_count for channel_count in unique_source_channels if channel_count not in (1, 3, 4)]
+
+        if unsupported_sources:
+            raise ValueError(f'Unsupported source channel count(s): {unsupported_sources}. Supported source images are greyscale, RGB, and RGBA.')
+
+        if len(unique_source_channels) != 1:
+            raise ValueError(
+                f'Input-channel mismatch detected across train/validation images: {counts_text}. '
+                'All images for a task must have the same number of source channels.'
+            )
+
+        resolved_channels = int(unique_source_channels[0])
+        self.data_config.input_channels = resolved_channels
+        train_dataset.config.input_channels = resolved_channels
+        val_dataset.config.input_channels = resolved_channels
+
+        print(f'\tAutomatically detected {resolved_channels} input channel(s). Source channel counts: {counts_text}.', flush=True)
+        return resolved_channels
+
+    @staticmethod
+    def infer_dataset_channel_counts(dataset):
+        """Return a count of source image channel counts for a dataset split."""
+        channel_counts = {}
+
+        for record in dataset.records:
+            channel_count = infer_image_channel_count(record['image_path'])
+            channel_counts[channel_count] = channel_counts.get(channel_count, 0) + 1
+
+        if not channel_counts:
+            raise ValueError(f'No image records found for split {dataset.config.split_name}.')
+
+        return channel_counts
 
     def build_dataset_config(self, split_name):
         """Build one dataset configuration."""
@@ -281,7 +327,10 @@ class TrainModel:
             'padding_mode': self.model_config.padding_mode,
             'final_kernel_size': self.model_config.final_kernel_size,
         }
-        model = build_heatmap_model(network_name=self.model_config.network_name, num_of_points=self.data_config.num_of_points, input_channels=self.data_config.input_channels, **model_kwargs)
+        if self.data_config.input_channels is None:
+            raise ValueError('input_channels has not been resolved. Build data loaders before constructing the model.')
+
+        model = build_heatmap_model(network_name=self.model_config.network_name, num_of_points=self.data_config.num_of_points, input_channels=int(self.data_config.input_channels), **model_kwargs)
         return model.to(self.device)
 
     def build_criterion(self):
@@ -393,9 +442,6 @@ class TrainModel:
         """Validate core configuration values."""
         if int(self.data_config.num_of_points) < 1:
             raise ValueError('num_of_points must be at least 1.')
-
-        if int(self.data_config.input_channels) not in (1, 3):
-            raise ValueError('input_channels must be 1 or 3.')
 
         if len(tuple(self.data_config.image_size)) != 2:
             raise ValueError('image_size must be a two-item tuple: height, width.')
