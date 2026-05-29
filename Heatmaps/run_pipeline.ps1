@@ -10,7 +10,6 @@ $NUM_POINTS = 4
 
 $TRAIN_MODEL = "true"
 $COPY_FILES = "false"
-$DELETE_FILES = "false"
 
 $RUN_NAME = ""
 $NETWORK_NAME = "unet_basic"
@@ -38,38 +37,38 @@ $ACTIVATION = "relu"
 $DROPOUT = 0
 $UPSAMPLING = "bilinear"
 
-$argsList = @(
-    "$FOLD", "$TASK_NAME", "$TRAIN_MODEL", "$COPY_FILES", "$DELETE_FILES",
-    "--run-dir", "$RUN_DIR",
-    "--save-dir", "$SAVE_DIR",
-    "--num-points", "$NUM_POINTS",
-    "--fold-lists-path", "$FOLD_LISTS_DIR",
-    "--mark-list-file", "$MARK_LIST_FILE",
-    "--image-data-dir", "$IMAGE_DATA_DIR",
-    "--image-size", "$IMAGE_HEIGHT", "$IMAGE_WIDTH",
-    "--heatmap-sigma", "$HEATMAP_SIGMA",
-    "--batch-size", "$BATCH_SIZE",
-    "--learning-rate", "$LEARNING_RATE",
-    "--max-training-epochs", "$MAX_TRAINING_EPOCHS",
-    "--train-workers", "$TRAIN_WORKERS",
-    "--loss-name", "$LOSS_NAME",
-    "--positive-weight", "$POSITIVE_WEIGHT",
-    "--early-stop-patience", "$EARLY_STOP_PATIENCE",
-    "--early-stop-warmup-epochs", "$EARLY_STOP_WARMUP_EPOCHS",
-    "--save-validation-overlays", "$SAVE_VALIDATION_OVERLAYS",
-    "--network-name", "$NETWORK_NAME",
-    "--base-channels", "$BASE_CHANNELS",
-    "--depth", "$DEPTH",
-    "--channel-multiplier", "$CHANNEL_MULTIPLIER",
-    "--max-channels", "$MAX_CHANNELS",
-    "--normalisation", "$NORMALISATION",
-    "--activation", "$ACTIVATION",
-    "--dropout", "$DROPOUT",
-    "--upsampling", "$UPSAMPLING"
+$ARGS = @(
+    $FOLD, $TASK_NAME, $TRAIN_MODEL, $COPY_FILES,
+    "--run-dir", $RUN_DIR,
+    "--save-dir", $SAVE_DIR,
+    "--num-points", $NUM_POINTS,
+    "--fold-lists-path", $FOLD_LISTS_DIR,
+    "--mark-list-file", $MARK_LIST_FILE,
+    "--image-data-dir", $IMAGE_DATA_DIR,
+    "--image-size", $IMAGE_HEIGHT, $IMAGE_WIDTH,
+    "--heatmap-sigma", $HEATMAP_SIGMA,
+    "--batch-size", $BATCH_SIZE,
+    "--learning-rate", $LEARNING_RATE,
+    "--max-training-epochs", $MAX_TRAINING_EPOCHS,
+    "--train-workers", $TRAIN_WORKERS,
+    "--loss-name", $LOSS_NAME,
+    "--positive-weight", $POSITIVE_WEIGHT,
+    "--early-stop-patience", $EARLY_STOP_PATIENCE,
+    "--early-stop-warmup-epochs", $EARLY_STOP_WARMUP_EPOCHS,
+    "--save-validation-overlays", $SAVE_VALIDATION_OVERLAYS,
+    "--network-name", $NETWORK_NAME,
+    "--base-channels", $BASE_CHANNELS,
+    "--depth", $DEPTH,
+    "--channel-multiplier", $CHANNEL_MULTIPLIER,
+    "--max-channels", $MAX_CHANNELS,
+    "--normalisation", $NORMALISATION,
+    "--activation", $ACTIVATION,
+    "--dropout", $DROPOUT,
+    "--upsampling", $UPSAMPLING
 )
 
 if ($RUN_NAME -ne "") {
-    $argsList += @("--run-name", "$RUN_NAME")
+    $ARGS += @("--run-name", $RUN_NAME)
 }
 
-heatmaps-train @argsList
+heatmaps-train @ARGS

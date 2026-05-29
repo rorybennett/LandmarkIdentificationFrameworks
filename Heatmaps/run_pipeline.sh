@@ -13,7 +13,6 @@ NUM_POINTS=4
 
 TRAIN_MODEL="true"
 COPY_FILES="false"
-DELETE_FILES="false"
 
 RUN_NAME=""
 NETWORK_NAME="unet_basic"
@@ -42,7 +41,7 @@ DROPOUT=0
 UPSAMPLING="bilinear"
 
 ARGS=(
-    "$FOLD" "$TASK_NAME" "$TRAIN_MODEL" "$COPY_FILES" "$DELETE_FILES"
+    "$FOLD" "$TASK_NAME" "$TRAIN_MODEL" "$COPY_FILES"
     --run-dir "$RUN_DIR"
     --save-dir "$SAVE_DIR"
     --num-points "$NUM_POINTS"

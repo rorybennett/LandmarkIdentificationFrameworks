@@ -5,7 +5,6 @@ Training and validation routines for heatmap landmark models.
 import csv
 import datetime as dt
 import json
-import shutil
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -21,6 +20,7 @@ from .custom_dataset import HeatmapDataset, HeatmapDatasetConfig
 from .model_registry import build_heatmap_model
 from .models import count_trainable_parameters
 from .utils.io_utils import heatmaps_to_points, infer_image_channel_count, safe_file_stem, scale_points_to_original
+from .utils.progress_bar import ProgressBar
 from .utils.visualisation_utils import save_validation_overlays
 
 CHECKPOINT_FORMAT_VERSION = 1
@@ -141,7 +141,6 @@ class TrainModel:
                 log_file.flush()
                 self.update_history(history=history, epoch=epoch, train_metrics=train_metrics, val_metrics=val_metrics)
                 self.save_history_plot(history)
-                print(f"\tlr={current_lr:.6g} train_loss={train_metrics['loss']:.6f} val_loss={val_metrics['loss']:.6f} val_error={val_metrics['error_px']:.2f}px", flush=True)
                 last_epoch = epoch
                 last_val_loss = val_metrics['loss']
                 last_checkpoint_path = self.save_checkpoint(model=model, optimiser=optimiser, checkpoint_type='last', epoch=epoch, metrics=val_metrics)
@@ -152,7 +151,7 @@ class TrainModel:
                     best_epoch = epoch
                     best_val_loss = val_metrics['loss']
                     best_checkpoint_path = self.save_checkpoint(model=model, optimiser=optimiser, checkpoint_type='best', epoch=epoch, metrics=val_metrics)
-                    print(f"\tNew best model saved from epoch {epoch} with val_loss={best_val_loss:.6f}", flush=True)
+                    print(f"\tNew best model saved from epoch {epoch} with val_loss={best_val_loss:.6f} and val_error={val_metrics['error_px']:.2f}px", flush=True)
 
                 if epoch >= self.train_config.early_stop_warmup_epochs:
                     bad_epochs = 0 if is_early_stop_improvement else bad_epochs + 1
@@ -164,9 +163,12 @@ class TrainModel:
         validation_predictions_path = None
 
         if self.train_config.save_validation_predictions:
-            validation_predictions_path = self.save_validation_predictions(model=model, val_loader=val_loader, checkpoint_path=best_checkpoint_path or last_checkpoint_path)
+            validation_predictions_path = self.save_validation_predictions(model=model, val_loader=val_loader,
+                                                                           checkpoint_path=best_checkpoint_path or last_checkpoint_path)
 
-        self.write_checkpoint_summary(best_epoch=best_epoch, last_epoch=last_epoch, best_val_loss=best_val_loss, last_val_loss=last_val_loss, best_checkpoint_path=best_checkpoint_path, last_checkpoint_path=last_checkpoint_path, validation_predictions_path=validation_predictions_path)
+        self.write_checkpoint_summary(best_epoch=best_epoch, last_epoch=last_epoch, best_val_loss=best_val_loss, last_val_loss=last_val_loss,
+                                      best_checkpoint_path=best_checkpoint_path, last_checkpoint_path=last_checkpoint_path,
+                                      validation_predictions_path=validation_predictions_path)
         plt.clf()
         return best_checkpoint_path or last_checkpoint_path
 
@@ -229,8 +231,10 @@ class TrainModel:
         output_csv = self.output_path / f'validation_predictions_f{self.data_config.fold}.csv'
         rows = []
 
-        with torch.inference_mode():
+        with torch.inference_mode(), ProgressBar(total=len(val_loader), label='Validation predictions') as progress_bar:
             for batch in val_loader:
+                status = ', '.join(str(sample_name) for sample_name in list(batch['sample_name'])[:2])
+                progress_bar.set_status(status)
                 images = batch['image'].to(self.device, non_blocking=True)
                 points_original = batch['points_original'].to(self.device, non_blocking=True)
                 original_size = batch['original_size'].to(self.device, non_blocking=True)
@@ -243,13 +247,16 @@ class TrainModel:
                     target_points = points_original[index].detach().cpu().numpy()
                     predicted_points = predicted_original[index].detach().cpu().numpy()
                     point_errors = errors[index].detach().cpu().numpy()
-                    row = self.create_prediction_row(sample_name=sample_name, target_points=target_points, predicted_points=predicted_points, point_errors=point_errors)
-                    rows.append(row)
+                    rows.append(
+                        self.create_prediction_row(sample_name=sample_name, target_points=target_points, predicted_points=predicted_points, point_errors=point_errors))
 
                     if self.train_config.save_validation_overlays:
                         output_stem = safe_file_stem(sample_name)
                         predicted_heatmaps = outputs[index].detach().cpu().numpy()
-                        save_validation_overlays(image_path=Path(batch['image_path'][index]), output_dir=self.get_validation_overlay_path(), output_stem=output_stem, target_points=target_points, predicted_points=predicted_points, predicted_heatmaps=predicted_heatmaps)
+                        save_validation_overlays(image_path=Path(batch['image_path'][index]), output_dir=self.get_validation_overlay_path(), output_stem=output_stem,
+                                                 target_points=target_points, predicted_points=predicted_points, predicted_heatmaps=predicted_heatmaps)
+
+                progress_bar.update()
 
         self.write_prediction_csv(output_csv=output_csv, rows=rows)
         print(f'\tValidation predictions saved to {output_csv}', flush=True)
@@ -260,16 +267,15 @@ class TrainModel:
         train_dataset = HeatmapDataset(self.build_dataset_config(split_name='train'))
         val_dataset = HeatmapDataset(self.build_dataset_config(split_name='val'))
         self.resolve_input_channels(train_dataset=train_dataset, val_dataset=val_dataset)
-        train_loader = DataLoader(train_dataset, batch_size=self.train_config.batch_size, shuffle=True, num_workers=self.train_config.num_workers, pin_memory=self.device.type == 'cuda')
-        val_loader = DataLoader(val_dataset, batch_size=self.train_config.batch_size, shuffle=False, num_workers=self.train_config.num_workers, pin_memory=self.device.type == 'cuda')
+        train_loader = DataLoader(train_dataset, batch_size=self.train_config.batch_size, shuffle=True, num_workers=self.train_config.num_workers,
+                                  pin_memory=self.device.type == 'cuda')
+        val_loader = DataLoader(val_dataset, batch_size=self.train_config.batch_size, shuffle=False, num_workers=self.train_config.num_workers,
+                                pin_memory=self.device.type == 'cuda')
         return train_loader, val_loader
 
     def resolve_input_channels(self, train_dataset, val_dataset):
         """Automatically resolve and validate image input channels before model construction."""
-        phase_counts = {
-            'train': self.infer_dataset_channel_counts(train_dataset),
-            'val': self.infer_dataset_channel_counts(val_dataset),
-        }
+        phase_counts = {'train': self.infer_dataset_channel_counts(train_dataset), 'val': self.infer_dataset_channel_counts(val_dataset)}
         unique_source_channels = sorted({channel_count for counts in phase_counts.values() for channel_count in counts})
         counts_text = ', '.join(f'{phase}: {counts}' for phase, counts in phase_counts.items())
 
@@ -283,9 +289,7 @@ class TrainModel:
 
         if len(unique_source_channels) != 1:
             raise ValueError(
-                f'Input-channel mismatch detected across train/validation images: {counts_text}. '
-                'All images for a task must have the same number of source channels.'
-            )
+                f'Input-channel mismatch detected across train/validation images: {counts_text}. All images for a task must have the same number of source channels.')
 
         resolved_channels = int(unique_source_channels[0])
         self.data_config.input_channels = resolved_channels
@@ -311,27 +315,23 @@ class TrainModel:
 
     def build_dataset_config(self, split_name):
         """Build one dataset configuration."""
-        return HeatmapDatasetConfig(fold=self.data_config.fold, split_name=split_name, num_of_points=self.data_config.num_of_points, fold_lists_path=self.data_config.fold_lists_path, mark_list_file=self.data_config.mark_list_file, image_data_dir=self.data_config.image_data_dir, image_size=self.data_config.image_size, heatmap_sigma=self.data_config.heatmap_sigma, input_channels=self.data_config.input_channels, recursive_image_search=self.data_config.recursive_image_search)
+        return HeatmapDatasetConfig(fold=self.data_config.fold, split_name=split_name, num_of_points=self.data_config.num_of_points,
+                                    fold_lists_path=self.data_config.fold_lists_path, mark_list_file=self.data_config.mark_list_file,
+                                    image_data_dir=self.data_config.image_data_dir, image_size=self.data_config.image_size, heatmap_sigma=self.data_config.heatmap_sigma,
+                                    input_channels=self.data_config.input_channels, recursive_image_search=self.data_config.recursive_image_search)
 
     def build_model(self):
         """Build the configured heatmap model."""
-        model_kwargs = {
-            'base_channels': self.model_config.base_channels,
-            'depth': self.model_config.depth,
-            'channel_multiplier': self.model_config.channel_multiplier,
-            'max_channels': self.model_config.max_channels,
-            'normalisation': self.model_config.normalisation,
-            'activation': self.model_config.activation,
-            'dropout': self.model_config.dropout,
-            'upsampling': self.model_config.upsampling,
-            'output_activation': self.model_config.output_activation,
-            'padding_mode': self.model_config.padding_mode,
-            'final_kernel_size': self.model_config.final_kernel_size,
-        }
+        model_kwargs = {'base_channels': self.model_config.base_channels, 'depth': self.model_config.depth, 'channel_multiplier': self.model_config.channel_multiplier,
+                        'max_channels': self.model_config.max_channels, 'normalisation': self.model_config.normalisation, 'activation': self.model_config.activation,
+                        'dropout': self.model_config.dropout, 'upsampling': self.model_config.upsampling, 'output_activation': self.model_config.output_activation,
+                        'padding_mode': self.model_config.padding_mode, 'final_kernel_size': self.model_config.final_kernel_size}
+
         if self.data_config.input_channels is None:
             raise ValueError('input_channels has not been resolved. Build data loaders before constructing the model.')
 
-        model = build_heatmap_model(network_name=self.model_config.network_name, num_of_points=self.data_config.num_of_points, input_channels=int(self.data_config.input_channels), **model_kwargs)
+        model = build_heatmap_model(network_name=self.model_config.network_name, num_of_points=self.data_config.num_of_points,
+                                    input_channels=int(self.data_config.input_channels), **model_kwargs)
         return model.to(self.device)
 
     def build_criterion(self):
@@ -392,7 +392,9 @@ class TrainModel:
     def save_checkpoint(self, model, optimiser, checkpoint_type, epoch, metrics):
         """Save one model checkpoint."""
         checkpoint_path = self.get_checkpoint_path(checkpoint_type)
-        torch.save({'format_version': CHECKPOINT_FORMAT_VERSION, 'created_at': dt.datetime.now().isoformat(), 'epoch': int(epoch), 'checkpoint_type': checkpoint_type, 'state_dict': model.state_dict(), 'optimiser_state_dict': optimiser.state_dict(), 'metrics': metrics, 'metadata': self.build_metadata()}, checkpoint_path)
+        torch.save({'format_version': CHECKPOINT_FORMAT_VERSION, 'created_at': dt.datetime.now().isoformat(), 'epoch': int(epoch), 'checkpoint_type': checkpoint_type,
+                    'state_dict': model.state_dict(), 'optimiser_state_dict': optimiser.state_dict(), 'metrics': metrics, 'metadata': self.build_metadata()},
+                   checkpoint_path)
         return checkpoint_path
 
     def load_checkpoint_state(self, model, checkpoint_path):
@@ -412,13 +414,20 @@ class TrainModel:
 
     def write_checkpoint_summary(self, best_epoch, last_epoch, best_val_loss, last_val_loss, best_checkpoint_path, last_checkpoint_path, validation_predictions_path):
         """Write checkpoint and run metadata."""
-        summary = {'format_version': CHECKPOINT_FORMAT_VERSION, 'created_at': dt.datetime.now().isoformat(), 'fold': int(self.data_config.fold), 'task_name': self.data_config.task_name, 'num_of_points': int(self.data_config.num_of_points), 'checkpoints': {'best': {'epoch': best_epoch, 'val_loss': best_val_loss, 'path': str(best_checkpoint_path) if best_checkpoint_path is not None else None}, 'last': {'epoch': last_epoch, 'val_loss': last_val_loss, 'path': str(last_checkpoint_path) if last_checkpoint_path is not None else None}}, 'validation_predictions_path': str(validation_predictions_path) if validation_predictions_path is not None else None, 'metadata': self.build_metadata()}
+        summary = {'format_version': CHECKPOINT_FORMAT_VERSION, 'created_at': dt.datetime.now().isoformat(), 'fold': int(self.data_config.fold),
+                   'task_name': self.data_config.task_name, 'num_of_points': int(self.data_config.num_of_points), 'checkpoints': {
+                'best': {'epoch': best_epoch, 'val_loss': best_val_loss, 'path': str(best_checkpoint_path) if best_checkpoint_path is not None else None},
+                'last': {'epoch': last_epoch, 'val_loss': last_val_loss, 'path': str(last_checkpoint_path) if last_checkpoint_path is not None else None}},
+                   'validation_predictions_path': str(validation_predictions_path) if validation_predictions_path is not None else None,
+                   'metadata': self.build_metadata()}
+
         with open(self.get_checkpoint_summary_path(), 'w', encoding='utf-8') as summary_file:
             json.dump(summary, summary_file, indent=4, default=str)
 
     def build_metadata(self):
         """Build serialisable metadata."""
-        return {'data_config': self.serialise(asdict(self.data_config)), 'train_config': self.serialise(asdict(self.train_config)), 'model_config': self.serialise(asdict(self.model_config))}
+        return {'data_config': self.serialise(asdict(self.data_config)), 'train_config': self.serialise(asdict(self.train_config)),
+                'model_config': self.serialise(asdict(self.model_config))}
 
     @staticmethod
     def serialise(value):
@@ -444,20 +453,6 @@ class TrainModel:
 
         if len(tuple(self.data_config.image_size)) != 2:
             raise ValueError('image_size must be a two-item tuple: height, width.')
-
-    def copy_outputs_to(self, save_path):
-        """Copy output files to an external save path."""
-        save_path = Path(save_path)
-        save_path.mkdir(exist_ok=True, parents=True)
-
-        for entry in self.output_path.iterdir():
-            destination = save_path / entry.name
-            if entry.is_dir():
-                if destination.exists():
-                    shutil.rmtree(destination)
-                shutil.copytree(entry, destination)
-            else:
-                shutil.copy2(entry, destination)
 
     def get_checkpoint_path(self, checkpoint_type):
         """Return a checkpoint path."""

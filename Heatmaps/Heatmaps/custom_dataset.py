@@ -43,18 +43,10 @@ class HeatmapDataset(Dataset):
         original_size = np.asarray(image.shape[1:3], dtype=np.int64)
         image = resize_channel_first(image=image, image_size=self.config.image_size)
         original_points = np.asarray(record['points'], dtype=np.float32)
-        resized_points = scale_points(points=original_points, original_size=original_size, image_size=self.config.image_size)
-        heatmaps = create_heatmaps(points=resized_points, image_size=self.config.image_size, sigma=self.config.heatmap_sigma)
+        heatmap_points = scale_points(points=original_points, original_size=original_size, image_size=self.config.image_size)
+        heatmaps = create_heatmaps(points=heatmap_points, image_size=self.config.image_size, sigma=self.config.heatmap_sigma)
 
-        return {
-            'image': torch.from_numpy(image).float(),
-            'heatmaps': torch.from_numpy(heatmaps).float(),
-            'points_original': torch.from_numpy(original_points).float(),
-            'points_resized': torch.from_numpy(resized_points).float(),
-            'original_size': torch.from_numpy(original_size).long(),
-            'sample_name': record['sample_name'],
-            'image_path': str(record['image_path']),
-        }
+        return {'image': torch.from_numpy(image).float(), 'heatmaps': torch.from_numpy(heatmaps).float(), 'points_original': torch.from_numpy(original_points).float(), 'original_size': torch.from_numpy(original_size).long(), 'sample_name': record['sample_name'], 'image_path': str(record['image_path'])}
 
     def build_records(self):
         """Build image and point records for this split."""
