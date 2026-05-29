@@ -14,6 +14,7 @@ from skimage.util import img_as_float32
 
 POINT_PATTERN = re.compile(r'\((-?\d+(?:\.\d+)?),\s*(-?\d+(?:\.\d+)?)\)')
 TRAIN_LIST_PATTERN = re.compile(r'^train_f(\d+)\.txt$')
+FOLD_LIST_FILE_PREFIXES = ('train', 'val', 'test')
 SUPPORTED_IMAGE_SUFFIXES = ('.png', '.jpg', '.jpeg', '.bmp', '.tif', '.tiff')
 
 
@@ -49,7 +50,7 @@ def safe_file_stem(value):
 
 
 def discover_fold_numbers(fold_lists_path):
-    """Return contiguous fold numbers from train_fN.txt files."""
+    """Return contiguous fold numbers and validate train/val/test files."""
     fold_lists_path = Path(fold_lists_path)
 
     if not fold_lists_path.is_dir():
@@ -73,13 +74,24 @@ def discover_fold_numbers(fold_lists_path):
     if fold_numbers != expected:
         raise ValueError(f'Fold files must be contiguous from train_f1.txt. Found {fold_numbers}, expected {expected}')
 
+    missing_files = []
+
     for fold_number in fold_numbers:
-        for prefix in ('train', 'val'):
+        for prefix in FOLD_LIST_FILE_PREFIXES:
             fold_file = fold_lists_path / f'{prefix}_f{fold_number}.txt'
             if not fold_file.is_file():
-                raise ValueError(f'Missing fold list file: {fold_file}')
+                missing_files.append(str(fold_file))
+
+    if missing_files:
+        missing_text = '\n'.join(missing_files)
+        raise ValueError(f'Every fold must have train_fN.txt, val_fN.txt, and test_fN.txt files. Missing files:\n{missing_text}')
 
     return fold_numbers
+
+
+def canonical_split_name(value):
+    """Return the canonical sample key used for fold-overlap checks."""
+    return Path(str(value).split()[0]).stem
 
 
 def read_split_names(fold_lists_path, split_name, fold):
@@ -101,6 +113,44 @@ def read_split_names(fold_lists_path, split_name, fold):
         raise ValueError(f'Split file is empty: {split_file}')
 
     return names
+
+
+def validate_split_duplicates(split_name, names, fold):
+    """Raise an error if a split file contains duplicate sample IDs."""
+    seen = set()
+    duplicates = set()
+
+    for name in names:
+        sample_key = canonical_split_name(name)
+
+        if sample_key in seen:
+            duplicates.add(sample_key)
+
+        seen.add(sample_key)
+
+    if duplicates:
+        duplicate_text = ', '.join(sorted(duplicates, key=natural_key))
+        raise ValueError(f'Fold {fold} {split_name} split contains duplicate sample ID(s): {duplicate_text}')
+
+
+def validate_fold_split_overlaps(fold_lists_path, fold):
+    """Validate that train, validation, and test fold lists are disjoint."""
+    split_names = {split_name: read_split_names(fold_lists_path=fold_lists_path, split_name=split_name, fold=fold) for split_name in FOLD_LIST_FILE_PREFIXES}
+    split_sets = {}
+
+    for split_name, names in split_names.items():
+        validate_split_duplicates(split_name=split_name, names=names, fold=fold)
+        split_sets[split_name] = {canonical_split_name(name) for name in names}
+
+    for left_index, left_name in enumerate(FOLD_LIST_FILE_PREFIXES):
+        for right_name in FOLD_LIST_FILE_PREFIXES[left_index + 1:]:
+            overlap = split_sets[left_name] & split_sets[right_name]
+
+            if overlap:
+                overlap_text = ', '.join(sorted(overlap, key=natural_key))
+                raise ValueError(f'Fold {fold} has overlapping sample ID(s) between {left_name}_f{fold}.txt and {right_name}_f{fold}.txt: {overlap_text}')
+
+    return split_sets
 
 
 def read_mark_list(mark_list_file, expected_points):
