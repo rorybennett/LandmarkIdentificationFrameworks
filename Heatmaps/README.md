@@ -17,6 +17,7 @@ Heatmaps/
     __init__.py
     custom_dataset.py
     heatmap_training_pipeline.py
+    heatmap_transforms.py
     model_registry.py
     models.py
     parameters.py
@@ -79,12 +80,28 @@ heatmaps-train 1 prostate_transverse true false \
     --image-data-dir "$HOME/DATA/TRANSVERSE" \
     --image-size 512 512 \
     --heatmap-sigma 8 \
+    --oversampling-factor 1 \
     --batch-size 4 \
     --learning-rate 0.001 \
     --max-training-epochs 80
 ```
 
 For sagittal prostate images, change `--num-points 2` and use the sagittal mark list and image directory.
+
+
+## Oversampling
+
+Use `--oversampling-factor` to increase only the training dataset size. The default is `1`, which keeps the original training set unchanged.
+
+For example, `--oversampling-factor 4` makes the training split four times larger. Indices in the first original dataset pass are returned unchanged; additional passes apply a random transform to the image and the landmark points before target heatmaps are generated. Validation data is never oversampled or augmented.
+
+The default augmentation policy is stored in:
+
+```text
+Heatmaps/Heatmaps/heatmap_transforms.py
+```
+
+Edit that file directly if a different augmentation policy is needed. The defaults follow the supplied transform style: random erasing, affine movement, horizontal flip, Gaussian noise, and Gaussian blur. Intensity transforms preserve greyscale RGB ultrasound images by applying noise consistently across RGB channels. For four-point prostate transverse data, the default horizontal flip swaps the left/right endpoint channels.
 
 ## Input channels
 
@@ -148,4 +165,4 @@ Additional models can be added later in `model_registry.py` and `models.py` with
 `--network-name` selects the model architecture. `--run-name` is only an optional output-folder override.
 
 If `--run-name` is omitted, the package builds a deterministic run folder from the fold count, point count, selected network, image size, heatmap sigma, U-Net settings,
-loss settings, batch size, learning rate, and epoch count.
+loss settings, oversampling factor, batch size, learning rate, and epoch count.

@@ -17,6 +17,7 @@ $NETWORK_NAME = "unet_basic"
 $IMAGE_HEIGHT = 512
 $IMAGE_WIDTH = 512
 $HEATMAP_SIGMA = 8
+$OVERSAMPLING_FACTOR = 1
 
 $BATCH_SIZE = 4
 $MAX_TRAINING_EPOCHS = 80
@@ -47,6 +48,7 @@ $ARGS = @(
     "--image-data-dir", $IMAGE_DATA_DIR,
     "--image-size", $IMAGE_HEIGHT, $IMAGE_WIDTH,
     "--heatmap-sigma", $HEATMAP_SIGMA,
+    "--oversampling-factor", $OVERSAMPLING_FACTOR,
     "--batch-size", $BATCH_SIZE,
     "--learning-rate", $LEARNING_RATE,
     "--max-training-epochs", $MAX_TRAINING_EPOCHS,
