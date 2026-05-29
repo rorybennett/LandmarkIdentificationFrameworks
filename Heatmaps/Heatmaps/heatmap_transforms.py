@@ -33,9 +33,12 @@ class Compose:
     transforms: list
 
     def __call__(self, image, points):
-        """Apply each transform to a channel-first image and xy landmarks."""
+        """Apply each transform and store the sampled parameters from every stage."""
+        self.last_params = []
+
         for transform in self.transforms:
             image, points = transform(image=image, points=points)
+            self.last_params.append(get_last_params(transform))
 
         return image, points
 
@@ -49,14 +52,17 @@ class RandomErasing:
 
     def __call__(self, image, points):
         """Erase one random rectangular region without moving landmarks."""
+        self.last_params = {'transform': 'random_erasing', 'applied': False, 'probability': float(self.probability), 'reason': 'skipped_probability'}
+
         if np.random.random() >= self.probability:
             return image, points
 
         channels, height, width = image.shape
         area = float(height * width)
         image = image.copy()
+        self.last_params = {'transform': 'random_erasing', 'applied': False, 'probability': float(self.probability), 'reason': 'no_valid_rectangle'}
 
-        for _ in range(10):
+        for attempt in range(1, 11):
             target_area = np.random.uniform(self.scale[0], self.scale[1]) * area
             aspect_ratio = math.exp(np.random.uniform(math.log(self.ratio[0]), math.log(self.ratio[1])))
             erase_height = int(round(math.sqrt(target_area / aspect_ratio)))
@@ -66,6 +72,17 @@ class RandomErasing:
                 top = np.random.randint(0, height - erase_height + 1)
                 left = np.random.randint(0, width - erase_width + 1)
                 image[:, top:top + erase_height, left:left + erase_width] = self.fill_value
+                self.last_params = {
+                    'transform': 'random_erasing',
+                    'applied': True,
+                    'probability': float(self.probability),
+                    'attempts': int(attempt),
+                    'top': int(top),
+                    'left': int(left),
+                    'height': int(erase_height),
+                    'width': int(erase_width),
+                    'fill_value': float(self.fill_value),
+                }
                 break
 
         return image.astype(np.float32), points
@@ -91,6 +108,7 @@ class RandomAffine:
             transformed_points = transform_points(points=points, matrix=matrix)
 
             if points_inside_image(points=transformed_points, width=width, height=height):
+                self.last_params['attempts'] = int(attempt)
                 return warp_image(image=image, matrix=matrix), transformed_points.astype(np.float32)
 
         raise RuntimeError(f'No valid affine transform was found after {self.max_attempts} attempts. Reduce affine ranges or inspect landmarks near the image border.')
@@ -104,8 +122,17 @@ class RandomAffine:
         translate_y = np.random.uniform(-self.translate[1], self.translate[1]) * height
         centre_x = (width - 1) / 2.0
         centre_y = (height - 1) / 2.0
-
-        return translation_matrix(translate_x, translate_y) @ translation_matrix(centre_x, centre_y) @ rotation_matrix(angle) @ shear_matrix(shear_x) @ scale_matrix(scale_value) @ translation_matrix(-centre_x, -centre_y)
+        matrix = translation_matrix(translate_x, translate_y) @ translation_matrix(centre_x, centre_y) @ rotation_matrix(angle) @ shear_matrix(shear_x) @ scale_matrix(scale_value) @ translation_matrix(-centre_x, -centre_y)
+        self.last_params = {
+            'transform': 'random_affine',
+            'angle_degrees': float(angle),
+            'shear_x_degrees': float(shear_x),
+            'scale': float(scale_value),
+            'translate_x_pixels': float(translate_x),
+            'translate_y_pixels': float(translate_y),
+            'matrix': matrix.tolist(),
+        }
+        return matrix
 
 
 @dataclass
@@ -115,6 +142,8 @@ class RandomHorizontalFlip:
 
     def __call__(self, image, points):
         """Flip the image horizontally and optionally swap symmetric landmark channels."""
+        self.last_params = {'transform': 'random_horizontal_flip', 'applied': False, 'probability': float(self.probability), 'point_index_swaps': tuple(self.point_index_swaps)}
+
         if np.random.random() >= self.probability:
             return image, points
 
@@ -126,6 +155,7 @@ class RandomHorizontalFlip:
         for left_index, right_index in self.point_index_swaps:
             flipped_points[[left_index, right_index]] = flipped_points[[right_index, left_index]]
 
+        self.last_params = {'transform': 'random_horizontal_flip', 'applied': True, 'probability': float(self.probability), 'width': int(width), 'point_index_swaps': tuple(self.point_index_swaps)}
         return flipped_image.astype(np.float32), flipped_points.astype(np.float32)
 
 
@@ -146,11 +176,21 @@ class GaussianNoise:
             noise = np.random.normal(self.mean, self.sigma, size=(1, height, width)).astype(np.float32)
             image[:colour_channels] = image[:colour_channels] + noise
         else:
-            image[:colour_channels] = image[:colour_channels] + np.random.normal(self.mean, self.sigma, size=(colour_channels, height, width)).astype(np.float32)
+            noise = np.random.normal(self.mean, self.sigma, size=(colour_channels, height, width)).astype(np.float32)
+            image[:colour_channels] = image[:colour_channels] + noise
 
         if self.clip:
             image[:colour_channels] = np.clip(image[:colour_channels], 0.0, 1.0)
 
+        self.last_params = {
+            'transform': 'gaussian_noise',
+            'mean': float(self.mean),
+            'sigma': float(self.sigma),
+            'clip': bool(self.clip),
+            'preserve_greyscale_rgb': bool(self.preserve_greyscale_rgb),
+            'sampled_noise_mean': float(np.mean(noise)),
+            'sampled_noise_std': float(np.std(noise)),
+        }
         return image.astype(np.float32), points
 
 
@@ -162,8 +202,14 @@ class GaussianBlur:
         """Blur each image channel without moving landmarks."""
         kernel_size = make_odd_kernel_size(self.kernel_size)
         blurred_channels = [cv2.GaussianBlur(channel, (kernel_size, kernel_size), 0) for channel in image]
+        self.last_params = {'transform': 'gaussian_blur', 'kernel_size': int(kernel_size)}
         return np.stack(blurred_channels, axis=0).astype(np.float32), points
 
+
+
+def get_last_params(transform):
+    """Return the last sampled parameters from a transform in a consistent format."""
+    return getattr(transform, 'last_params', {'transform': transform.__class__.__name__, 'params': 'not recorded'})
 
 def get_default_heatmap_transforms(num_of_points=None):
     """Return default oversampling transforms for heatmap landmark training."""
