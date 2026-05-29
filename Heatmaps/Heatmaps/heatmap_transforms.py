@@ -49,41 +49,59 @@ class RandomErasing:
     scale: tuple[float, float] = RANDOM_ERASING_SCALE
     ratio: tuple[float, float] = RANDOM_ERASING_RATIO
     fill_value: float = 0.0
+    blend_strength_range: tuple[float, float] = (0.35, 0.75)
 
     def __call__(self, image, points):
-        """Erase one random rectangular region without moving landmarks."""
         self.last_params = {'transform': 'random_erasing', 'applied': False, 'probability': float(self.probability), 'reason': 'skipped_probability'}
 
         if np.random.random() >= self.probability:
             return image, points
 
-        channels, height, width = image.shape
+        _, height, width = image.shape
         area = float(height * width)
-        image = image.copy()
-        self.last_params = {'transform': 'random_erasing', 'applied': False, 'probability': float(self.probability), 'reason': 'no_valid_rectangle'}
+        image = image.copy().astype(np.float32)
+        self.last_params = {'transform': 'random_erasing', 'applied': False, 'probability': float(self.probability), 'reason': 'no_valid_ellipse'}
 
         for attempt in range(1, 11):
             target_area = np.random.uniform(self.scale[0], self.scale[1]) * area
             aspect_ratio = math.exp(np.random.uniform(math.log(self.ratio[0]), math.log(self.ratio[1])))
-            erase_height = int(round(math.sqrt(target_area / aspect_ratio)))
-            erase_width = int(round(math.sqrt(target_area * aspect_ratio)))
 
-            if erase_height < height and erase_width < width:
-                top = np.random.randint(0, height - erase_height + 1)
-                left = np.random.randint(0, width - erase_width + 1)
-                image[:, top:top + erase_height, left:left + erase_width] = self.fill_value
-                self.last_params = {
-                    'transform': 'random_erasing',
-                    'applied': True,
-                    'probability': float(self.probability),
-                    'attempts': int(attempt),
-                    'top': int(top),
-                    'left': int(left),
-                    'height': int(erase_height),
-                    'width': int(erase_width),
-                    'fill_value': float(self.fill_value),
-                }
-                break
+            semi_axis_x = int(round(math.sqrt((target_area * aspect_ratio) / math.pi)))
+            semi_axis_y = int(round(math.sqrt(target_area / (aspect_ratio * math.pi))))
+
+            if semi_axis_x < 1 or semi_axis_y < 1:
+                continue
+
+            if semi_axis_x >= width or semi_axis_y >= height:
+                continue
+
+            centre_x = np.random.randint(semi_axis_x, width - semi_axis_x)
+            centre_y = np.random.randint(semi_axis_y, height - semi_axis_y)
+            blend_strength = float(np.random.uniform(self.blend_strength_range[0], self.blend_strength_range[1]))
+
+            y_grid, x_grid = np.ogrid[:height, :width]
+            ellipse_distance = ((x_grid - centre_x) / float(semi_axis_x)) ** 2 + ((y_grid - centre_y) / float(semi_axis_y)) ** 2
+            ellipse_mask = ellipse_distance <= 1.0
+
+            blend_mask = np.zeros((height, width), dtype=np.float32)
+            blend_mask[ellipse_mask] = blend_strength
+
+            background = np.full_like(image, fill_value=self.fill_value, dtype=np.float32)
+            image = image * (1.0 - blend_mask[np.newaxis, :, :]) + background * blend_mask[np.newaxis, :, :]
+
+            self.last_params = {
+                'transform': 'random_erasing',
+                'applied': True,
+                'probability': float(self.probability),
+                'attempts': int(attempt),
+                'centre_x': int(centre_x),
+                'centre_y': int(centre_y),
+                'semi_axis_x': int(semi_axis_x),
+                'semi_axis_y': int(semi_axis_y),
+                'fill_value': float(self.fill_value),
+                'blend_strength': float(blend_strength),
+            }
+            break
 
         return image.astype(np.float32), points
 
@@ -214,7 +232,6 @@ def get_last_params(transform):
 def get_default_heatmap_transforms(num_of_points=None):
     """Return default oversampling transforms for heatmap landmark training."""
     return Compose([
-        RandomErasing(),
         RandomAffine(),
         RandomHorizontalFlip(point_index_swaps=get_default_horizontal_flip_swaps(num_of_points=num_of_points)),
         GaussianNoise(),
