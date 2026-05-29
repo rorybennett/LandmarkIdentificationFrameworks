@@ -3,6 +3,7 @@ Training and validation routines for heatmap landmark models.
 """
 
 import csv
+import random
 import datetime as dt
 import json
 from dataclasses import asdict, dataclass
@@ -23,6 +24,13 @@ from .utils.io_utils import heatmaps_to_points, infer_image_channel_count, safe_
 from .utils.progress_bar import ProgressBar
 from .utils.visualisation_utils import save_validation_overlays
 
+def seed_worker(worker_id):
+    """Seed NumPy and Python RNGs inside each DataLoader worker."""
+    worker_seed = torch.initial_seed() % 2**32
+    np.random.seed(worker_seed)
+    random.seed(worker_seed)
+
+
 CHECKPOINT_FORMAT_VERSION = 1
 MIN_POINTS_PER_IMAGE = 1
 MAX_POINTS_PER_IMAGE = 30
@@ -40,6 +48,7 @@ class HeatmapDataConfig:
     heatmap_sigma: float = 8.0
     input_channels: int | None = None
     recursive_image_search: bool = False
+    oversampling_factor: int = 1
 
 
 @dataclass
@@ -48,6 +57,7 @@ class TrainConfig:
     learning_rate: float
     max_training_epochs: int
     num_workers: int = 8
+    random_seed: int = 42
     optimiser_name: str = 'adamw'
     loss_name: str = 'weighted_mse'
     positive_weight: float = 20.0
@@ -105,6 +115,7 @@ class TrainModel:
 
     def train(self):
         """Run the fold training workflow."""
+        self.set_random_seed(self.train_config.random_seed)
         self.output_path.mkdir(exist_ok=True, parents=True)
         train_loader, val_loader = self.build_data_loaders()
         model = self.build_model()
@@ -267,10 +278,14 @@ class TrainModel:
         train_dataset = HeatmapDataset(self.build_dataset_config(split_name='train'))
         val_dataset = HeatmapDataset(self.build_dataset_config(split_name='val'))
         self.resolve_input_channels(train_dataset=train_dataset, val_dataset=val_dataset)
+        generator = torch.Generator()
+        generator.manual_seed(int(self.train_config.random_seed))
+        print(f'	Train samples: {len(train_dataset)} ({len(train_dataset.records)} original, oversampling_factor={train_dataset.oversampling_factor}).', flush=True)
+        print(f'	Validation samples: {len(val_dataset)}.', flush=True)
         train_loader = DataLoader(train_dataset, batch_size=self.train_config.batch_size, shuffle=True, num_workers=self.train_config.num_workers,
-                                  pin_memory=self.device.type == 'cuda')
+                                  pin_memory=self.device.type == 'cuda', worker_init_fn=seed_worker, generator=generator)
         val_loader = DataLoader(val_dataset, batch_size=self.train_config.batch_size, shuffle=False, num_workers=self.train_config.num_workers,
-                                pin_memory=self.device.type == 'cuda')
+                                pin_memory=self.device.type == 'cuda', worker_init_fn=seed_worker, generator=generator)
         return train_loader, val_loader
 
     def resolve_input_channels(self, train_dataset, val_dataset):
@@ -318,7 +333,8 @@ class TrainModel:
         return HeatmapDatasetConfig(fold=self.data_config.fold, split_name=split_name, num_of_points=self.data_config.num_of_points,
                                     fold_lists_path=self.data_config.fold_lists_path, mark_list_file=self.data_config.mark_list_file,
                                     image_data_dir=self.data_config.image_data_dir, image_size=self.data_config.image_size, heatmap_sigma=self.data_config.heatmap_sigma,
-                                    input_channels=self.data_config.input_channels, recursive_image_search=self.data_config.recursive_image_search)
+                                    input_channels=self.data_config.input_channels, recursive_image_search=self.data_config.recursive_image_search,
+                                    oversampling_factor=self.data_config.oversampling_factor)
 
     def build_model(self):
         """Build the configured heatmap model."""
@@ -453,6 +469,47 @@ class TrainModel:
 
         if len(tuple(self.data_config.image_size)) != 2:
             raise ValueError('image_size must be a two-item tuple: height, width.')
+
+        if any(int(value) < 1 for value in self.data_config.image_size):
+            raise ValueError(f'image_size values must be positive. Got: {self.data_config.image_size}')
+
+        if self.data_config.heatmap_sigma <= 0:
+            raise ValueError(f'heatmap_sigma must be greater than 0. Got: {self.data_config.heatmap_sigma}')
+
+        if self.train_config.random_seed < 0:
+            raise ValueError(f'random_seed must be at least 0. Got: {self.train_config.random_seed}')
+
+        if self.train_config.batch_size < 1:
+            raise ValueError(f'batch_size must be at least 1. Got: {self.train_config.batch_size}')
+
+        if self.train_config.learning_rate <= 0:
+            raise ValueError(f'learning_rate must be greater than 0. Got: {self.train_config.learning_rate}')
+
+        if self.train_config.max_training_epochs < 1:
+            raise ValueError(f'max_training_epochs must be at least 1. Got: {self.train_config.max_training_epochs}')
+
+        if self.train_config.num_workers < 0:
+            raise ValueError(f'num_workers must be at least 0. Got: {self.train_config.num_workers}')
+
+        if int(self.data_config.oversampling_factor) < 1:
+            raise ValueError(f'oversampling_factor must be at least 1. Got: {self.data_config.oversampling_factor}')
+
+        if self.train_config.loss_name == 'bce_logits' and self.model_config.output_activation != 'none':
+            raise ValueError('loss_name=bce_logits requires output_activation=none because BCEWithLogitsLoss expects raw logits.')
+
+    @staticmethod
+    def set_random_seed(seed):
+        """Seed Python, NumPy, PyTorch, and CUDA RNGs for repeatable runs."""
+        seed = int(seed)
+        random.seed(seed)
+        np.random.seed(seed)
+        torch.manual_seed(seed)
+
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(seed)
+
+        torch.backends.cudnn.benchmark = False
+        torch.backends.cudnn.deterministic = True
 
     def get_checkpoint_path(self, checkpoint_type):
         """Return a checkpoint path."""

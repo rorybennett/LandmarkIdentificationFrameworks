@@ -13,7 +13,7 @@ from pathlib import Path
 from . import parameters as pms
 from .model_registry import get_available_model_names
 from .train_model import HeatmapDataConfig, HeatmapModelConfig, TrainConfig, TrainModel
-from .utils.io_utils import discover_fold_numbers, str_to_bool
+from .utils.io_utils import discover_fold_numbers, str_to_bool, validate_fold_split_overlaps
 
 RESULTS_DIR_NAME = 'TRAINING_RESULTS'
 MIN_POINTS_PER_IMAGE = 1
@@ -149,9 +149,11 @@ class HeatmapTrainingPipeline:
         print(f'\tNumber of folds: {len(discover_fold_numbers(self.data_config.fold_lists_path))}', flush=True)
         print(f'\tImage size: {self.data_config.image_size}', flush=True)
         print(f'\tHeatmap sigma: {self.data_config.heatmap_sigma}', flush=True)
+        print(f'\tOversampling factor: {self.data_config.oversampling_factor}', flush=True)
         print('\tInput channels: automatic', flush=True)
         print(f'\tRecursive image search: {self.data_config.recursive_image_search}', flush=True)
         print(f'\tTraining workers: {self.train_config.num_workers}', flush=True)
+        print(f'\tRandom seed: {self.train_config.random_seed}', flush=True)
         print(f'\tBatch size: {self.train_config.batch_size}', flush=True)
         print(f'\tLearning rate: {self.train_config.learning_rate}', flush=True)
         print(f'\tOptimiser: {self.train_config.optimiser_name}', flush=True)
@@ -211,6 +213,115 @@ class HeatmapTrainingPipeline:
         return f'{hours:02d}:{minutes:02d}:{seconds:02d}'
 
 
+
+def normalise_save_dir(args):
+    """Enforce save-dir behaviour from the copy-files switch."""
+    if not args.copy_files:
+        args.save_dir = None
+        return
+
+    if args.save_dir is None:
+        raise ValueError('--save-dir must be supplied when COPY_FILES is true.')
+
+
+def validate_args(args, num_of_folds):
+    """Validate numeric, path, split, training, and model terminal arguments."""
+    normalise_save_dir(args)
+
+    if num_of_folds < 2:
+        raise ValueError(f'At least 2 fold files are required. Found {num_of_folds}.')
+
+    if args.fold < 1 or args.fold > num_of_folds:
+        raise ValueError(f'fold must be between 1 and {num_of_folds}. Got fold={args.fold}.')
+
+    if args.run_dir.exists() and not args.run_dir.is_dir():
+        raise ValueError(f'--run-dir exists but is not a directory: {args.run_dir}')
+
+    if args.save_dir is not None and args.save_dir.exists() and not args.save_dir.is_dir():
+        raise ValueError(f'--save-dir exists but is not a directory: {args.save_dir}')
+
+    if not args.mark_list_file.is_file():
+        raise ValueError(f'--mark-list-file does not exist or is not a file: {args.mark_list_file}')
+
+    if not args.image_data_dir.is_dir():
+        raise ValueError(f'--image-data-dir does not exist or is not a directory: {args.image_data_dir}')
+
+    if args.image_size is None or len(args.image_size) != 2:
+        raise ValueError('--image-size must contain exactly two values: HEIGHT WIDTH.')
+
+    image_height, image_width = args.image_size
+
+    if image_height < 1 or image_width < 1:
+        raise ValueError('--image-size values must be at least 1.')
+
+    if args.heatmap_sigma <= 0:
+        raise ValueError('--heatmap-sigma must be greater than 0.')
+
+    if args.oversampling_factor < 1:
+        raise ValueError('--oversampling-factor must be at least 1.')
+
+    if args.batch_size < 1:
+        raise ValueError('--batch-size must be at least 1.')
+
+    if args.learning_rate <= 0:
+        raise ValueError('--learning-rate must be greater than 0.')
+
+    if args.max_training_epochs < 1:
+        raise ValueError('--max-training-epochs must be at least 1.')
+
+    if args.train_workers < 0:
+        raise ValueError('--train-workers must be at least 0.')
+
+    if args.random_seed < 0:
+        raise ValueError('--random-seed must be at least 0.')
+
+    if args.positive_weight < 0:
+        raise ValueError('--positive-weight must be at least 0.')
+
+    if args.weight_decay < 0:
+        raise ValueError('--weight-decay must be at least 0.')
+
+    if args.momentum < 0:
+        raise ValueError('--momentum must be at least 0.')
+
+    if args.lr_step_size < 1:
+        raise ValueError('--lr-step-size must be at least 1.')
+
+    if args.lr_gamma <= 0:
+        raise ValueError('--lr-gamma must be greater than 0.')
+
+    if args.early_stop_patience < 1:
+        raise ValueError('--early-stop-patience must be at least 1.')
+
+    if args.early_stop_min_delta < 0:
+        raise ValueError('--early-stop-min-delta must be at least 0.')
+
+    if args.early_stop_warmup_epochs < 0:
+        raise ValueError('--early-stop-warmup-epochs must be at least 0.')
+
+    if args.base_channels < 1:
+        raise ValueError('--base-channels must be at least 1.')
+
+    if args.depth < 1:
+        raise ValueError('--depth must be at least 1.')
+
+    if args.channel_multiplier < 1:
+        raise ValueError('--channel-multiplier must be at least 1.')
+
+    if args.max_channels < args.base_channels:
+        raise ValueError('--max-channels must be greater than or equal to --base-channels.')
+
+    if args.dropout < 0 or args.dropout >= 1:
+        raise ValueError('--dropout must be in the range [0, 1).')
+
+    if args.loss_name == 'bce_logits' and args.output_activation != 'none':
+        raise ValueError('--loss-name bce_logits requires --output-activation none because BCEWithLogitsLoss expects raw logits.')
+
+    if args.normalisation == 'group' and args.base_channels % 8 != 0:
+        raise ValueError('--base-channels must be divisible by 8 when --normalisation group is used.')
+
+    validate_fold_split_overlaps(fold_lists_path=args.fold_lists_path, fold=args.fold)
+
 def validate_num_points(value):
     """Validate the number of landmark points for each image."""
     value = int(value)
@@ -232,7 +343,7 @@ def build_run_name(args, num_of_folds):
     parts = ['heatmap', f'{num_of_folds}fold', f'{args.num_points}points', args.network_name, f'im{height}x{width}', f'sigma{format_number(args.heatmap_sigma)}',
              f'bc{args.base_channels}', f'depth{args.depth}', f'cm{args.channel_multiplier}', f'mc{args.max_channels}', f'norm{args.normalisation}',
              f'act{args.activation}', f'drop{format_number(args.dropout)}', f'up{args.upsampling}', f'loss{args.loss_name}', f'pw{format_number(args.positive_weight)}',
-             f'bs{args.batch_size}', f'lr{format_number(args.learning_rate)}', f'ep{args.max_training_epochs}']
+             f'of{args.oversampling_factor}', f'seed{args.random_seed}', f'bs{args.batch_size}', f'lr{format_number(args.learning_rate)}', f'ep{args.max_training_epochs}']
     return clean_run_name('_'.join(parts))
 
 
@@ -261,17 +372,19 @@ def parse_args():
     parser.add_argument('--run-name', type=str, default=None, help='Optional output-folder override. If omitted, a name is generated from settings.')
     parser.add_argument('--num-points', type=validate_num_points, required=True,
                         help=f'Number of landmarks per image, from {MIN_POINTS_PER_IMAGE} to {MAX_POINTS_PER_IMAGE}.')
-    parser.add_argument('--fold-lists-path', type=Path, required=True, help='Directory containing train_fN.txt and val_fN.txt files.')
+    parser.add_argument('--fold-lists-path', type=Path, required=True, help='Directory containing train_fN.txt, val_fN.txt, and test_fN.txt files.')
     parser.add_argument('--mark-list-file', type=Path, required=True, help='Landmark mark-list file.')
     parser.add_argument('--image-data-dir', type=Path, required=True, help='Directory containing source images.')
     parser.add_argument('--image-size', type=int, nargs=2, default=list(pms.image_size), metavar=('HEIGHT', 'WIDTH'), help='Training image size.')
     parser.add_argument('--heatmap-sigma', type=float, default=pms.heatmap_sigma, help='Gaussian sigma for target heatmaps.')
+    parser.add_argument('--oversampling-factor', type=int, default=1, help='Training-set multiplier. A value of 1 uses each image once; values above 1 add augmented copies using Heatmaps/Heatmaps/heatmap_transforms.py.')
     parser.add_argument('--recursive-image-search', type=str_to_bool, default=False, help='Search image-data-dir recursively.')
 
     parser.add_argument('--batch-size', type=int, default=4, help='Training batch size.')
     parser.add_argument('--learning-rate', type=float, default=1e-3, help='Initial learning rate.')
     parser.add_argument('--max-training-epochs', type=int, default=80, help='Maximum training epochs.')
     parser.add_argument('--train-workers', type=int, default=8, help='DataLoader worker count.')
+    parser.add_argument('--random-seed', type=int, default=42, help='Random seed used for Python, NumPy, PyTorch, and DataLoader workers.')
     parser.add_argument('--optimiser-name', choices=['adamw', 'sgd'], default='adamw', help='Optimiser.')
     parser.add_argument('--loss-name', choices=['mse', 'weighted_mse', 'smooth_l1', 'bce_logits'], default='weighted_mse', help='Training loss.')
     parser.add_argument('--positive-weight', type=float, default=20.0, help='Peak-region weight for weighted_mse.')
@@ -312,14 +425,17 @@ def build_configs(args):
     if args.fold not in fold_numbers:
         raise ValueError(f'Fold {args.fold} was requested, but available folds are {fold_numbers}.')
 
+    validate_args(args=args, num_of_folds=num_of_folds)
+
     run_name = clean_run_name(args.run_name) if args.run_name else build_run_name(args=args, num_of_folds=num_of_folds)
     run_config = RunConfig(fold=args.fold, task_name=args.task_name, num_of_points=args.num_points, train_model=args.train_model, copy_files=args.copy_files,
                            run_dir=args.run_dir, save_dir=args.save_dir, run_name=run_name)
     data_config = HeatmapDataConfig(fold=args.fold, task_name=args.task_name, num_of_points=args.num_points, fold_lists_path=args.fold_lists_path,
                                     mark_list_file=args.mark_list_file, image_data_dir=args.image_data_dir, image_size=tuple(args.image_size),
-                                    heatmap_sigma=args.heatmap_sigma, input_channels=None, recursive_image_search=args.recursive_image_search)
+                                    heatmap_sigma=args.heatmap_sigma, input_channels=None, recursive_image_search=args.recursive_image_search,
+                                    oversampling_factor=args.oversampling_factor)
     train_config = TrainConfig(batch_size=args.batch_size, learning_rate=args.learning_rate, max_training_epochs=args.max_training_epochs, num_workers=args.train_workers,
-                               optimiser_name=args.optimiser_name, loss_name=args.loss_name, positive_weight=args.positive_weight, weight_decay=args.weight_decay,
+                               random_seed=args.random_seed, optimiser_name=args.optimiser_name, loss_name=args.loss_name, positive_weight=args.positive_weight, weight_decay=args.weight_decay,
                                momentum=args.momentum, lr_schedule=args.lr_schedule, lr_step_size=args.lr_step_size, lr_gamma=args.lr_gamma,
                                early_stop_patience=args.early_stop_patience, early_stop_min_delta=args.early_stop_min_delta,
                                early_stop_warmup_epochs=args.early_stop_warmup_epochs, use_amp=args.use_amp, save_validation_predictions=args.save_validation_predictions,
