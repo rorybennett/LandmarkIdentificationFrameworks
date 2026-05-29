@@ -2,7 +2,8 @@
 
 Heatmap-regression landmark localisation package for the `LandmarkIdentificationFrameworks/Heatmaps` subdirectory.
 
-This package is intended to sit alongside the IPV and Detection packages. It uses the same fold-list and mark-list idea as the IPV package, but it does not create patch CSVs or patch image folders. Images are loaded directly during training and converted into Gaussian landmark heatmaps on demand.
+This package is intended to sit alongside the IPV and Detection packages. It uses the same fold-list and mark-list idea as the IPV package, but it does not create patch
+CSVs or patch image folders. Images are loaded directly during training and converted into Gaussian landmark heatmaps on demand.
 
 ## Package layout
 
@@ -37,7 +38,7 @@ pip install -e .
 
 ## Expected input files
 
-Fold lists should use the same naming style as the IPV package:
+Fold lists should use the same naming style as the IPV package, but only train and validation files are required:
 
 ```text
 folds/
@@ -58,10 +59,19 @@ The fold-list entries can be stems such as `A1` or filenames such as `A1.jpg`.
 
 ## Train from the command line
 
+The command-line positional arguments are:
+
+```text
+heatmaps-train FOLD TASK_NAME TRAIN_MODEL COPY_FILES [OPTIONS]
+```
+
+There is no delete-data/delete-files stage in the heatmap package. The heatmap workflow does not create patch datasets, so there is nothing equivalent to the IPV
+generated training-data clean-up step.
+
 Example transverse prostate run:
 
 ```bash
-heatmaps-train 1 prostate_transverse true false false \
+heatmaps-train 1 prostate_transverse true false \
     --run-dir "$HOME/HEATMAP_TRAINING" \
     --num-points 4 \
     --fold-lists-path "$HOME/DATA/folds" \
@@ -80,16 +90,17 @@ For sagittal prostate images, change `--num-points 2` and use the sagittal mark 
 
 Input channels are detected automatically from the train and validation images for the selected fold. There is no command-line option for this.
 
-The package assumes that every image for a given task has the same number of source channels. The detected source channel count is used directly to configure the first U-Net layer:
+The package assumes that every image for a given task has the same number of source channels. The detected source channel count is used directly to configure the first
+U-Net layer:
 
 | Source images | Model input channels |
-| --- | --- |
-| All greyscale | 1 |
-| All RGB | 3 |
-| All RGBA | 4 |
+|---------------|----------------------|
+| All greyscale | 1                    |
+| All RGB       | 3                    |
+| All RGBA      | 4                    |
 
-If any image has a different number of channels from the rest of the train/validation images, the run stops with a clear error. The loader does not silently convert greyscale, RGB, or RGBA images to another channel count.
-
+If any image has a different number of channels from the rest of the train/validation images, the run stops with a clear error. The loader does not silently convert
+greyscale, RGB, or RGBA images to another channel count.
 
 ## Outputs
 
@@ -110,7 +121,17 @@ train_plot_f1.png
 validation_predictions_f1.csv
 ```
 
-If `--save-validation-overlays true` is used, validation images are saved under `validation_results_FOLD/heatmap_overlays` and `validation_results_FOLD/point_overlays`. Point overlays use the same labelled ground-truth/predicted endpoint style as the IPV package.
+After training, the selected checkpoint is loaded and the validation prediction CSV is written. This post-training validation prediction pass now uses the terminal
+progress bar.
+
+If `--save-validation-overlays true` is used, validation images are saved under:
+
+```text
+RUN_DIR/TRAINING_RESULTS/TASK_NAME/RUN_NAME/validation_results_F1/heatmap_overlays/
+RUN_DIR/TRAINING_RESULTS/TASK_NAME/RUN_NAME/validation_results_F1/point_overlays/
+```
+
+Point overlays use the same labelled ground-truth/predicted endpoint style as the IPV package.
 
 ## Model registry
 
@@ -126,5 +147,5 @@ Additional models can be added later in `model_registry.py` and `models.py` with
 
 `--network-name` selects the model architecture. `--run-name` is only an optional output-folder override.
 
-If `--run-name` is omitted, the package builds a deterministic run folder from the fold count, point count, selected network, image size, heatmap sigma, U-Net settings, loss settings, batch size, learning rate, and epoch count.
-
+If `--run-name` is omitted, the package builds a deterministic run folder from the fold count, point count, selected network, image size, heatmap sigma, U-Net settings,
+loss settings, batch size, learning rate, and epoch count.
