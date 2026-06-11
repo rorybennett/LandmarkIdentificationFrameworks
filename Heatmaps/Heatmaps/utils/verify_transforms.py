@@ -97,7 +97,7 @@ def make_transform(transform_name, num_points):
         return htf.RandomAffine()
 
     if transform_name == 'flip':
-        return htf.RandomHorizontalFlip(probability=1.0, point_index_swaps=htf.get_default_horizontal_flip_swaps(num_points))
+        return htf.RandomHorizontalFlip(probability=1.0)
 
     if transform_name == 'noise':
         return htf.GaussianNoise()
