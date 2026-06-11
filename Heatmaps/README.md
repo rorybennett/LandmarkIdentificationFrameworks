@@ -23,6 +23,8 @@ Heatmaps/
     train_model.py
     utils/
       __init__.py
+      calculate_image_size.py
+      generate_folds.py
       io_utils.py
       progress_bar.py
       verify_transforms.py
@@ -37,10 +39,12 @@ From inside this `Heatmaps` directory:
 pip install -e .
 ```
 
-The command-line entry point installed by `pyproject.toml` is:
+The command-line entry points installed by `pyproject.toml` are:
 
 ```text
 heatmaps-train
+heatmaps-generate-folds
+heatmaps-calculate-image-size
 ```
 
 ## Expected input files
@@ -65,6 +69,28 @@ A1.jpg (236, 214) (342, 271) (245, 354) (134, 291)
 ```
 
 Fold-list entries can be stems such as `A1` or filenames such as `A1.jpg`.
+
+## Generate fold lists
+
+A fold-generation utility is included under:
+
+```text
+Heatmaps/Heatmaps/utils/generate_folds.py
+```
+
+Edit the top-level `MARK_LIST_PATH`, `OUTPUT_DIR`, `NUM_FOLDS`, and switches, then run:
+
+```bash
+python -m Heatmaps.utils.generate_folds
+```
+
+or use the installed entry point:
+
+```bash
+heatmaps-generate-folds
+```
+
+The utility follows the same 80/10/10 train/test/validation structure as the IPV package and writes `train_fN.txt`, `test_fN.txt`, `val_fN.txt`, plus optional summary CSVs.
 
 ## Train from the command line
 
@@ -95,6 +121,30 @@ heatmaps-train 1 prostate_transverse true false \
 ```
 
 For sagittal prostate images, change `--num-points 2` and use the sagittal mark list and image directory.
+
+## Image size utility
+
+`--image-size HEIGHT WIDTH` is required. The training pipeline no longer infers image size automatically.
+
+To estimate a sensible value from a folder of images, edit the top-level `IMAGE_DATA_DIR` in:
+
+```text
+Heatmaps/Heatmaps/utils/calculate_image_size.py
+```
+
+Then run:
+
+```bash
+python -m Heatmaps.utils.calculate_image_size
+```
+
+or:
+
+```bash
+heatmaps-calculate-image-size
+```
+
+The utility prints the average width, average height, rounded width, rounded height, and the corresponding `--image-size HEIGHT WIDTH` argument.
 
 ## Oversampling and transforms
 
@@ -207,11 +257,15 @@ model_f1_last.pth
 checkpoint_summary_f1.json
 train_log_f1.csv
 train_plot_f1.png
-validation_predictions_f1.csv
 run_info_TASK_NAME_f1.json
+validation_results_F1/validation_summary.xlsx
+validation_results_F1/validation_image_summary.csv
+validation_results_F1/validation_endpoints.csv
+validation_results_F1/validation_predictions_f1.csv
+validation_results_F1/logs/validation_run_metadata.json
 ```
 
-After training, the selected checkpoint is loaded and the validation prediction CSV is written when `--save-validation-predictions true` is used.
+`train_plot_f1.png` contains both loss curves and mean endpoint-error curves. After training, the selected checkpoint is loaded and IPV-style validation outputs are written when `--save-validation-predictions true` is used. The Excel workbook contains `image_summary` and `endpoints` sheets.
 
 If `--save-validation-overlays true` is used, validation images are saved under:
 
@@ -221,6 +275,26 @@ RUN_DIR/TRAINING_RESULTS/TASK_NAME/RUN_NAME/validation_results_F1/point_overlays
 ```
 
 Point overlays use labelled ground-truth and predicted endpoints.
+
+## Checkpoint metadata
+
+Saved `.pth` checkpoints now include IPV-style metadata sections:
+
+```text
+schema
+schema_version
+checkpoint
+task
+model
+data
+preprocessing
+inference
+augmentation
+training
+raw_configs
+```
+
+The `model` section stores the registry name, model class, module, and U-Net reconstruction arguments. The `preprocessing` section stores the fixed image size, heatmap sigma, channel order, value range, and resize method. The `augmentation` section records whether oversampling was enabled and the default augmentation policy from `heatmap_transforms.py`.
 
 ## Model registry
 
