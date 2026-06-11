@@ -12,7 +12,6 @@ from dataclasses import dataclass
 import cv2
 import numpy as np
 
-
 AFFINE_DEGREES = 30
 AFFINE_SHEAR = 15
 AFFINE_TRANSLATE = (0.1, 0.1)
@@ -140,7 +139,8 @@ class RandomAffine:
         translate_y = np.random.uniform(-self.translate[1], self.translate[1]) * height
         centre_x = (width - 1) / 2.0
         centre_y = (height - 1) / 2.0
-        matrix = translation_matrix(translate_x, translate_y) @ translation_matrix(centre_x, centre_y) @ rotation_matrix(angle) @ shear_matrix(shear_x) @ scale_matrix(scale_value) @ translation_matrix(-centre_x, -centre_y)
+        matrix = translation_matrix(translate_x, translate_y) @ translation_matrix(centre_x, centre_y) @ rotation_matrix(angle) @ shear_matrix(shear_x) @ scale_matrix(
+            scale_value) @ translation_matrix(-centre_x, -centre_y)
         self.last_params = {
             'transform': 'random_affine',
             'angle_degrees': float(angle),
@@ -160,7 +160,8 @@ class RandomHorizontalFlip:
 
     def __call__(self, image, points):
         """Flip the image horizontally and optionally swap symmetric landmark channels."""
-        self.last_params = {'transform': 'random_horizontal_flip', 'applied': False, 'probability': float(self.probability), 'point_index_swaps': tuple(self.point_index_swaps)}
+        self.last_params = {'transform': 'random_horizontal_flip', 'applied': False, 'probability': float(self.probability),
+                            'point_index_swaps': tuple(self.point_index_swaps)}
 
         if np.random.random() >= self.probability:
             return image, points
@@ -173,7 +174,8 @@ class RandomHorizontalFlip:
         for left_index, right_index in self.point_index_swaps:
             flipped_points[[left_index, right_index]] = flipped_points[[right_index, left_index]]
 
-        self.last_params = {'transform': 'random_horizontal_flip', 'applied': True, 'probability': float(self.probability), 'width': int(width), 'point_index_swaps': tuple(self.point_index_swaps)}
+        self.last_params = {'transform': 'random_horizontal_flip', 'applied': True, 'probability': float(self.probability), 'width': int(width),
+                            'point_index_swaps': tuple(self.point_index_swaps)}
         return flipped_image.astype(np.float32), flipped_points.astype(np.float32)
 
 
@@ -224,27 +226,20 @@ class GaussianBlur:
         return np.stack(blurred_channels, axis=0).astype(np.float32), points
 
 
-
 def get_last_params(transform):
     """Return the last sampled parameters from a transform in a consistent format."""
     return getattr(transform, 'last_params', {'transform': transform.__class__.__name__, 'params': 'not recorded'})
 
+
 def get_default_heatmap_transforms(num_of_points=None):
-    """Return default oversampling transforms for heatmap landmark training."""
+    """Return task-agnostic default oversampling transforms for heatmap landmark training."""
+    _ = num_of_points
     return Compose([
         RandomAffine(),
-        RandomHorizontalFlip(point_index_swaps=get_default_horizontal_flip_swaps(num_of_points=num_of_points)),
+        RandomHorizontalFlip(),
         GaussianNoise(),
         GaussianBlur(),
     ])
-
-
-def get_default_horizontal_flip_swaps(num_of_points=None):
-    """Return prostate transverse point swaps for horizontal flips when four landmarks are used."""
-    if int(num_of_points or 0) == 4:
-        return ((1, 3),)
-
-    return ()
 
 
 def make_odd_kernel_size(kernel_size):
