@@ -112,7 +112,8 @@ class HeatmapTrainingPipeline:
 
     def write_run_info(self):
         """Write full run metadata."""
-        run_info = {'created_at': dt.datetime.now().isoformat(), 'run_results_root': self.run_results_root, 'run_results_path': self.run_results_path,
+        run_info = {'schema': 'heatmap_training_run_info', 'schema_version': 2, 'created_at': dt.datetime.now().isoformat(),
+                    'run_results_root': self.run_results_root, 'run_results_path': self.run_results_path,
                     'save_copy_path': self.get_save_copy_path(), 'run_config': asdict(self.run_config), 'data_config': asdict(self.data_config),
                     'train_config': asdict(self.train_config), 'model_config': asdict(self.model_config)}
         run_info_path = self.run_results_path / f'run_info_{self.run_config.task_name}_f{self.run_config.fold}.json'
@@ -246,7 +247,7 @@ def validate_args(args, num_of_folds):
     if not args.image_data_dir.is_dir():
         raise ValueError(f'--image-data-dir does not exist or is not a directory: {args.image_data_dir}')
 
-    if args.image_size is None or len(args.image_size) != 2:
+    if len(args.image_size) != 2:
         raise ValueError('--image-size must contain exactly two values: HEIGHT WIDTH.')
 
     image_height, image_width = args.image_size
@@ -340,10 +341,11 @@ def format_number(value):
 def build_run_name(args, num_of_folds):
     """Build a deterministic folder name shared by every fold in the same experiment."""
     height, width = args.image_size
-    parts = ['heatmap', f'{num_of_folds}fold', f'{args.num_points}points', args.network_name, f'im{height}x{width}', f'sigma{format_number(args.heatmap_sigma)}',
-             f'bc{args.base_channels}', f'depth{args.depth}', f'cm{args.channel_multiplier}', f'mc{args.max_channels}', f'norm{args.normalisation}',
-             f'act{args.activation}', f'drop{format_number(args.dropout)}', f'up{args.upsampling}', f'loss{args.loss_name}', f'pw{format_number(args.positive_weight)}',
-             f'of{args.oversampling_factor}', f'seed{args.random_seed}', f'bs{args.batch_size}', f'lr{format_number(args.learning_rate)}', f'ep{args.max_training_epochs}']
+    parts = ['heatmap', f'{num_of_folds}fold', f'{args.num_points}points', args.network_name, f'im{height}x{width}',
+             f'sigma{format_number(args.heatmap_sigma)}', f'bc{args.base_channels}', f'depth{args.depth}', f'cm{args.channel_multiplier}',
+             f'mc{args.max_channels}', f'norm{args.normalisation}', f'act{args.activation}', f'drop{format_number(args.dropout)}',
+             f'up{args.upsampling}', f'loss{args.loss_name}', f'pw{format_number(args.positive_weight)}', f'of{args.oversampling_factor}',
+             f'seed{args.random_seed}', f'bs{args.batch_size}', f'lr{format_number(args.learning_rate)}', f'ep{args.max_training_epochs}']
     return clean_run_name('_'.join(parts))
 
 
@@ -375,7 +377,7 @@ def parse_args():
     parser.add_argument('--fold-lists-path', type=Path, required=True, help='Directory containing train_fN.txt, val_fN.txt, and test_fN.txt files.')
     parser.add_argument('--mark-list-file', type=Path, required=True, help='Landmark mark-list file.')
     parser.add_argument('--image-data-dir', type=Path, required=True, help='Directory containing source images.')
-    parser.add_argument('--image-size', type=int, nargs=2, default=list(pms.image_size), metavar=('HEIGHT', 'WIDTH'), help='Training image size.')
+    parser.add_argument('--image-size', type=int, nargs=2, required=True, metavar=('HEIGHT', 'WIDTH'), help='Training image size in HEIGHT WIDTH order. Use Heatmaps.utils.calculate_image_size to estimate a sensible value.')
     parser.add_argument('--heatmap-sigma', type=float, default=pms.heatmap_sigma, help='Gaussian sigma for target heatmaps.')
     parser.add_argument('--oversampling-factor', type=int, default=1, help='Training-set multiplier. A value of 1 uses each image once; values above 1 add augmented copies using Heatmaps/Heatmaps/heatmap_transforms.py.')
     parser.add_argument('--recursive-image-search', type=str_to_bool, default=False, help='Search image-data-dir recursively.')
@@ -426,7 +428,6 @@ def build_configs(args):
         raise ValueError(f'Fold {args.fold} was requested, but available folds are {fold_numbers}.')
 
     validate_args(args=args, num_of_folds=num_of_folds)
-
     run_name = clean_run_name(args.run_name) if args.run_name else build_run_name(args=args, num_of_folds=num_of_folds)
     run_config = RunConfig(fold=args.fold, task_name=args.task_name, num_of_points=args.num_points, train_model=args.train_model, copy_files=args.copy_files,
                            run_dir=args.run_dir, save_dir=args.save_dir, run_name=run_name)

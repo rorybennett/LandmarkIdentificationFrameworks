@@ -18,11 +18,13 @@ from torch.optim.lr_scheduler import ReduceLROnPlateau, StepLR
 from torch.utils.data import DataLoader
 
 from .custom_dataset import HeatmapDataset, HeatmapDatasetConfig
+from .heatmap_transforms import get_augmentation_policy
 from .model_registry import build_heatmap_model
 from .models import count_trainable_parameters
 from .utils.io_utils import heatmaps_to_points, infer_image_channel_count, safe_file_stem, scale_points_to_original
 from .utils.progress_bar import ProgressBar
 from .utils.visualisation_utils import save_validation_overlays
+from openpyxl import Workbook
 
 def seed_worker(worker_id):
     """Seed NumPy and Python RNGs inside each DataLoader worker."""
@@ -32,6 +34,8 @@ def seed_worker(worker_id):
 
 
 CHECKPOINT_FORMAT_VERSION = 1
+CHECKPOINT_SCHEMA_VERSION = 1
+CHECKPOINT_SCHEMA_NAME = 'heatmap_checkpoint_metadata'
 MIN_POINTS_PER_IMAGE = 1
 MAX_POINTS_PER_IMAGE = 30
 
@@ -234,13 +238,20 @@ class TrainModel:
         return self.format_metrics(loss=total_loss / max(len(loader.dataset), 1), error_px=total_error_px / max(total_points, 1))
 
     def save_validation_predictions(self, model, val_loader, checkpoint_path):
-        """Save validation endpoint predictions from the selected checkpoint."""
+        """Save validation endpoint predictions using an IPV-like output layout."""
         if checkpoint_path is not None:
             self.load_checkpoint_state(model=model, checkpoint_path=checkpoint_path)
 
         model.eval()
-        output_csv = self.output_path / f'validation_predictions_f{self.data_config.fold}.csv'
-        rows = []
+        validation_output_path = self.get_validation_output_path()
+        logs_path = validation_output_path / 'logs'
+        validation_output_path.mkdir(exist_ok=True, parents=True)
+        logs_path.mkdir(exist_ok=True, parents=True)
+
+        image_summary_rows = []
+        endpoint_rows = []
+        prediction_rows = []
+        checkpoint_type = self.get_checkpoint_type_from_path(checkpoint_path)
 
         with torch.inference_mode(), ProgressBar(total=len(val_loader), label='Validation predictions') as progress_bar:
             for batch in val_loader:
@@ -258,20 +269,28 @@ class TrainModel:
                     target_points = points_original[index].detach().cpu().numpy()
                     predicted_points = predicted_original[index].detach().cpu().numpy()
                     point_errors = errors[index].detach().cpu().numpy()
-                    rows.append(
-                        self.create_prediction_row(sample_name=sample_name, target_points=target_points, predicted_points=predicted_points, point_errors=point_errors))
+                    image_height, image_width = original_size[index].detach().cpu().numpy().astype(int).tolist()
+                    image_path = str(batch['image_path'][index])
+                    prediction_rows.append(self.create_prediction_row(sample_name=sample_name, target_points=target_points, predicted_points=predicted_points, point_errors=point_errors))
+                    image_summary_rows.append(self.create_image_summary_row(sample_name=sample_name, image_path=image_path, image_height=image_height, image_width=image_width,
+                                                                            point_errors=point_errors, checkpoint_type=checkpoint_type))
+                    endpoint_rows.extend(self.create_endpoint_rows(sample_name=sample_name, image_path=image_path, target_points=target_points,
+                                                                   predicted_points=predicted_points, point_errors=point_errors, checkpoint_type=checkpoint_type))
 
                     if self.train_config.save_validation_overlays:
                         output_stem = safe_file_stem(sample_name)
                         predicted_heatmaps = outputs[index].detach().cpu().numpy()
-                        save_validation_overlays(image_path=Path(batch['image_path'][index]), output_dir=self.get_validation_overlay_path(), output_stem=output_stem,
+                        save_validation_overlays(image_path=Path(image_path), output_dir=validation_output_path, output_stem=output_stem,
                                                  target_points=target_points, predicted_points=predicted_points, predicted_heatmaps=predicted_heatmaps)
 
                 progress_bar.update()
 
-        self.write_prediction_csv(output_csv=output_csv, rows=rows)
-        print(f'\tValidation predictions saved to {output_csv}', flush=True)
-        return output_csv
+        output_paths = self.write_validation_outputs(validation_output_path=validation_output_path, image_summary_rows=image_summary_rows,
+                                                     endpoint_rows=endpoint_rows, prediction_rows=prediction_rows)
+        self.write_validation_run_metadata(validation_output_path=validation_output_path, checkpoint_path=checkpoint_path, checkpoint_type=checkpoint_type,
+                                           image_summary_rows=image_summary_rows, endpoint_rows=endpoint_rows, output_paths=output_paths)
+        print(f"\tValidation summary saved to {output_paths['summary_xlsx']}", flush=True)
+        return output_paths['summary_xlsx']
 
     def build_data_loaders(self):
         """Build train and validation data loaders after resolving input channels."""
@@ -406,11 +425,12 @@ class TrainModel:
         return {'loss': float(loss), 'error_px': float(error_px)}
 
     def save_checkpoint(self, model, optimiser, checkpoint_type, epoch, metrics):
-        """Save one model checkpoint."""
+        """Save one model checkpoint with reconstruction-focused metadata."""
         checkpoint_path = self.get_checkpoint_path(checkpoint_type)
-        torch.save({'format_version': CHECKPOINT_FORMAT_VERSION, 'created_at': dt.datetime.now().isoformat(), 'epoch': int(epoch), 'checkpoint_type': checkpoint_type,
-                    'state_dict': model.state_dict(), 'optimiser_state_dict': optimiser.state_dict(), 'metrics': metrics, 'metadata': self.build_metadata()},
-                   checkpoint_path)
+        metadata = self.build_metadata(checkpoint_type=checkpoint_type, epoch=epoch, metrics=metrics)
+        torch.save({'format_version': CHECKPOINT_FORMAT_VERSION, 'schema': 'heatmap_training_checkpoint', 'schema_version': CHECKPOINT_SCHEMA_VERSION,
+                    'created_at': dt.datetime.now().isoformat(), 'epoch': int(epoch), 'checkpoint_type': checkpoint_type, 'state_dict': model.state_dict(),
+                    'optimiser_state_dict': optimiser.state_dict(), 'metrics': metrics, 'metadata': metadata}, checkpoint_path)
         return checkpoint_path
 
     def load_checkpoint_state(self, model, checkpoint_path):
@@ -430,20 +450,58 @@ class TrainModel:
 
     def write_checkpoint_summary(self, best_epoch, last_epoch, best_val_loss, last_val_loss, best_checkpoint_path, last_checkpoint_path, validation_predictions_path):
         """Write checkpoint and run metadata."""
-        summary = {'format_version': CHECKPOINT_FORMAT_VERSION, 'created_at': dt.datetime.now().isoformat(), 'fold': int(self.data_config.fold),
-                   'task_name': self.data_config.task_name, 'num_of_points': int(self.data_config.num_of_points), 'checkpoints': {
+        summary = {'format_version': CHECKPOINT_FORMAT_VERSION, 'schema': 'heatmap_checkpoint_summary', 'schema_version': CHECKPOINT_SCHEMA_VERSION,
+                   'created_at': dt.datetime.now().isoformat(), 'fold': int(self.data_config.fold), 'task_name': self.data_config.task_name,
+                   'num_of_points': int(self.data_config.num_of_points), 'checkpoints': {
                 'best': {'epoch': best_epoch, 'val_loss': best_val_loss, 'path': str(best_checkpoint_path) if best_checkpoint_path is not None else None},
                 'last': {'epoch': last_epoch, 'val_loss': last_val_loss, 'path': str(last_checkpoint_path) if last_checkpoint_path is not None else None}},
+                   'validation_summary_path': str(validation_predictions_path) if validation_predictions_path is not None else None,
                    'validation_predictions_path': str(validation_predictions_path) if validation_predictions_path is not None else None,
                    'metadata': self.build_metadata()}
 
         with open(self.get_checkpoint_summary_path(), 'w', encoding='utf-8') as summary_file:
             json.dump(summary, summary_file, indent=4, default=str)
 
-    def build_metadata(self):
-        """Build serialisable metadata."""
-        return {'data_config': self.serialise(asdict(self.data_config)), 'train_config': self.serialise(asdict(self.train_config)),
-                'model_config': self.serialise(asdict(self.model_config))}
+    def build_metadata(self, checkpoint_type=None, epoch=None, metrics=None):
+        """Build serialisable checkpoint metadata using IPV-style sections."""
+        data_config = self.serialise(asdict(self.data_config))
+        train_config = self.serialise(asdict(self.train_config))
+        model_config = self.serialise(asdict(self.model_config))
+        image_height, image_width = [int(value) for value in self.data_config.image_size]
+        input_channels = None if self.data_config.input_channels is None else int(self.data_config.input_channels)
+        model_init_config = dict(model_config)
+        model_init_config.pop('network_name', None)
+        model_init_args = {'num_of_points': int(self.data_config.num_of_points), 'input_channels': input_channels, **model_init_config}
+
+        return {
+            'schema': CHECKPOINT_SCHEMA_NAME,
+            'schema_version': CHECKPOINT_SCHEMA_VERSION,
+            'created_at': dt.datetime.now().isoformat(),
+            'checkpoint': {'format_version': CHECKPOINT_FORMAT_VERSION, 'type': checkpoint_type, 'epoch': None if epoch is None else int(epoch), 'metrics': metrics},
+            'task': {'name': self.data_config.task_name, 'fold': int(self.data_config.fold), 'num_points': int(self.data_config.num_of_points),
+                     'output_heads': int(self.data_config.num_of_points), 'prediction_type': 'landmark_heatmap_regression'},
+            'model': {'registry_name': self.model_config.network_name, 'module': 'Heatmaps.models', 'class_name': 'UNetHeatmap', 'init_args': model_init_args},
+            'data': {'fold': int(self.data_config.fold), 'fold_lists_path': str(self.data_config.fold_lists_path),
+                     'mark_list_file': str(self.data_config.mark_list_file), 'image_data_dir': str(self.data_config.image_data_dir),
+                     'recursive_image_search': bool(self.data_config.recursive_image_search), 'input_channels': input_channels},
+            'preprocessing': {'image_size': {'height': image_height, 'width': image_width}, 'heatmap_sigma': float(self.data_config.heatmap_sigma),
+                              'input_channels': input_channels, 'tensor_shape': ['batch', input_channels, image_height, image_width],
+                              'channel_order': 'channels_first', 'image_value_range': 'float32_0_to_1',
+                              'resize': {'library': 'cv2.resize', 'interpolation': 'INTER_AREA'},
+                              'target_heatmaps': {'channels': int(self.data_config.num_of_points), 'generation': 'normalised_gaussian_per_landmark'}},
+            'inference': {'heatmap_to_point': 'argmax', 'output_coordinate_space': 'original_image_pixels', 'scale_back_to_original': True,
+                          'resized_coordinate_space': {'height': image_height, 'width': image_width}},
+            'augmentation': self.build_augmentation_metadata(),
+            'training': {'train_config': train_config, 'optimiser': self.train_config.optimiser_name, 'loss': self.train_config.loss_name,
+                         'random_seed': int(self.train_config.random_seed)},
+            'raw_configs': {'data_config': data_config, 'train_config': train_config, 'model_config': model_config}
+        }
+
+    def build_augmentation_metadata(self):
+        """Return the oversampling and augmentation policy stored in checkpoints."""
+        oversampling_factor = int(self.data_config.oversampling_factor)
+        return {'enabled': oversampling_factor > 1, 'oversampling_factor': oversampling_factor, 'applies_to': 'train split only',
+                'policy': get_augmentation_policy(num_of_points=self.data_config.num_of_points)}
 
     @staticmethod
     def serialise(value):
@@ -551,20 +609,124 @@ class TrainModel:
         history['val_error_px'].append(val_metrics['error_px'])
 
     def save_history_plot(self, history):
-        """Save loss and endpoint-error plots."""
+        """Save loss and endpoint-error traces in the training plot."""
         if not history['epoch']:
             return
 
         plt.clf()
-        plt.figure(figsize=(8, 5))
-        plt.plot(history['epoch'], history['train_loss'], label='train_loss')
-        plt.plot(history['epoch'], history['val_loss'], label='val_loss')
-        plt.xlabel('Epoch')
-        plt.ylabel('Loss')
-        plt.legend()
-        plt.tight_layout()
-        plt.savefig(self.get_plot_path())
-        plt.close()
+        figure, loss_axis = plt.subplots(figsize=(9, 5))
+        error_axis = loss_axis.twinx()
+        loss_axis.plot(history['epoch'], history['train_loss'], label='train_loss')
+        loss_axis.plot(history['epoch'], history['val_loss'], label='val_loss')
+        error_axis.plot(history['epoch'], history['train_error_px'], linestyle='--', label='train_error_px')
+        error_axis.plot(history['epoch'], history['val_error_px'], linestyle='--', label='val_error_px')
+        loss_axis.set_xlabel('Epoch')
+        loss_axis.set_ylabel('Loss')
+        error_axis.set_ylabel('Mean endpoint error (px)')
+        loss_lines, loss_labels = loss_axis.get_legend_handles_labels()
+        error_lines, error_labels = error_axis.get_legend_handles_labels()
+        loss_axis.legend(loss_lines + error_lines, loss_labels + error_labels, loc='best')
+        figure.tight_layout()
+        figure.savefig(self.get_plot_path())
+        plt.close(figure)
+
+    def get_validation_output_path(self):
+        """Return the validation output directory."""
+        return self.output_path / f'validation_results_F{self.data_config.fold}'
+
+    @staticmethod
+    def get_checkpoint_type_from_path(checkpoint_path):
+        """Infer checkpoint type from the checkpoint filename."""
+        if checkpoint_path is None:
+            return None
+
+        name = Path(checkpoint_path).stem.lower()
+
+        if name.endswith('_best'):
+            return 'best'
+
+        if name.endswith('_last'):
+            return 'last'
+
+        return None
+
+    @staticmethod
+    def create_image_summary_row(sample_name, image_path, image_height, image_width, point_errors, checkpoint_type=None):
+        """Create one image-level validation summary row."""
+        point_errors = np.asarray(point_errors, dtype=np.float32)
+        return {'sample_name': sample_name, 'image_path': image_path, 'image_height': int(image_height), 'image_width': int(image_width),
+                'num_points': int(point_errors.size), 'mean_error_px': float(np.mean(point_errors)), 'median_error_px': float(np.median(point_errors)),
+                'max_error_px': float(np.max(point_errors)), 'checkpoint_type': checkpoint_type}
+
+    @staticmethod
+    def create_endpoint_rows(sample_name, image_path, target_points, predicted_points, point_errors, checkpoint_type=None):
+        """Create one endpoint-level validation row per landmark."""
+        rows = []
+
+        for point_index, (target, predicted, error) in enumerate(zip(target_points, predicted_points, point_errors), start=1):
+            rows.append({'sample_name': sample_name, 'image_path': image_path, 'point_index': point_index, 'target_x': float(target[0]),
+                         'target_y': float(target[1]), 'pred_x': float(predicted[0]), 'pred_y': float(predicted[1]),
+                         'error_px': float(error), 'checkpoint_type': checkpoint_type})
+
+        return rows
+
+    def write_validation_outputs(self, validation_output_path, image_summary_rows, endpoint_rows, prediction_rows):
+        """Write validation CSV and Excel outputs in an IPV-like format."""
+        output_paths = {'summary_xlsx': validation_output_path / 'validation_summary.xlsx',
+                        'image_summary_csv': validation_output_path / 'validation_image_summary.csv',
+                        'endpoints_csv': validation_output_path / 'validation_endpoints.csv',
+                        'predictions_csv': validation_output_path / f'validation_predictions_f{self.data_config.fold}.csv'}
+        self.write_rows_csv(output_paths['image_summary_csv'], image_summary_rows)
+        self.write_rows_csv(output_paths['endpoints_csv'], endpoint_rows)
+        self.write_rows_csv(output_paths['predictions_csv'], prediction_rows)
+        self.write_validation_workbook(output_paths['summary_xlsx'], image_summary_rows=image_summary_rows, endpoint_rows=endpoint_rows)
+        return output_paths
+
+    @staticmethod
+    def write_validation_workbook(output_xlsx, image_summary_rows, endpoint_rows):
+        """Write validation summaries to an Excel workbook matching the IPV sheet layout."""
+        workbook = Workbook()
+        image_sheet = workbook.active
+        image_sheet.title = 'image_summary'
+        TrainModel.write_rows_to_sheet(image_sheet, image_summary_rows)
+        endpoint_sheet = workbook.create_sheet('endpoints')
+        TrainModel.write_rows_to_sheet(endpoint_sheet, endpoint_rows)
+        workbook.save(output_xlsx)
+
+    @staticmethod
+    def write_rows_to_sheet(sheet, rows):
+        """Write dictionaries to one worksheet."""
+        if not rows:
+            return
+
+        headers = list(rows[0].keys())
+        sheet.append(headers)
+
+        for row in rows:
+            sheet.append([row.get(header) for header in headers])
+
+    @staticmethod
+    def write_rows_csv(output_csv, rows):
+        """Write dictionaries to CSV."""
+        if not rows:
+            return
+
+        with open(output_csv, 'w', newline='', encoding='utf-8') as csv_file:
+            writer = csv.DictWriter(csv_file, fieldnames=list(rows[0].keys()))
+            writer.writeheader()
+            writer.writerows(rows)
+
+    def write_validation_run_metadata(self, validation_output_path, checkpoint_path, checkpoint_type, image_summary_rows, endpoint_rows, output_paths):
+        """Write validation run metadata."""
+        logs_path = validation_output_path / 'logs'
+        logs_path.mkdir(exist_ok=True, parents=True)
+        metadata = {'schema': 'heatmap_validation_run_metadata', 'schema_version': CHECKPOINT_SCHEMA_VERSION, 'created_at': dt.datetime.now().isoformat(),
+                    'fold': int(self.data_config.fold), 'task_name': self.data_config.task_name, 'num_points': int(self.data_config.num_of_points),
+                    'image_count': len(image_summary_rows), 'endpoint_count': len(endpoint_rows), 'checkpoint_path': str(checkpoint_path) if checkpoint_path is not None else None,
+                    'checkpoint_type': checkpoint_type, 'output_paths': {name: str(path) for name, path in output_paths.items()}, 'metadata': self.build_metadata()}
+
+        with open(logs_path / 'validation_run_metadata.json', 'w', encoding='utf-8') as metadata_file:
+            json.dump(metadata, metadata_file, indent=4, default=str)
 
     @staticmethod
     def create_prediction_row(sample_name, target_points, predicted_points, point_errors):

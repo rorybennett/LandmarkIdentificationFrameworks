@@ -242,6 +242,28 @@ def get_default_heatmap_transforms(num_of_points=None):
     ])
 
 
+def get_augmentation_policy(num_of_points=None):
+    """Return the default augmentation policy recorded in checkpoints."""
+    return {
+        'name': 'default_heatmap_oversampling_v1',
+        'num_of_points': None if num_of_points is None else int(num_of_points),
+        'random_source': 'numpy.random seeded by training random_seed and DataLoader worker seeds',
+        'transform_order': ['RandomAffine', 'RandomHorizontalFlip', 'GaussianNoise', 'GaussianBlur'],
+        'transforms': [
+            {'name': 'RandomAffine', 'degrees': float(AFFINE_DEGREES), 'shear': float(AFFINE_SHEAR), 'translate': tuple(float(value) for value in AFFINE_TRANSLATE),
+             'scale': tuple(float(value) for value in AFFINE_SCALE), 'max_attempts': int(AFFINE_MAX_ATTEMPTS)},
+            {'name': 'RandomHorizontalFlip', 'probability': float(HORIZONTAL_FLIP_PROBABILITY), 'point_index_swaps': ()},
+            {'name': 'GaussianNoise', 'mean': float(GAUSSIAN_NOISE_MEAN), 'sigma': float(GAUSSIAN_NOISE_SIGMA), 'clip': bool(GAUSSIAN_NOISE_CLIP),
+             'preserve_greyscale_rgb': True},
+            {'name': 'GaussianBlur', 'kernel_size': int(GAUSSIAN_BLUR_KERNEL_SIZE)},
+        ],
+        'available_not_default': [
+            {'name': 'RandomErasing', 'probability': float(RANDOM_ERASING_PROBABILITY), 'scale': tuple(float(value) for value in RANDOM_ERASING_SCALE),
+             'ratio': tuple(float(value) for value in RANDOM_ERASING_RATIO)}
+        ],
+    }
+
+
 def make_odd_kernel_size(kernel_size):
     """Return a positive odd OpenCV kernel size."""
     kernel_size = max(1, int(kernel_size))

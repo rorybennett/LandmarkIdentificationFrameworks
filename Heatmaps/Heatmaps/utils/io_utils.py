@@ -237,6 +237,16 @@ def infer_image_channel_count(image_path):
     return get_image_channel_count(image=image, image_path=image_path)
 
 
+def get_image_size(image_path):
+    """Read one image and return its height and width."""
+    image = io.imread(image_path)
+
+    if image.ndim < 2:
+        raise ValueError(f'Unsupported image shape for {image_path}: {image.shape}.')
+
+    return int(image.shape[0]), int(image.shape[1])
+
+
 def validate_resolved_input_channels(input_channels):
     """Validate internally resolved model input channels."""
     if input_channels is None:
