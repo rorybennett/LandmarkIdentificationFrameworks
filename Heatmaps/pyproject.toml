@@ -14,11 +14,14 @@ dependencies = [
     "torch",
     "matplotlib",
     "opencv-python",
-    "scikit-image"
+    "scikit-image",
+    "openpyxl"
 ]
 
 [project.scripts]
 heatmaps-train = "Heatmaps.heatmap_training_pipeline:main"
+heatmaps-generate-folds = "Heatmaps.utils.generate_folds:main"
+heatmaps-calculate-image-size = "Heatmaps.utils.calculate_image_size:main"
 
 [tool.setuptools.packages.find]
 include = ["Heatmaps*"]
