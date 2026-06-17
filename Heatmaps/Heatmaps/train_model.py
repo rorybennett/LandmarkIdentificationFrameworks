@@ -585,9 +585,6 @@ class TrainModel:
         """Return the training plot path."""
         return self.output_path / f'train_plot_f{self.data_config.fold}.png'
 
-    def get_validation_overlay_path(self):
-        """Return the validation overlay path."""
-        return self.output_path / f'validation_results_F{self.data_config.fold}'
 
     @staticmethod
     def get_current_lr(optimiser):
@@ -742,13 +739,3 @@ class TrainModel:
 
         return row
 
-    @staticmethod
-    def write_prediction_csv(output_csv, rows):
-        """Write validation predictions to CSV."""
-        if not rows:
-            return
-
-        with open(output_csv, 'w', newline='', encoding='utf-8') as csv_file:
-            writer = csv.DictWriter(csv_file, fieldnames=list(rows[0].keys()))
-            writer.writeheader()
-            writer.writerows(rows)
