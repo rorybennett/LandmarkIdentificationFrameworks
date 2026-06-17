@@ -214,7 +214,6 @@ class HeatmapTrainingPipeline:
         return f'{hours:02d}:{minutes:02d}:{seconds:02d}'
 
 
-
 def normalise_save_dir(args):
     """Enforce save-dir behaviour from the copy-files switch."""
     if not args.copy_files:
@@ -228,9 +227,6 @@ def normalise_save_dir(args):
 def validate_args(args, num_of_folds):
     """Validate numeric, path, split, training, and model terminal arguments."""
     normalise_save_dir(args)
-
-    if num_of_folds < 2:
-        raise ValueError(f'At least 2 fold files are required. Found {num_of_folds}.')
 
     if args.fold < 1 or args.fold > num_of_folds:
         raise ValueError(f'fold must be between 1 and {num_of_folds}. Got fold={args.fold}.')
@@ -323,6 +319,7 @@ def validate_args(args, num_of_folds):
 
     validate_fold_split_overlaps(fold_lists_path=args.fold_lists_path, fold=args.fold)
 
+
 def validate_num_points(value):
     """Validate the number of landmark points for each image."""
     value = int(value)
@@ -377,9 +374,11 @@ def parse_args():
     parser.add_argument('--fold-lists-path', type=Path, required=True, help='Directory containing train_fN.txt, val_fN.txt, and test_fN.txt files.')
     parser.add_argument('--mark-list-file', type=Path, required=True, help='Landmark mark-list file.')
     parser.add_argument('--image-data-dir', type=Path, required=True, help='Directory containing source images.')
-    parser.add_argument('--image-size', type=int, nargs=2, required=True, metavar=('HEIGHT', 'WIDTH'), help='Training image size in HEIGHT WIDTH order. Use Heatmaps.utils.calculate_image_size to estimate a sensible value.')
+    parser.add_argument('--image-size', type=int, nargs=2, required=True, metavar=('HEIGHT', 'WIDTH'),
+                        help='Training image size in HEIGHT WIDTH order. Use Heatmaps.utils.calculate_image_size to estimate a sensible value.')
     parser.add_argument('--heatmap-sigma', type=float, default=pms.heatmap_sigma, help='Gaussian sigma for target heatmaps.')
-    parser.add_argument('--oversampling-factor', type=int, default=1, help='Training-set multiplier. A value of 1 uses each image once; values above 1 add augmented copies using Heatmaps/Heatmaps/heatmap_transforms.py.')
+    parser.add_argument('--oversampling-factor', type=int, default=1,
+                        help='Training-set multiplier. A value of 1 uses each image once; values above 1 add augmented copies using Heatmaps/Heatmaps/heatmap_transforms.py.')
     parser.add_argument('--recursive-image-search', type=str_to_bool, default=False, help='Search image-data-dir recursively.')
 
     parser.add_argument('--batch-size', type=int, default=4, help='Training batch size.')
@@ -436,7 +435,8 @@ def build_configs(args):
                                     heatmap_sigma=args.heatmap_sigma, input_channels=None, recursive_image_search=args.recursive_image_search,
                                     oversampling_factor=args.oversampling_factor)
     train_config = TrainConfig(batch_size=args.batch_size, learning_rate=args.learning_rate, max_training_epochs=args.max_training_epochs, num_workers=args.train_workers,
-                               random_seed=args.random_seed, optimiser_name=args.optimiser_name, loss_name=args.loss_name, positive_weight=args.positive_weight, weight_decay=args.weight_decay,
+                               random_seed=args.random_seed, optimiser_name=args.optimiser_name, loss_name=args.loss_name, positive_weight=args.positive_weight,
+                               weight_decay=args.weight_decay,
                                momentum=args.momentum, lr_schedule=args.lr_schedule, lr_step_size=args.lr_step_size, lr_gamma=args.lr_gamma,
                                early_stop_patience=args.early_stop_patience, early_stop_min_delta=args.early_stop_min_delta,
                                early_stop_warmup_epochs=args.early_stop_warmup_epochs, use_amp=args.use_amp, save_validation_predictions=args.save_validation_predictions,
