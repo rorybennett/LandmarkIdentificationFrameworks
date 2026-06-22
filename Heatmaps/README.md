@@ -2,7 +2,24 @@
 
 Heatmap-regression landmark localisation package for the `LandmarkIdentificationFrameworks/Heatmaps` subdirectory.
 
-This package is intended to sit alongside the IPV and Detection packages. It uses the same fold-list and mark-list idea as the IPV package, but it does not create patch CSVs or patch image folders. Images are loaded directly during training and converted into Gaussian landmark heatmaps on demand.
+This package is intended to sit alongside the IPV and Detection packages. It trains convolutional neural networks to predict one 
+heatmap per landmark from complete input images. Source images are loaded directly during training,
+and Gaussian target heatmaps are generated from the supplied landmark coordinates when each sample is requested.
+
+**Package version:** `0.1.0`
+
+## Current scope
+
+The package currently provides:
+
+- fold-based model training and validation;
+- configurable U-Net heatmap regression;
+- landmark-preserving image augmentation;
+- automatic input-channel detection;
+- best and last model checkpoints;
+- validation metrics, predictions, heatmap overlays, and point overlays.
+
+Standalone held-out test evaluation and general-purpose inference are not yet included.
 
 ## Package layout
 
@@ -31,25 +48,37 @@ Heatmaps/
       visualisation_utils.py
 ```
 
-## Install
+## Installation
 
-From inside this `Heatmaps` directory:
+From inside the repository's `Heatmaps` directory:
 
 ```bash
 pip install -e .
 ```
 
-The command-line entry points installed by `pyproject.toml` are:
+This installs the training command:
 
 ```text
 heatmaps-train
-heatmaps-generate-folds
-heatmaps-calculate-image-size
 ```
 
-## Expected input files
+Check the available arguments with:
 
-Fold lists use the same naming style as the IPV package. The current code validates that every fold has train, validation, and test list files, even though only the train and validation splits are used during heatmap training:
+```bash
+heatmaps-train --help
+```
+
+## Input data
+
+A training run requires:
+
+1. a source-image directory;
+2. a landmark mark-list file;
+3. train, validation, and test sample lists for each fold.
+
+### Fold lists
+
+Fold files must use the following names:
 
 ```text
 folds/
@@ -62,47 +91,82 @@ folds/
   ...
 ```
 
-The mark-list file should contain one image and its landmark coordinates per line, for example:
+Each file contains one sample identifier per line. Entries may be image stems such as `A1` or filenames such as `A1.jpg`.
+
+All three files are required for each fold so that the fold definition is complete and can be validated. The current training workflow uses the training and validation lists; the test lists are reserved for later held-out evaluation.
+
+### Landmark mark list
+
+The mark-list file contains an image name followed by its landmark coordinates:
 
 ```text
 A1.jpg (236, 214) (342, 271) (245, 354) (134, 291)
 ```
 
-Fold-list entries can be stems such as `A1` or filenames such as `A1.jpg`.
+Coordinates use `(x, y)` order, where `x` is the horizontal image coordinate and `y` is the vertical image coordinate. Every sample must contain at least the number of points specified by `--num-points`.
 
-## Generate fold lists
-
-A fold-generation utility is included under:
+Before training, every landmark is checked against its resolved source image. For an image with width `W` and height `H`, each point must satisfy:
 
 ```text
-Heatmaps/Heatmaps/utils/generate_folds.py
+0 <= x < W
+0 <= y < H
 ```
 
-Edit the top-level `MARK_LIST_PATH`, `OUTPUT_DIR`, `NUM_FOLDS`, and switches, then run:
+The run stops if a point is outside the image. The error identifies the sample, point index, coordinate, and valid image bounds.
+
+### Source images
+
+The source-image directory may contain greyscale, RGB, or RGBA images. Images can be found recursively by setting:
+
+```text
+--recursive-image-search true
+```
+
+All images used by one task must have a consistent source channel count.
+
+## Creating fold lists
+
+A fold-generation utility is provided at:
+
+```text
+Heatmaps/utils/generate_folds.py
+```
+
+Edit its top-level paths and switches, then run:
 
 ```bash
 python -m Heatmaps.utils.generate_folds
 ```
 
-or use the installed entry point:
+The utility creates deterministic train, validation, and test lists together with optional summary and membership CSV files.
 
-```bash
-heatmaps-generate-folds
+## Choosing an image size
+
+`--image-size HEIGHT WIDTH` is required. Every image and landmark set is resized into this common training coordinate system. Each dimension must be at least `2 ** depth` so that every U-Net downsampling level remains valid.
+
+A helper utility can calculate the average dimensions of a source-image directory. Edit the top-level `IMAGE_DATA_DIR` in:
+
+```text
+Heatmaps/utils/calculate_image_size.py
 ```
 
-The utility follows the same 80/10/10 train/test/validation structure as the IPV package and writes `train_fN.txt`, `test_fN.txt`, `val_fN.txt`, plus optional summary CSVs.
+Then run:
 
-## Train from the command line
+```bash
+python -m Heatmaps.utils.calculate_image_size
+```
 
-The command-line positional arguments are:
+The utility prints the average and rounded image dimensions and a ready-to-use `--image-size HEIGHT WIDTH` argument.
+
+## Training
+
+The command format is:
 
 ```text
 heatmaps-train FOLD TASK_NAME TRAIN_MODEL COPY_FILES [OPTIONS]
 ```
 
-There is no delete-data/delete-files stage in the heatmap package. The heatmap workflow does not create patch datasets, so there is nothing equivalent to the IPV generated training-data clean-up step.
-
-Example transverse prostate run:
+A transverse prostate example is:
 
 ```bash
 heatmaps-train 1 prostate_transverse true false \
@@ -120,74 +184,11 @@ heatmaps-train 1 prostate_transverse true false \
     --max-training-epochs 80
 ```
 
-For sagittal prostate images, change `--num-points 2` and use the sagittal mark list and image directory.
+For sagittal prostate images, use `--num-points 2` together with the corresponding sagittal mark list and image directory.
 
-## Image size utility
+The supplied `run_pipeline.sh` and `run_pipeline.ps1` files provide editable Linux/macOS/HPC and Windows PowerShell examples. Paths and training settings are exposed as top-level variables.
 
-`--image-size HEIGHT WIDTH` is required. The training pipeline no longer infers image size automatically.
-
-To estimate a sensible value from a folder of images, edit the top-level `IMAGE_DATA_DIR` in:
-
-```text
-Heatmaps/Heatmaps/utils/calculate_image_size.py
-```
-
-Then run:
-
-```bash
-python -m Heatmaps.utils.calculate_image_size
-```
-
-or:
-
-```bash
-heatmaps-calculate-image-size
-```
-
-The utility prints the average width, average height, rounded width, rounded height, and the corresponding `--image-size HEIGHT WIDTH` argument.
-
-## Oversampling and transforms
-
-Use `--oversampling-factor` to increase only the training dataset size. The default is `1`, which keeps the original training set unchanged.
-
-For example, `--oversampling-factor 4` makes the training split four times larger. Indices in the first original dataset pass are returned unchanged; additional passes apply a random transform to the image and landmark points before target heatmaps are generated. Validation data is never oversampled or augmented.
-
-The default augmentation policy is stored in:
-
-```text
-Heatmaps/Heatmaps/heatmap_transforms.py
-```
-
-The current default transform chain is task-agnostic:
-
-```text
-RandomAffine
-RandomHorizontalFlip
-GaussianNoise
-GaussianBlur
-```
-
-`RandomHorizontalFlip` mirrors the x-coordinate of every landmark, but it does not reorder landmark channels by default. This avoids hidden prostate-specific assumptions. If a particular dataset has symmetric landmark labels that need to swap after a horizontal flip, pass `point_index_swaps` explicitly when constructing `RandomHorizontalFlip` in `heatmap_transforms.py`.
-
-`RandomErasing` is implemented in `heatmap_transforms.py` for optional local experimentation, but it is not part of the default transform chain.
-
-Intensity transforms preserve greyscale RGB ultrasound images by applying noise consistently across RGB channels.
-
-## Input channels
-
-Input channels are detected automatically from the train and validation images for the selected fold. There is no command-line option for this.
-
-The package assumes that every image for a given task has the same number of source channels. The detected source channel count is used directly to configure the first U-Net layer:
-
-| Source images | Model input channels |
-|---------------|----------------------|
-| All greyscale | 1                    |
-| All RGB       | 3                    |
-| All RGBA      | 4                    |
-
-If any image has a different number of channels from the rest of the train/validation images, the run stops with a clear error. The loader does not silently convert greyscale, RGB, or RGBA images to another channel count.
-
-## Key training options
+## Data and heatmap settings
 
 The main data options are:
 
@@ -201,6 +202,50 @@ The main data options are:
 --oversampling-factor
 --recursive-image-search
 ```
+
+`--heatmap-sigma` controls the Gaussian spread of each target landmark heatmap in the resized training image.
+
+`--oversampling-factor` affects the training split only:
+
+- `1` uses each training sample once without augmentation;
+- values greater than `1` add augmented passes through the training samples;
+- validation samples are never oversampled or augmented.
+
+## Augmentation
+
+The default augmentation policy is defined in:
+
+```text
+Heatmaps/heatmap_transforms.py
+```
+
+The transform chain is:
+
+```text
+RandomAffine
+GaussianNoise
+GaussianBlur
+```
+
+The affine transform is applied to both the image and its landmark coordinates. Intensity transforms do not move landmarks.
+
+`RandomErasing` is available for optional experiments but is not enabled by default.
+
+The transform settings are stored in checkpoint metadata so that the training configuration can be reviewed later.
+
+## Input channels
+
+Input channels are detected automatically from the selected fold's training and validation images. There is no input-channel command-line argument.
+
+| Source images | Model input channels |
+|---|---:|
+| Greyscale | 1 |
+| RGB | 3 |
+| RGBA | 4 |
+
+The resolved channel count configures the first U-Net layer and is written to the final run metadata and checkpoints. A run stops if the training and validation images do not use a consistent channel count.
+
+## Optimisation settings
 
 The main optimisation options are:
 
@@ -224,6 +269,18 @@ The main optimisation options are:
 --use-amp
 ```
 
+The default loss is `weighted_mse`. `--positive-weight` increases the contribution of the landmark peak regions relative to the heatmap background.
+
+Random seeds are applied to Python, NumPy, PyTorch, and DataLoader workers.
+
+## Model settings
+
+The current model registry contains:
+
+```text
+unet_basic
+```
+
 The main model options are:
 
 ```text
@@ -241,15 +298,29 @@ The main model options are:
 --final-kernel-size 1|3
 ```
 
-## Outputs
+The network returns one output heatmap for each configured landmark. Additional architectures can be registered in `model_registry.py` and implemented in `models.py` without changing the external training command.
 
-Outputs are written to:
+## Validation outputs
+
+Validation export is enabled by default:
+
+```text
+--save-validation-predictions true
+```
+
+When enabled, validation predictions, metrics, heatmap overlays, and point overlays are all saved automatically. Set it to `false` to skip the complete validation export. After training, the selected checkpoint is reloaded and evaluated on the validation images. Predictions are converted from heatmap peaks into original-image coordinates before endpoint errors are calculated.
+
+## Output structure
+
+Before training a fold, existing outputs for that same fold are removed from the run directory and the cleanup is printed to the terminal. Outputs belonging to other folds are retained.
+
+Training outputs are written to:
 
 ```text
 RUN_DIR/TRAINING_RESULTS/TASK_NAME/RUN_NAME/
 ```
 
-The core outputs are:
+Typical outputs include:
 
 ```text
 model_f1_best.pth
@@ -258,27 +329,33 @@ checkpoint_summary_f1.json
 train_log_f1.csv
 train_plot_f1.png
 run_info_TASK_NAME_f1.json
-validation_results_F1/validation_summary.xlsx
-validation_results_F1/validation_image_summary.csv
-validation_results_F1/validation_endpoints.csv
-validation_results_F1/validation_predictions_f1.csv
-validation_results_F1/logs/validation_run_metadata.json
+validation_results_F1/
+  validation_summary.xlsx
+  validation_image_summary.csv
+  validation_endpoints.csv
+  validation_predictions_f1.csv
+  logs/
+    validation_run_metadata.json
 ```
 
-`train_plot_f1.png` contains both loss curves and mean endpoint-error curves. After training, the selected checkpoint is loaded and IPV-style validation outputs are written when `--save-validation-predictions true` is used. The Excel workbook contains `image_summary` and `endpoints` sheets.
-
-If `--save-validation-overlays true` is used, validation images are saved under:
+The validation directory also contains:
 
 ```text
-RUN_DIR/TRAINING_RESULTS/TASK_NAME/RUN_NAME/validation_results_F1/heatmap_overlays/
-RUN_DIR/TRAINING_RESULTS/TASK_NAME/RUN_NAME/validation_results_F1/point_overlays/
+heatmap_overlays/
+point_overlays/
 ```
 
-Point overlays use labelled ground-truth and predicted endpoints.
+The training plot contains loss curves and mean endpoint-error curves. The validation workbook contains `image_summary` and `endpoints` sheets. Point overlays label the ground-truth and predicted endpoints, while heatmap overlays show the model response over the source image.
 
-## Checkpoint metadata
+If `COPY_FILES` is `true`, the completed run directory is copied to:
 
-Saved `.pth` checkpoints now include IPV-style metadata sections:
+```text
+SAVE_DIR/TASK_NAME/RUN_NAME/
+```
+
+## Checkpoints and metadata
+
+Both best and last checkpoints are saved. Checkpoint metadata includes:
 
 ```text
 schema
@@ -294,30 +371,23 @@ training
 raw_configs
 ```
 
-The `model` section stores the registry name, model class, module, and U-Net reconstruction arguments. The `preprocessing` section stores the fixed image size, heatmap sigma, channel order, value range, and resize method. The `augmentation` section records whether oversampling was enabled and the default augmentation policy from `heatmap_transforms.py`.
+The metadata records the model reconstruction arguments, landmark count, input channels, target image size, heatmap sigma, preprocessing information, augmentation policy, training settings, and checkpoint metrics.
 
-## Model registry
-
-The current registry contains one heatmap model:
-
-```text
-unet_basic
-```
-
-Additional models can be added later in `model_registry.py` and `models.py` without changing the training pipeline.
+`run_info_TASK_NAME_fN.json` contains the resolved run, data, model, and training configuration. It is rewritten after input-channel detection so that the stored channel count reflects the model that was actually trained.
 
 ## Run names
 
-`--network-name` selects the model architecture. `--run-name` is only an optional output-folder override.
+`--network-name` selects the architecture. `--run-name` optionally overrides the output folder name.
 
-If `--run-name` is omitted, the package builds a deterministic run folder from the fold count, point count, selected network, image size, heatmap sigma, U-Net settings, loss settings, oversampling factor, batch size, learning rate, and epoch count.
+When `--run-name` is omitted, a deterministic name is built from the fold count, point count, model, image size, heatmap sigma, U-Net settings, loss settings, oversampling factor, batch size, learning rate, and epoch count.
 
-## Helper scripts
+## Transform inspection
 
-`run_pipeline.sh` and `run_pipeline.ps1` are editable examples for Linux/macOS/HPC shells and Windows PowerShell. They expose the same heatmap training options as top-level variables and then call `heatmaps-train`.
-
-`verify_transforms.py` can be used to visually inspect individual augmentation transforms:
+Individual transforms can be inspected visually with:
 
 ```bash
 python -m Heatmaps.utils.verify_transforms /path/to/images /path/to/points.txt default
 ```
+
+This is useful for confirming that an augmentation policy remains appropriate for a new anatomy, imaging modality, or landmark definition.
+
