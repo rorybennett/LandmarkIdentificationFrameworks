@@ -68,6 +68,7 @@ class HeatmapTrainingPipeline:
         start_time = dt.datetime.now()
         trainer = TrainModel(data_config=self.data_config, train_config=self.train_config, model_config=self.model_config, output_save_path=self.run_results_path)
         trainer.train()
+        self.write_run_info()
         end_time = dt.datetime.now()
         print(f'\tFold {self.run_config.fold} {self.run_config.task_name} training complete in {self.format_runtime(start_time, end_time)}.', flush=True)
         print(f'\tRaw elapsed time: {end_time - start_time}', flush=True)
@@ -86,6 +87,10 @@ class HeatmapTrainingPipeline:
 
         if not self.run_results_path.is_dir():
             raise ValueError(f'Run results path does not exist: {self.run_results_path}')
+
+        if save_path.exists():
+            print(f'\tExisting copied run directory found at {save_path}. Clearing it before copying.', flush=True)
+            shutil.rmtree(save_path)
 
         save_path.mkdir(exist_ok=True, parents=True)
         entries = list(self.run_results_path.iterdir())
@@ -106,9 +111,40 @@ class HeatmapTrainingPipeline:
         self.print_section_end()
 
     def prepare_run_directories(self):
-        """Create output directories."""
+        """Create output directories after clearing existing outputs for the requested fold."""
         self.run_results_root.mkdir(exist_ok=True, parents=True)
+        self.clear_existing_fold_outputs()
         self.run_results_path.mkdir(exist_ok=True, parents=True)
+
+    def clear_existing_fold_outputs(self):
+        """Remove outputs from an earlier run of the requested fold without affecting other folds."""
+        if not self.run_config.train_model or not self.run_results_path.exists():
+            return
+
+        fold = self.run_config.fold
+        targets = [
+            self.run_results_path / f'model_f{fold}_best.pth',
+            self.run_results_path / f'model_f{fold}_last.pth',
+            self.run_results_path / f'checkpoint_summary_f{fold}.json',
+            self.run_results_path / f'train_log_f{fold}.csv',
+            self.run_results_path / f'train_plot_f{fold}.png',
+            self.run_results_path / f'run_info_{self.run_config.task_name}_f{fold}.json',
+            self.run_results_path / f'validation_results_F{fold}',
+        ]
+        existing_targets = [target for target in targets if target.exists()]
+
+        if not existing_targets:
+            return
+
+        print(f'\tExisting outputs found for fold {fold} in {self.run_results_path}. Clearing them before training.', flush=True)
+
+        for target in existing_targets:
+            if target.is_dir():
+                shutil.rmtree(target)
+            else:
+                target.unlink()
+
+            print(f'\tCleared old output: {target}', flush=True)
 
     def write_run_info(self):
         """Write full run metadata."""
@@ -169,8 +205,7 @@ class HeatmapTrainingPipeline:
         print(f'\tEarly stop min delta: {self.train_config.early_stop_min_delta}', flush=True)
         print(f'\tEarly stop warmup epochs: {self.train_config.early_stop_warmup_epochs}', flush=True)
         print(f'\tUse AMP: {self.train_config.use_amp}', flush=True)
-        print(f'\tSave validation predictions: {self.train_config.save_validation_predictions}', flush=True)
-        print(f'\tSave validation overlays: {self.train_config.save_validation_overlays}', flush=True)
+        print(f'\tSave validation predictions and overlays: {self.train_config.save_validation_predictions}', flush=True)
         print(f'\tNetwork: {self.model_config.network_name}', flush=True)
         print(f'\tBase channels: {self.model_config.base_channels}', flush=True)
         print(f'\tDepth: {self.model_config.depth}', flush=True)
@@ -302,6 +337,11 @@ def validate_args(args, num_of_folds):
     if args.depth < 1:
         raise ValueError('--depth must be at least 1.')
 
+    minimum_image_size = 2 ** int(args.depth)
+
+    if image_height < minimum_image_size or image_width < minimum_image_size:
+        raise ValueError(f'--image-size must be at least {minimum_image_size} x {minimum_image_size} for --depth {args.depth}. Got {image_height} x {image_width}.')
+
     if args.channel_multiplier < 1:
         raise ValueError('--channel-multiplier must be at least 1.')
 
@@ -313,9 +353,6 @@ def validate_args(args, num_of_folds):
 
     if args.loss_name == 'bce_logits' and args.output_activation != 'none':
         raise ValueError('--loss-name bce_logits requires --output-activation none because BCEWithLogitsLoss expects raw logits.')
-
-    if args.normalisation == 'group' and args.base_channels % 8 != 0:
-        raise ValueError('--base-channels must be divisible by 8 when --normalisation group is used.')
 
     validate_fold_split_overlaps(fold_lists_path=args.fold_lists_path, fold=args.fold)
 
@@ -399,8 +436,7 @@ def parse_args():
     parser.add_argument('--early-stop-warmup-epochs', type=int, default=10, help='Epochs before early stopping is enabled.')
     parser.add_argument('--use-amp', type=str_to_bool, default=False, help='Use automatic mixed precision.')
 
-    parser.add_argument('--save-validation-predictions', type=str_to_bool, default=True, help='Save validation prediction CSV.')
-    parser.add_argument('--save-validation-overlays', type=str_to_bool, default=False, help='Save validation heatmap and point overlays.')
+    parser.add_argument('--save-validation-predictions', type=str_to_bool, default=True, help='Save validation predictions, metrics, heatmap overlays, and point overlays.')
 
     parser.add_argument('--network-name', choices=get_available_model_names(), default='unet_basic', help='Model architecture.')
     parser.add_argument('--base-channels', type=int, default=32, help='First U-Net channel width.')
@@ -439,8 +475,8 @@ def build_configs(args):
                                weight_decay=args.weight_decay,
                                momentum=args.momentum, lr_schedule=args.lr_schedule, lr_step_size=args.lr_step_size, lr_gamma=args.lr_gamma,
                                early_stop_patience=args.early_stop_patience, early_stop_min_delta=args.early_stop_min_delta,
-                               early_stop_warmup_epochs=args.early_stop_warmup_epochs, use_amp=args.use_amp, save_validation_predictions=args.save_validation_predictions,
-                               save_validation_overlays=args.save_validation_overlays)
+                               early_stop_warmup_epochs=args.early_stop_warmup_epochs, use_amp=args.use_amp,
+                               save_validation_predictions=args.save_validation_predictions)
     model_config = HeatmapModelConfig(network_name=args.network_name, base_channels=args.base_channels, depth=args.depth, channel_multiplier=args.channel_multiplier,
                                       max_channels=args.max_channels, normalisation=None if args.normalisation == 'none' else args.normalisation,
                                       activation=args.activation, dropout=args.dropout, upsampling=args.upsampling, output_activation=args.output_activation,

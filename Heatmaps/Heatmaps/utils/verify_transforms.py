@@ -27,7 +27,10 @@ except ImportError:
 
 POINT_PATTERN = re.compile(r'\((-?\d+(?:\.\d+)?),\s*(-?\d+(?:\.\d+)?)\)')
 SUPPORTED_IMAGE_SUFFIXES = ('.png', '.jpg', '.jpeg', '.bmp', '.tif', '.tiff')
-TRANSFORM_CHOICES = ('erasing', 'affine', 'flip', 'noise', 'blur', 'default')
+TRANSFORM_CHOICES = ('erasing', 'affine', 'noise', 'blur', 'default')
+POINT_MARKER_SIZE = 50
+POINT_LABEL_OFFSET = (7, -7)
+POINT_LABEL_FONT_SIZE = 10
 
 
 def read_mark_rows(mark_list_file):
@@ -96,9 +99,6 @@ def make_transform(transform_name, num_points):
     if transform_name == 'affine':
         return htf.RandomAffine()
 
-    if transform_name == 'flip':
-        return htf.RandomHorizontalFlip(probability=1.0)
-
     if transform_name == 'noise':
         return htf.GaussianNoise()
 
@@ -132,8 +132,17 @@ def to_display_image(image):
     return np.moveaxis(image[:3], 0, -1)
 
 
+def draw_numbered_points(axis, points):
+    """Draw landmark markers and their one-based point numbers."""
+    axis.scatter(points[:, 0], points[:, 1], s=POINT_MARKER_SIZE, marker='x', c='limegreen')
+
+    for point_number, (x, y) in enumerate(points, start=1):
+        axis.annotate(str(point_number), xy=(x, y), xytext=POINT_LABEL_OFFSET, textcoords='offset points', color='yellow', fontsize=POINT_LABEL_FONT_SIZE,
+                      fontweight='bold', bbox={'boxstyle': 'round,pad=0.18', 'facecolor': 'black', 'edgecolor': 'yellow', 'alpha': 0.75})
+
+
 def draw_pair(axes, image_path, transform_name, original_image, original_points, transformed_image, transformed_points):
-    """Draw the original and transformed image pair on the existing axes."""
+    """Draw the original and transformed image pair with numbered landmarks."""
     panels = (
         (axes[0], original_image, original_points, f'Original: {Path(image_path).name}'),
         (axes[1], transformed_image, transformed_points, f'Transformed: {transform_name}'),
@@ -143,20 +152,25 @@ def draw_pair(axes, image_path, transform_name, original_image, original_points,
         axis.clear()
         display_image = to_display_image(image)
         axis.imshow(display_image, cmap='gray' if display_image.ndim == 2 else None)
-        axis.scatter(points[:, 0], points[:, 1], s=50, marker='x', c='limegreen')
+        draw_numbered_points(axis=axis, points=points)
         axis.set_title(title)
         axis.axis('off')
 
 
+def format_numbered_points(points):
+    """Return point coordinates keyed by their one-based display numbers."""
+    return {f'point_{point_number}': [float(x), float(y)] for point_number, (x, y) in enumerate(points, start=1)}
+
+
 def print_transform_summary(image_path, points, transformed_points, transform_params):
-    """Print selected sample and sampled transform values."""
+    """Print selected sample, numbered points, and sampled transform values."""
     print('\n' + '=' * 80)
     print(f'Selected image: {image_path}')
     print(f'Transform module: {Path(htf.__file__).resolve()}')
     print('Original points:')
-    pprint.pp(points.tolist())
+    pprint.pp(format_numbered_points(points))
     print('Transformed points:')
-    pprint.pp(transformed_points.tolist())
+    pprint.pp(format_numbered_points(transformed_points))
     print('Transform values:')
     pprint.pp(transform_params)
     print('Press SPACE for another random image, or close the window to exit.', flush=True)

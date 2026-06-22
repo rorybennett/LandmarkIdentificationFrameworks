@@ -36,7 +36,6 @@ $EARLY_STOP_MIN_DELTA = 0.0001
 $EARLY_STOP_WARMUP_EPOCHS = 10
 $USE_AMP = "false"
 $SAVE_VALIDATION_PREDICTIONS = "true"
-$SAVE_VALIDATION_OVERLAYS = "false"
 
 $NETWORK_NAME = "unet_basic"
 $BASE_CHANNELS = 32
@@ -81,7 +80,6 @@ $Arguments = @(
     "--early-stop-warmup-epochs", $EARLY_STOP_WARMUP_EPOCHS,
     "--use-amp", $USE_AMP,
     "--save-validation-predictions", $SAVE_VALIDATION_PREDICTIONS,
-    "--save-validation-overlays", $SAVE_VALIDATION_OVERLAYS,
     "--network-name", $NETWORK_NAME,
     "--base-channels", $BASE_CHANNELS,
     "--depth", $DEPTH,

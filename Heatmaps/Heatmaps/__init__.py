@@ -7,7 +7,10 @@ from .model_registry import build_heatmap_model, get_available_model_names
 from .models import UNetHeatmap, count_trainable_parameters
 from .train_model import HeatmapDataConfig, HeatmapModelConfig, TrainConfig, TrainModel
 
+__version__ = "0.1.0"
+
 __all__ = [
+    '__version__',
     'UNetHeatmap',
     'count_trainable_parameters',
     'get_default_heatmap_transforms',

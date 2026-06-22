@@ -17,7 +17,6 @@ AFFINE_SHEAR = 15
 AFFINE_TRANSLATE = (0.1, 0.1)
 AFFINE_SCALE = (0.8, 1.1)
 AFFINE_MAX_ATTEMPTS = 10000
-HORIZONTAL_FLIP_PROBABILITY = 0.2
 RANDOM_ERASING_PROBABILITY = 0.5
 RANDOM_ERASING_SCALE = (0.02, 0.08)
 RANDOM_ERASING_RATIO = (0.3, 3.3)
@@ -153,30 +152,6 @@ class RandomAffine:
         return matrix
 
 
-@dataclass
-class RandomHorizontalFlip:
-    probability: float = HORIZONTAL_FLIP_PROBABILITY
-    point_index_swaps: tuple[tuple[int, int], ...] = ()
-
-    def __call__(self, image, points):
-        """Flip the image horizontally and optionally swap symmetric landmark channels."""
-        self.last_params = {'transform': 'random_horizontal_flip', 'applied': False, 'probability': float(self.probability),
-                            'point_index_swaps': tuple(self.point_index_swaps)}
-
-        if np.random.random() >= self.probability:
-            return image, points
-
-        _, _, width = image.shape
-        flipped_image = np.flip(image, axis=2).copy()
-        flipped_points = np.asarray(points, dtype=np.float32).copy()
-        flipped_points[:, 0] = (width - 1) - flipped_points[:, 0]
-
-        for left_index, right_index in self.point_index_swaps:
-            flipped_points[[left_index, right_index]] = flipped_points[[right_index, left_index]]
-
-        self.last_params = {'transform': 'random_horizontal_flip', 'applied': True, 'probability': float(self.probability), 'width': int(width),
-                            'point_index_swaps': tuple(self.point_index_swaps)}
-        return flipped_image.astype(np.float32), flipped_points.astype(np.float32)
 
 
 @dataclass
@@ -226,6 +201,7 @@ class GaussianBlur:
         return np.stack(blurred_channels, axis=0).astype(np.float32), points
 
 
+
 def get_last_params(transform):
     """Return the last sampled parameters from a transform in a consistent format."""
     return getattr(transform, 'last_params', {'transform': transform.__class__.__name__, 'params': 'not recorded'})
@@ -236,7 +212,6 @@ def get_default_heatmap_transforms(num_of_points=None):
     _ = num_of_points
     return Compose([
         RandomAffine(),
-        RandomHorizontalFlip(),
         GaussianNoise(),
         GaussianBlur(),
     ])
@@ -245,14 +220,13 @@ def get_default_heatmap_transforms(num_of_points=None):
 def get_augmentation_policy(num_of_points=None):
     """Return the default augmentation policy recorded in checkpoints."""
     return {
-        'name': 'default_heatmap_oversampling_v1',
+        'name': 'default_heatmap_oversampling_v5',
         'num_of_points': None if num_of_points is None else int(num_of_points),
         'random_source': 'numpy.random seeded by training random_seed and DataLoader worker seeds',
-        'transform_order': ['RandomAffine', 'RandomHorizontalFlip', 'GaussianNoise', 'GaussianBlur'],
+        'transform_order': ['RandomAffine', 'GaussianNoise', 'GaussianBlur'],
         'transforms': [
             {'name': 'RandomAffine', 'degrees': float(AFFINE_DEGREES), 'shear': float(AFFINE_SHEAR), 'translate': tuple(float(value) for value in AFFINE_TRANSLATE),
              'scale': tuple(float(value) for value in AFFINE_SCALE), 'max_attempts': int(AFFINE_MAX_ATTEMPTS)},
-            {'name': 'RandomHorizontalFlip', 'probability': float(HORIZONTAL_FLIP_PROBABILITY), 'point_index_swaps': ()},
             {'name': 'GaussianNoise', 'mean': float(GAUSSIAN_NOISE_MEAN), 'sigma': float(GAUSSIAN_NOISE_SIGMA), 'clip': bool(GAUSSIAN_NOISE_CLIP),
              'preserve_greyscale_rgb': True},
             {'name': 'GaussianBlur', 'kernel_size': int(GAUSSIAN_BLUR_KERNEL_SIZE)},

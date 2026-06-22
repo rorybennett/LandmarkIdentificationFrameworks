@@ -6,6 +6,7 @@ import csv
 import random
 import datetime as dt
 import json
+import shutil
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -75,7 +76,6 @@ class TrainConfig:
     early_stop_warmup_epochs: int = 10
     use_amp: bool = False
     save_validation_predictions: bool = True
-    save_validation_overlays: bool = False
 
 
 @dataclass
@@ -131,6 +131,7 @@ class TrainModel:
         log_path = self.get_log_path()
         best_epoch = None
         best_val_loss = float('inf')
+        early_stop_best_loss = float('inf')
         last_epoch = 0
         last_val_loss = None
         best_checkpoint_path = None
@@ -160,7 +161,7 @@ class TrainModel:
                 last_val_loss = val_metrics['loss']
                 last_checkpoint_path = self.save_checkpoint(model=model, optimiser=optimiser, checkpoint_type='last', epoch=epoch, metrics=val_metrics)
                 is_new_best = val_metrics['loss'] < best_val_loss
-                is_early_stop_improvement = val_metrics['loss'] < best_val_loss - self.train_config.early_stop_min_delta
+                is_early_stop_improvement = val_metrics['loss'] < early_stop_best_loss - self.train_config.early_stop_min_delta
 
                 if is_new_best:
                     best_epoch = epoch
@@ -168,22 +169,26 @@ class TrainModel:
                     best_checkpoint_path = self.save_checkpoint(model=model, optimiser=optimiser, checkpoint_type='best', epoch=epoch, metrics=val_metrics)
                     print(f"\tNew best model saved from epoch {epoch} with val_loss={best_val_loss:.6f} and val_error={val_metrics['error_px']:.2f}px", flush=True)
 
+                if is_early_stop_improvement:
+                    early_stop_best_loss = val_metrics['loss']
+
                 if epoch >= self.train_config.early_stop_warmup_epochs:
                     bad_epochs = 0 if is_early_stop_improvement else bad_epochs + 1
 
                     if bad_epochs >= self.train_config.early_stop_patience:
-                        print(f'\tEarly stop: validation loss stopped improving. Best epoch: {best_epoch}', flush=True)
+                        print(f'\tEarly stop: validation loss stopped improving by at least {self.train_config.early_stop_min_delta:g}. '
+                              f'Best checkpoint epoch: {best_epoch}; early-stop reference loss: {early_stop_best_loss:.6f}', flush=True)
                         break
 
-        validation_predictions_path = None
+        validation_output_paths = None
 
         if self.train_config.save_validation_predictions:
-            validation_predictions_path = self.save_validation_predictions(model=model, val_loader=val_loader,
-                                                                           checkpoint_path=best_checkpoint_path or last_checkpoint_path)
+            validation_output_paths = self.save_validation_predictions(model=model, val_loader=val_loader,
+                                                                       checkpoint_path=best_checkpoint_path or last_checkpoint_path)
 
         self.write_checkpoint_summary(best_epoch=best_epoch, last_epoch=last_epoch, best_val_loss=best_val_loss, last_val_loss=last_val_loss,
                                       best_checkpoint_path=best_checkpoint_path, last_checkpoint_path=last_checkpoint_path,
-                                      validation_predictions_path=validation_predictions_path)
+                                      validation_output_paths=validation_output_paths)
         plt.clf()
         return best_checkpoint_path or last_checkpoint_path
 
@@ -244,6 +249,11 @@ class TrainModel:
 
         model.eval()
         validation_output_path = self.get_validation_output_path()
+
+        if validation_output_path.exists():
+            print(f'\tExisting validation output directory found at {validation_output_path}. Clearing it before export.', flush=True)
+            shutil.rmtree(validation_output_path)
+
         logs_path = validation_output_path / 'logs'
         validation_output_path.mkdir(exist_ok=True, parents=True)
         logs_path.mkdir(exist_ok=True, parents=True)
@@ -277,11 +287,10 @@ class TrainModel:
                     endpoint_rows.extend(self.create_endpoint_rows(sample_name=sample_name, image_path=image_path, target_points=target_points,
                                                                    predicted_points=predicted_points, point_errors=point_errors, checkpoint_type=checkpoint_type))
 
-                    if self.train_config.save_validation_overlays:
-                        output_stem = safe_file_stem(sample_name)
-                        predicted_heatmaps = outputs[index].detach().cpu().numpy()
-                        save_validation_overlays(image_path=Path(image_path), output_dir=validation_output_path, output_stem=output_stem,
-                                                 target_points=target_points, predicted_points=predicted_points, predicted_heatmaps=predicted_heatmaps)
+                    output_stem = safe_file_stem(sample_name)
+                    predicted_heatmaps = outputs[index].detach().cpu().numpy()
+                    save_validation_overlays(image_path=Path(image_path), output_dir=validation_output_path, output_stem=output_stem,
+                                             target_points=target_points, predicted_points=predicted_points, predicted_heatmaps=predicted_heatmaps)
 
                 progress_bar.update()
 
@@ -290,7 +299,7 @@ class TrainModel:
         self.write_validation_run_metadata(validation_output_path=validation_output_path, checkpoint_path=checkpoint_path, checkpoint_type=checkpoint_type,
                                            image_summary_rows=image_summary_rows, endpoint_rows=endpoint_rows, output_paths=output_paths)
         print(f"\tValidation summary saved to {output_paths['summary_xlsx']}", flush=True)
-        return output_paths['summary_xlsx']
+        return output_paths
 
     def build_data_loaders(self):
         """Build train and validation data loaders after resolving input channels."""
@@ -448,14 +457,16 @@ class TrainModel:
         model.load_state_dict(state_dict)
         model.eval()
 
-    def write_checkpoint_summary(self, best_epoch, last_epoch, best_val_loss, last_val_loss, best_checkpoint_path, last_checkpoint_path, validation_predictions_path):
+    def write_checkpoint_summary(self, best_epoch, last_epoch, best_val_loss, last_val_loss, best_checkpoint_path, last_checkpoint_path, validation_output_paths):
         """Write checkpoint and run metadata."""
+        validation_summary_path = None if validation_output_paths is None else validation_output_paths.get('summary_xlsx')
+        validation_predictions_path = None if validation_output_paths is None else validation_output_paths.get('predictions_csv')
         summary = {'format_version': CHECKPOINT_FORMAT_VERSION, 'schema': 'heatmap_checkpoint_summary', 'schema_version': CHECKPOINT_SCHEMA_VERSION,
                    'created_at': dt.datetime.now().isoformat(), 'fold': int(self.data_config.fold), 'task_name': self.data_config.task_name,
                    'num_of_points': int(self.data_config.num_of_points), 'checkpoints': {
                 'best': {'epoch': best_epoch, 'val_loss': best_val_loss, 'path': str(best_checkpoint_path) if best_checkpoint_path is not None else None},
                 'last': {'epoch': last_epoch, 'val_loss': last_val_loss, 'path': str(last_checkpoint_path) if last_checkpoint_path is not None else None}},
-                   'validation_summary_path': str(validation_predictions_path) if validation_predictions_path is not None else None,
+                   'validation_summary_path': str(validation_summary_path) if validation_summary_path is not None else None,
                    'validation_predictions_path': str(validation_predictions_path) if validation_predictions_path is not None else None,
                    'metadata': self.build_metadata()}
 
@@ -530,6 +541,16 @@ class TrainModel:
 
         if any(int(value) < 1 for value in self.data_config.image_size):
             raise ValueError(f'image_size values must be positive. Got: {self.data_config.image_size}')
+
+        if int(self.model_config.depth) < 1:
+            raise ValueError(f'depth must be at least 1. Got: {self.model_config.depth}')
+
+        minimum_image_size = 2 ** int(self.model_config.depth)
+        image_height, image_width = (int(value) for value in self.data_config.image_size)
+
+        if image_height < minimum_image_size or image_width < minimum_image_size:
+            raise ValueError(f'image_size must be at least {minimum_image_size} x {minimum_image_size} for depth={self.model_config.depth}. '
+                             f'Got: {image_height} x {image_width}')
 
         if self.data_config.heatmap_sigma <= 0:
             raise ValueError(f'heatmap_sigma must be greater than 0. Got: {self.data_config.heatmap_sigma}')

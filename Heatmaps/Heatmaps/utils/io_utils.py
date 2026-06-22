@@ -247,6 +247,32 @@ def get_image_size(image_path):
     return int(image.shape[0]), int(image.shape[1])
 
 
+def validate_points_within_image(points, image_size, sample_name=None, image_path=None):
+    """Validate that every xy landmark lies inside the corresponding image bounds."""
+    height, width = map(int, image_size)
+    points_array = np.asarray(points, dtype=np.float32)
+    sample_text = f' for sample {sample_name}' if sample_name is not None else ''
+    path_text = f' ({image_path})' if image_path is not None else ''
+
+    if height < 1 or width < 1:
+        raise ValueError(f'Invalid image size{sample_text}{path_text}: height={height}, width={width}.')
+
+    if points_array.ndim != 2 or points_array.shape[1] != 2:
+        raise ValueError(f'Landmarks{sample_text}{path_text} must have shape [N, 2]. Got: {points_array.shape}')
+
+    for point_index, (x, y) in enumerate(points_array, start=1):
+        if not np.isfinite(x) or not np.isfinite(y):
+            raise ValueError(f'Landmark {point_index}{sample_text}{path_text} contains a non-finite coordinate: ({x}, {y}).')
+
+        if not (0.0 <= float(x) < width and 0.0 <= float(y) < height):
+            raise ValueError(
+                f'Landmark {point_index}{sample_text}{path_text} is outside image bounds: '
+                f'point=({float(x)}, {float(y)}), valid x=[0, {width}), valid y=[0, {height}).'
+            )
+
+    return points_array
+
+
 def validate_resolved_input_channels(input_channels):
     """Validate internally resolved model input channels."""
     if input_channels is None:

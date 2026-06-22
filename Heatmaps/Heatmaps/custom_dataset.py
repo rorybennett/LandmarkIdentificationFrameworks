@@ -10,7 +10,7 @@ import torch
 from torch.utils.data import Dataset
 
 from .heatmap_transforms import get_default_heatmap_transforms
-from .utils.io_utils import create_heatmaps, load_image_as_float, natural_key, read_mark_list, read_split_names, resize_channel_first, resolve_image_path, resolve_mark_record, scale_points
+from .utils.io_utils import create_heatmaps, get_image_size, load_image_as_float, natural_key, read_mark_list, read_split_names, resize_channel_first, resolve_image_path, resolve_mark_record, scale_points, validate_points_within_image
 
 
 @dataclass
@@ -78,7 +78,9 @@ class HeatmapDataset(Dataset):
         for sample_name in split_names:
             sample_stem, mark_record = resolve_mark_record(sample_name=sample_name, mark_records=self.mark_records)
             image_path = resolve_image_path(image_data_dir=self.config.image_data_dir, image_name=mark_record['image_name'], sample_stem=sample_stem, recursive=self.config.recursive_image_search)
-            records.append({'sample_name': sample_stem, 'image_path': image_path, 'points': mark_record['points']})
+            image_size = get_image_size(image_path)
+            points = validate_points_within_image(points=mark_record['points'], image_size=image_size, sample_name=sample_stem, image_path=image_path)
+            records.append({'sample_name': sample_stem, 'image_path': image_path, 'points': points})
 
         records.sort(key=lambda item: natural_key(item['sample_name']))
 
