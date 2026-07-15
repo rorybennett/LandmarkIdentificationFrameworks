@@ -49,20 +49,20 @@ def calculate_average_size(image_paths):
     sizes = [read_image_size(image_path) for image_path in image_paths]
 
     if not sizes:
-        raise ValueError(f'No supported images found in {IMAGE_DATA_DIR}')
+        raise ValueError('No supported image paths were supplied.')
 
     heights = np.asarray([height for height, _ in sizes], dtype=np.float64)
     widths = np.asarray([width for _, width in sizes], dtype=np.float64)
     return sizes, float(np.mean(widths)), float(np.mean(heights)), int(round(float(np.mean(widths)))), int(round(float(np.mean(heights))))
 
 
-def print_summary(image_paths, sizes, average_width, average_height, rounded_width, rounded_height):
+def print_summary(image_data_dir, image_paths, sizes, average_width, average_height, rounded_width, rounded_height):
     """Print the image-size summary."""
     if PRINT_EACH_IMAGE:
         for image_path, (height, width) in zip(image_paths, sizes):
             print(f'{image_path.name}: width={width}, height={height}')
 
-    print(f'Image folder: {IMAGE_DATA_DIR}')
+    print(f'Image folder: {image_data_dir}')
     print(f'Image count: {len(image_paths)}')
     print(f'Average width: {average_width:.2f}')
     print(f'Average height: {average_height:.2f}')
@@ -75,7 +75,7 @@ def main():
     """Calculate and print average image dimensions."""
     image_paths = find_images(image_data_dir=IMAGE_DATA_DIR, recursive=RECURSIVE_IMAGE_SEARCH, supported_suffixes=SUPPORTED_IMAGE_SUFFIXES)
     sizes, average_width, average_height, rounded_width, rounded_height = calculate_average_size(image_paths)
-    print_summary(image_paths=image_paths, sizes=sizes, average_width=average_width, average_height=average_height,
+    print_summary(image_data_dir=IMAGE_DATA_DIR, image_paths=image_paths, sizes=sizes, average_width=average_width, average_height=average_height,
                   rounded_width=rounded_width, rounded_height=rounded_height)
 
 

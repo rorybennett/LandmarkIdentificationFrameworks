@@ -3,11 +3,11 @@ Configurable heatmap-regression models for landmark localisation.
 """
 
 import torch
+from torch import nn
+from torch.nn import functional as F
 
 MIN_POINTS_PER_IMAGE = 1
 MAX_POINTS_PER_IMAGE = 30
-from torch import nn
-from torch.nn import functional as F
 
 
 class ConvBlock(nn.Module):
@@ -15,12 +15,13 @@ class ConvBlock(nn.Module):
 
     def __init__(self, in_channels, out_channels, normalisation='batch', activation='relu', dropout=0.0, padding_mode='zeros'):
         super().__init__()
+        use_bias = normalisation is None or str(normalisation).lower() == 'none'
         self.block = nn.Sequential(
-            nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1, padding_mode=padding_mode, bias=normalisation is None),
+            nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1, padding_mode=padding_mode, bias=use_bias),
             build_normalisation(normalisation, out_channels),
             build_activation(activation),
             nn.Dropout2d(p=dropout) if dropout > 0 else nn.Identity(),
-            nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1, padding_mode=padding_mode, bias=normalisation is None),
+            nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1, padding_mode=padding_mode, bias=use_bias),
             build_normalisation(normalisation, out_channels),
             build_activation(activation),
         )
@@ -72,10 +73,11 @@ class UNetHeatmap(nn.Module):
 
     def __init__(self, num_of_points, input_channels=1, base_channels=32, depth=4, channel_multiplier=2, max_channels=512, normalisation='batch', activation='relu', dropout=0.0, upsampling='bilinear', output_activation='none', padding_mode='zeros', final_kernel_size=1):
         super().__init__()
-        validate_unet_args(num_of_points, input_channels, base_channels, depth, channel_multiplier, final_kernel_size)
+        validate_unet_args(num_of_points=num_of_points, input_channels=input_channels, base_channels=base_channels, depth=depth, channel_multiplier=channel_multiplier,
+                           max_channels=max_channels, dropout=dropout, final_kernel_size=final_kernel_size)
         self.num_of_points = int(num_of_points)
         self.input_channels = int(input_channels)
-        self.output_activation = None if str(output_activation).lower() in ('none', 'identity', '') else str(output_activation).lower()
+        self.output_activation = None if output_activation is None or str(output_activation).lower() == 'none' else str(output_activation).lower()
         channels = build_channels(base_channels, depth, channel_multiplier, max_channels)
         self.input_block = ConvBlock(input_channels, channels[0], normalisation, activation, dropout, padding_mode)
         self.down_blocks = nn.ModuleList([DownBlock(channels[index], channels[index + 1], normalisation, activation, dropout, padding_mode) for index in range(depth)])
@@ -115,7 +117,7 @@ class UNetHeatmap(nn.Module):
 
 def build_normalisation(normalisation, channels):
     """Create a normalisation layer."""
-    if normalisation is None or str(normalisation).lower() in ('none', 'identity'):
+    if normalisation is None or str(normalisation).lower() == 'none':
         return nn.Identity()
 
     normalisation = str(normalisation).lower()
@@ -159,7 +161,7 @@ def build_channels(base_channels, depth, channel_multiplier, max_channels):
     return [min(int(base_channels) * (int(channel_multiplier) ** index), int(max_channels)) for index in range(int(depth) + 1)]
 
 
-def validate_unet_args(num_of_points, input_channels, base_channels, depth, channel_multiplier, final_kernel_size):
+def validate_unet_args(num_of_points, input_channels, base_channels, depth, channel_multiplier, max_channels, dropout, final_kernel_size):
     """Validate U-Net construction values."""
     if int(num_of_points) < MIN_POINTS_PER_IMAGE or int(num_of_points) > MAX_POINTS_PER_IMAGE:
         raise ValueError(f'num_of_points must be between {MIN_POINTS_PER_IMAGE} and {MAX_POINTS_PER_IMAGE}. Got: {num_of_points}')
@@ -175,6 +177,12 @@ def validate_unet_args(num_of_points, input_channels, base_channels, depth, chan
 
     if int(channel_multiplier) < 1:
         raise ValueError('channel_multiplier must be at least 1.')
+
+    if int(max_channels) < int(base_channels):
+        raise ValueError('max_channels must be greater than or equal to base_channels.')
+
+    if float(dropout) < 0 or float(dropout) >= 1:
+        raise ValueError('dropout must be in the range [0, 1).')
 
     if int(final_kernel_size) not in (1, 3):
         raise ValueError('final_kernel_size must be 1 or 3.')

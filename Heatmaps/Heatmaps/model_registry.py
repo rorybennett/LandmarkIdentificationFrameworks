@@ -7,8 +7,8 @@ from .models import UNetHeatmap
 AVAILABLE_MODELS = {
     'unet_basic': {
         'description': 'Configurable U-Net for dense landmark heatmap regression.',
-        'supports_dropout': True,
-        'supports_output_activation': True,
+        'module': 'Heatmaps.models',
+        'class_name': 'UNetHeatmap',
     },
 }
 
@@ -24,11 +24,23 @@ def print_available_models():
         print(f"{model_name}: {model_info['description']}")
 
 
+def get_model_registry_entry(network_name):
+    """Return the registry entry for one model name."""
+    network_name = str(network_name).lower()
+
+    if network_name not in AVAILABLE_MODELS:
+        raise ValueError(f'Unknown heatmap model: {network_name}')
+
+    return dict(AVAILABLE_MODELS[network_name])
+
+
 def build_heatmap_model(network_name, num_of_points, input_channels, **kwargs):
     """Build a heatmap model from the registry."""
     network_name = str(network_name).lower()
 
+    get_model_registry_entry(network_name)
+
     if network_name == 'unet_basic':
         return UNetHeatmap(num_of_points=num_of_points, input_channels=input_channels, **kwargs)
 
-    raise ValueError(f'Unknown heatmap model: {network_name}')
+    raise RuntimeError(f'No builder is registered for heatmap model: {network_name}')

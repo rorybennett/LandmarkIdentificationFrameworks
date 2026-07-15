@@ -190,11 +190,10 @@ def read_mark_list(mark_list_file, expected_points):
 
 def resolve_mark_record(sample_name, mark_records):
     """Match a fold-list sample name to a mark-list record."""
-    candidates = [Path(sample_name).stem, Path(sample_name).name, str(sample_name)]
+    sample_stem = Path(str(sample_name)).stem
 
-    for candidate in candidates:
-        if candidate in mark_records:
-            return candidate, mark_records[candidate]
+    if sample_stem in mark_records:
+        return sample_stem, mark_records[sample_stem]
 
     raise KeyError(f'Sample {sample_name} was not found in the mark list.')
 
@@ -204,16 +203,22 @@ def resolve_image_path(image_data_dir, image_name, sample_stem, recursive=False,
     image_data_dir = Path(image_data_dir)
     candidates = [image_data_dir / image_name, image_data_dir / f'{sample_stem}{Path(image_name).suffix}']
 
-    for candidate in candidates:
+    for candidate in dict.fromkeys(candidates):
         if candidate.is_file():
             return candidate
 
     suffixes = tuple(suffix.lower() for suffix in supported_suffixes)
     search_iter = image_data_dir.rglob('*') if recursive else image_data_dir.iterdir()
 
-    for path in sorted(search_iter, key=lambda item: item.as_posix().lower()):
-        if path.is_file() and path.stem == sample_stem and path.suffix.lower() in suffixes:
-            return path
+    matches = [path for path in sorted(search_iter, key=lambda item: item.as_posix().lower())
+               if path.is_file() and path.stem == sample_stem and path.suffix.lower() in suffixes]
+
+    if len(matches) == 1:
+        return matches[0]
+
+    if len(matches) > 1:
+        match_text = '\n'.join(str(path) for path in matches)
+        raise ValueError(f'Multiple images matched sample {sample_stem} under {image_data_dir}:\n{match_text}')
 
     raise FileNotFoundError(f'Image for {sample_stem} was not found under {image_data_dir}')
 
@@ -306,8 +311,25 @@ def convert_channels_if_needed(image, input_channels, image_path=None):
 def load_image_as_float(image_path, input_channels):
     """Load an image as channel-first float32 in the requested channel count."""
     image = img_as_float32(io.imread(image_path))
+    validate_image_value_range(image=image, image_path=image_path)
     image = convert_channels_if_needed(image=image, input_channels=input_channels, image_path=image_path)
     return np.moveaxis(image, -1, 0).astype(np.float32)
+
+
+def validate_image_value_range(image, image_path=None):
+    """Validate finite image values in the normalised 0 to 1 range."""
+    path_text = f' for {image_path}' if image_path is not None else ''
+
+    if not np.all(np.isfinite(image)):
+        raise ValueError(f'Image{path_text} contains NaN or infinite values.')
+
+    image_min = float(np.min(image))
+    image_max = float(np.max(image))
+
+    if image_min < 0.0 or image_max > 1.0:
+        raise ValueError(f'Image{path_text} has values outside the supported 0 to 1 range after loading: min={image_min}, max={image_max}.')
+
+    return image
 
 
 def resize_channel_first(image, image_size):

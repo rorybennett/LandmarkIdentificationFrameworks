@@ -4,14 +4,14 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "landmark-heatmaps"
-version = "0.1.0"
+version = "0.2.0"
 description = "Heatmap-regression landmark localisation package."
 readme = "README.md"
 requires-python = ">=3.10"
 authors = [{name = "LandmarkIdentificationFrameworks"}]
 dependencies = [
     "numpy",
-    "torch",
+    "torch>=2.4",
     "matplotlib",
     "opencv-python",
     "scikit-image",

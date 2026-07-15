@@ -70,7 +70,7 @@ class RandomErasing:
             if semi_axis_x < 1 or semi_axis_y < 1:
                 continue
 
-            if semi_axis_x >= width or semi_axis_y >= height:
+            if (2 * semi_axis_x) >= width or (2 * semi_axis_y) >= height:
                 continue
 
             centre_x = np.random.randint(semi_axis_x, width - semi_axis_x)
@@ -110,16 +110,18 @@ class RandomAffine:
     shear: float = AFFINE_SHEAR
     translate: tuple[float, float] = AFFINE_TRANSLATE
     scale: tuple[float, float] = AFFINE_SCALE
-    max_attempts: int | None = AFFINE_MAX_ATTEMPTS
+    max_attempts: int = AFFINE_MAX_ATTEMPTS
 
     def __call__(self, image, points):
         """Apply a sampled affine transform only when every transformed landmark remains inside the image."""
         _, height, width = image.shape
         points = np.asarray(points, dtype=np.float32)
-        attempt = 0
+        max_attempts = int(self.max_attempts)
 
-        while self.max_attempts is None or attempt < int(self.max_attempts):
-            attempt += 1
+        if max_attempts < 1:
+            raise ValueError(f'max_attempts must be at least 1. Got: {self.max_attempts}')
+
+        for attempt in range(1, max_attempts + 1):
             matrix = self.sample_matrix(width=width, height=height)
             transformed_points = transform_points(points=points, matrix=matrix)
 
@@ -127,7 +129,7 @@ class RandomAffine:
                 self.last_params['attempts'] = int(attempt)
                 return warp_image(image=image, matrix=matrix), transformed_points.astype(np.float32)
 
-        raise RuntimeError(f'No valid affine transform was found after {self.max_attempts} attempts. Reduce affine ranges or inspect landmarks near the image border.')
+        raise RuntimeError(f'No valid affine transform was found after {max_attempts} attempts. Reduce affine ranges or inspect landmarks near the image border.')
 
     def sample_matrix(self, width, height):
         """Sample an affine source-to-destination matrix around the image centre."""
@@ -194,9 +196,14 @@ class GaussianBlur:
     kernel_size: int = GAUSSIAN_BLUR_KERNEL_SIZE
 
     def __call__(self, image, points):
-        """Blur each image channel without moving landmarks."""
+        """Blur image colour channels without moving landmarks or changing an alpha channel."""
         kernel_size = make_odd_kernel_size(self.kernel_size)
-        blurred_channels = [cv2.GaussianBlur(channel, (kernel_size, kernel_size), 0) for channel in image]
+        colour_channels = min(image.shape[0], 3)
+        blurred_channels = [cv2.GaussianBlur(channel, (kernel_size, kernel_size), 0) for channel in image[:colour_channels]]
+
+        if image.shape[0] > colour_channels:
+            blurred_channels.extend(channel.copy() for channel in image[colour_channels:])
+
         self.last_params = {'transform': 'gaussian_blur', 'kernel_size': int(kernel_size)}
         return np.stack(blurred_channels, axis=0).astype(np.float32), points
 
@@ -204,12 +211,11 @@ class GaussianBlur:
 
 def get_last_params(transform):
     """Return the last sampled parameters from a transform in a consistent format."""
-    return getattr(transform, 'last_params', {'transform': transform.__class__.__name__, 'params': 'not recorded'})
+    return transform.last_params
 
 
-def get_default_heatmap_transforms(num_of_points=None):
+def get_default_heatmap_transforms():
     """Return task-agnostic default oversampling transforms for heatmap landmark training."""
-    _ = num_of_points
     return Compose([
         RandomAffine(),
         GaussianNoise(),
@@ -217,11 +223,10 @@ def get_default_heatmap_transforms(num_of_points=None):
     ])
 
 
-def get_augmentation_policy(num_of_points=None):
+def get_augmentation_policy():
     """Return the default augmentation policy recorded in checkpoints."""
     return {
         'name': 'default_heatmap_oversampling_v5',
-        'num_of_points': None if num_of_points is None else int(num_of_points),
         'random_source': 'numpy.random seeded by training random_seed and DataLoader worker seeds',
         'transform_order': ['RandomAffine', 'GaussianNoise', 'GaussianBlur'],
         'transforms': [

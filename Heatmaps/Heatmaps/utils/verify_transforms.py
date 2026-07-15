@@ -11,7 +11,6 @@ import argparse
 import pprint
 import random
 import re
-import sys
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -19,11 +18,7 @@ import numpy as np
 from skimage import io
 from skimage.util import img_as_float32
 
-try:
-    from .. import heatmap_transforms as htf
-except ImportError:
-    sys.path.append(str(Path(__file__).resolve().parents[1]))
-    import heatmap_transforms as htf
+from .. import heatmap_transforms as htf
 
 POINT_PATTERN = re.compile(r'\((-?\d+(?:\.\d+)?),\s*(-?\d+(?:\.\d+)?)\)')
 SUPPORTED_IMAGE_SUFFIXES = ('.png', '.jpg', '.jpeg', '.bmp', '.tif', '.tiff')
@@ -89,7 +84,7 @@ def load_image(image_path):
     return np.moveaxis(image, -1, 0).astype(np.float32)
 
 
-def make_transform(transform_name, num_points):
+def make_transform(transform_name):
     """Create the selected transform, forcing stochastic gates on for visual checking."""
     transform_name = transform_name.lower()
 
@@ -106,20 +101,14 @@ def make_transform(transform_name, num_points):
         return htf.GaussianBlur()
 
     if transform_name == 'default':
-        return htf.get_default_heatmap_transforms(num_of_points=num_points)
+        return htf.get_default_heatmap_transforms()
 
     raise ValueError(f'Unknown transform: {transform_name}')
 
 
 def collect_transform_params(transform):
     """Return sampled transform values recorded by heatmap_transforms.py."""
-    if hasattr(transform, 'last_params'):
-        return transform.last_params
-
-    if hasattr(transform, 'transforms'):
-        return [getattr(item, 'last_params', {'transform': item.__class__.__name__, 'params': 'not recorded'}) for item in transform.transforms]
-
-    return getattr(transform, 'last_params', {'transform': transform.__class__.__name__, 'params': 'not recorded'})
+    return transform.last_params
 
 
 def to_display_image(image):
@@ -203,7 +192,7 @@ class TransformViewer:
         image_path = resolve_image_path(self.image_dir, row['image_name'])
         image = load_image(image_path)
         points = row['points'].copy()
-        transform = make_transform(self.transform_name, num_points=len(points))
+        transform = make_transform(self.transform_name)
         transformed_image, transformed_points = transform(image=image, points=points.copy())
 
         draw_pair(self.axes, image_path, self.transform_name, image, points, transformed_image, transformed_points)

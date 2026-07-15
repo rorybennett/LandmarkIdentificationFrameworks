@@ -4,6 +4,7 @@ Train heatmap landmark models using fold lists and mark-list annotations.
 
 import argparse
 import datetime as dt
+import hashlib
 import json
 import re
 import shutil
@@ -48,9 +49,9 @@ class HeatmapTrainingPipeline:
         total_start_time = dt.datetime.now()
         self.prepare_run_directories()
         self.print_inputs()
-        self.write_run_info()
 
         if self.run_config.train_model:
+            self.write_run_info()
             self.train_model()
 
         if self.run_config.copy_files:
@@ -88,6 +89,12 @@ class HeatmapTrainingPipeline:
         if not self.run_results_path.is_dir():
             raise ValueError(f'Run results path does not exist: {self.run_results_path}')
 
+        source_path = self.run_results_path.resolve()
+        destination_path = save_path.resolve()
+
+        if source_path == destination_path or source_path in destination_path.parents or destination_path in source_path.parents:
+            raise ValueError(f'Copy source and destination must not be the same path or contain one another. Source: {source_path}; destination: {destination_path}')
+
         if save_path.exists():
             print(f'\tExisting copied run directory found at {save_path}. Clearing it before copying.', flush=True)
             shutil.rmtree(save_path)
@@ -111,10 +118,16 @@ class HeatmapTrainingPipeline:
         self.print_section_end()
 
     def prepare_run_directories(self):
-        """Create output directories after clearing existing outputs for the requested fold."""
+        """Prepare the run path for training or validate it for copy-only operation."""
         self.run_results_root.mkdir(exist_ok=True, parents=True)
-        self.clear_existing_fold_outputs()
-        self.run_results_path.mkdir(exist_ok=True, parents=True)
+
+        if self.run_config.train_model:
+            self.clear_existing_fold_outputs()
+            self.run_results_path.mkdir(exist_ok=True, parents=True)
+            return
+
+        if not self.run_results_path.is_dir():
+            raise ValueError(f'Copy-only operation requires an existing run results path: {self.run_results_path}')
 
     def clear_existing_fold_outputs(self):
         """Remove outputs from an earlier run of the requested fold without affecting other folds."""
@@ -263,6 +276,9 @@ def validate_args(args, num_of_folds):
     """Validate numeric, path, split, training, and model terminal arguments."""
     normalise_save_dir(args)
 
+    if not args.train_model and not args.copy_files:
+        raise ValueError('At least one action must be enabled: TRAIN_MODEL or COPY_FILES.')
+
     if args.fold < 1 or args.fold > num_of_folds:
         raise ValueError(f'fold must be between 1 and {num_of_folds}. Got fold={args.fold}.')
 
@@ -342,6 +358,30 @@ def validate_args(args, num_of_folds):
     if image_height < minimum_image_size or image_width < minimum_image_size:
         raise ValueError(f'--image-size must be at least {minimum_image_size} x {minimum_image_size} for --depth {args.depth}. Got {image_height} x {image_width}.')
 
+    deepest_height = image_height // minimum_image_size
+    deepest_width = image_width // minimum_image_size
+
+    if args.normalisation in ('batch', 'instance') and deepest_height * deepest_width < 2:
+        raise ValueError(f'--image-size produces a {deepest_height} x {deepest_width} deepest feature map. '
+                         f'Use a larger image, a shallower network, or --normalisation none.')
+
+    if args.normalisation == 'group':
+        deepest_channels = min(int(args.base_channels) * (int(args.channel_multiplier) ** int(args.depth)), int(args.max_channels))
+        groups = min(8, deepest_channels)
+
+        while deepest_channels % groups != 0:
+            groups -= 1
+
+        values_per_group = (deepest_channels // groups) * deepest_height * deepest_width
+
+        if values_per_group < 2:
+            raise ValueError(f'--normalisation group would have only {values_per_group} value per group at the deepest feature map. '
+                             f'Use a larger image, wider channels, fewer groups through a different channel width, or --normalisation none.')
+
+    if args.padding_mode == 'reflect' and (deepest_height < 2 or deepest_width < 2):
+        raise ValueError(f'--padding-mode reflect requires both deepest feature-map dimensions to be at least 2. '
+                         f'Current deepest feature map: {deepest_height} x {deepest_width}.')
+
     if args.channel_multiplier < 1:
         raise ValueError('--channel-multiplier must be at least 1.')
 
@@ -375,11 +415,48 @@ def format_number(value):
 def build_run_name(args, num_of_folds):
     """Build a deterministic folder name shared by every fold in the same experiment."""
     height, width = args.image_size
+    fingerprint_payload = {
+        'num_of_folds': num_of_folds,
+        'num_points': args.num_points,
+        'image_size': list(args.image_size),
+        'heatmap_sigma': args.heatmap_sigma,
+        'oversampling_factor': args.oversampling_factor,
+        'recursive_image_search': args.recursive_image_search,
+        'batch_size': args.batch_size,
+        'learning_rate': args.learning_rate,
+        'max_training_epochs': args.max_training_epochs,
+        'train_workers': args.train_workers,
+        'random_seed': args.random_seed,
+        'optimiser_name': args.optimiser_name,
+        'loss_name': args.loss_name,
+        'positive_weight': args.positive_weight,
+        'weight_decay': args.weight_decay,
+        'momentum': args.momentum,
+        'lr_schedule': args.lr_schedule,
+        'lr_step_size': args.lr_step_size,
+        'lr_gamma': args.lr_gamma,
+        'early_stop_patience': args.early_stop_patience,
+        'early_stop_min_delta': args.early_stop_min_delta,
+        'early_stop_warmup_epochs': args.early_stop_warmup_epochs,
+        'use_amp': args.use_amp,
+        'network_name': args.network_name,
+        'base_channels': args.base_channels,
+        'depth': args.depth,
+        'channel_multiplier': args.channel_multiplier,
+        'max_channels': args.max_channels,
+        'normalisation': args.normalisation,
+        'activation': args.activation,
+        'dropout': args.dropout,
+        'upsampling': args.upsampling,
+        'output_activation': args.output_activation,
+        'padding_mode': args.padding_mode,
+        'final_kernel_size': args.final_kernel_size,
+    }
+    fingerprint_text = json.dumps(fingerprint_payload, sort_keys=True, separators=(',', ':'))
+    fingerprint = hashlib.sha256(fingerprint_text.encode('utf-8')).hexdigest()[:12]
     parts = ['heatmap', f'{num_of_folds}fold', f'{args.num_points}points', args.network_name, f'im{height}x{width}',
-             f'sigma{format_number(args.heatmap_sigma)}', f'bc{args.base_channels}', f'depth{args.depth}', f'cm{args.channel_multiplier}',
-             f'mc{args.max_channels}', f'norm{args.normalisation}', f'act{args.activation}', f'drop{format_number(args.dropout)}',
-             f'up{args.upsampling}', f'loss{args.loss_name}', f'pw{format_number(args.positive_weight)}', f'of{args.oversampling_factor}',
-             f'seed{args.random_seed}', f'bs{args.batch_size}', f'lr{format_number(args.learning_rate)}', f'ep{args.max_training_epochs}']
+             f'sigma{format_number(args.heatmap_sigma)}', f'loss{args.loss_name}', f'of{args.oversampling_factor}', f'bs{args.batch_size}',
+             f'lr{format_number(args.learning_rate)}', f'cfg{fingerprint}']
     return clean_run_name('_'.join(parts))
 
 
@@ -391,6 +468,16 @@ def clean_run_name(run_name):
         raise ValueError('--run-name cannot be empty after cleaning.')
 
     return run_name
+
+
+def clean_task_name(task_name):
+    """Return a safe task-name path component."""
+    task_name = re.sub(r'[^A-Za-z0-9._-]+', '_', str(task_name)).strip('._-')
+
+    if not task_name:
+        raise ValueError('TASK_NAME cannot be empty after cleaning.')
+
+    return task_name
 
 
 def parse_args():
@@ -464,9 +551,10 @@ def build_configs(args):
 
     validate_args(args=args, num_of_folds=num_of_folds)
     run_name = clean_run_name(args.run_name) if args.run_name else build_run_name(args=args, num_of_folds=num_of_folds)
-    run_config = RunConfig(fold=args.fold, task_name=args.task_name, num_of_points=args.num_points, train_model=args.train_model, copy_files=args.copy_files,
+    task_name = clean_task_name(args.task_name)
+    run_config = RunConfig(fold=args.fold, task_name=task_name, num_of_points=args.num_points, train_model=args.train_model, copy_files=args.copy_files,
                            run_dir=args.run_dir, save_dir=args.save_dir, run_name=run_name)
-    data_config = HeatmapDataConfig(fold=args.fold, task_name=args.task_name, num_of_points=args.num_points, fold_lists_path=args.fold_lists_path,
+    data_config = HeatmapDataConfig(fold=args.fold, task_name=task_name, num_of_points=args.num_points, fold_lists_path=args.fold_lists_path,
                                     mark_list_file=args.mark_list_file, image_data_dir=args.image_data_dir, image_size=tuple(args.image_size),
                                     heatmap_sigma=args.heatmap_sigma, input_channels=None, recursive_image_search=args.recursive_image_search,
                                     oversampling_factor=args.oversampling_factor)

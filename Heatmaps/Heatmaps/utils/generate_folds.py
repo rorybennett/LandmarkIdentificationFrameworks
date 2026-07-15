@@ -218,12 +218,12 @@ def write_membership_csv(output_dir, folds):
                     writer.writerow([fold['fold'], split_name, sample_id])
 
 
-def print_summary(output_dir, folds, total_count):
+def print_summary(output_dir, folds, total_count, seed):
     """Print split counts to the terminal."""
     print('======================================================================================')
     print(f'Fold list output directory: {output_dir}')
     print(f'Total samples: {total_count}')
-    print(f'Seed: {SEED}')
+    print(f'Seed: {seed}')
     print('--------------------------------------------------------------------------------------')
 
     for fold in folds:
@@ -260,7 +260,7 @@ def create_fold_lists(mark_list_path, output_dir, num_folds, seed):
     if WRITE_MEMBERSHIP_CSV:
         write_membership_csv(output_dir, folds)
 
-    print_summary(output_dir, folds, total_count=len(sample_ids))
+    print_summary(output_dir, folds, total_count=len(sample_ids), seed=seed)
 
 
 def main():

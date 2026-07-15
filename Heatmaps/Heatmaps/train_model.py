@@ -3,9 +3,9 @@ Training and validation routines for heatmap landmark models.
 """
 
 import csv
-import random
 import datetime as dt
 import json
+import random
 import shutil
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -13,6 +13,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
+from openpyxl import Workbook
 from torch import nn
 from torch.optim import AdamW, SGD
 from torch.optim.lr_scheduler import ReduceLROnPlateau, StepLR
@@ -20,14 +21,14 @@ from torch.utils.data import DataLoader
 
 from .custom_dataset import HeatmapDataset, HeatmapDatasetConfig
 from .heatmap_transforms import get_augmentation_policy
-from .model_registry import build_heatmap_model
+from .model_registry import build_heatmap_model, get_model_registry_entry
 from .models import count_trainable_parameters
 from .utils.io_utils import heatmaps_to_points, infer_image_channel_count, safe_file_stem, scale_points_to_original
 from .utils.progress_bar import ProgressBar
 from .utils.visualisation_utils import save_validation_overlays
-from openpyxl import Workbook
 
-def seed_worker(worker_id):
+
+def seed_worker(_worker_id):
     """Seed NumPy and Python RNGs inside each DataLoader worker."""
     worker_seed = torch.initial_seed() % 2**32
     np.random.seed(worker_seed)
@@ -146,14 +147,16 @@ class TrainModel:
 
             for epoch in range(1, self.train_config.max_training_epochs + 1):
                 print(f"\t{dt.datetime.now().strftime('%d/%m/%Y %H:%M:%S')} - Epoch {epoch}/{self.train_config.max_training_epochs}", flush=True)
+                epoch_lr = self.get_current_lr(optimiser)
                 train_metrics = self.train_epoch(model=model, loader=train_loader, criterion=criterion, optimiser=optimiser, scaler=scaler)
                 val_metrics = self.validate(model=model, loader=val_loader, criterion=criterion)
+                self.validate_finite_metrics(phase='training', metrics=train_metrics)
+                self.validate_finite_metrics(phase='validation', metrics=val_metrics)
 
                 if scheduler is not None:
                     scheduler.step(val_metrics['loss']) if isinstance(scheduler, ReduceLROnPlateau) else scheduler.step()
 
-                current_lr = self.get_current_lr(optimiser)
-                log_writer.writerow([epoch, current_lr, train_metrics['loss'], train_metrics['error_px'], val_metrics['loss'], val_metrics['error_px']])
+                log_writer.writerow([epoch, epoch_lr, train_metrics['loss'], train_metrics['error_px'], val_metrics['loss'], val_metrics['error_px']])
                 log_file.flush()
                 self.update_history(history=history, epoch=epoch, train_metrics=train_metrics, val_metrics=val_metrics)
                 self.save_history_plot(history)
@@ -412,7 +415,7 @@ class TrainModel:
         """Build the learning-rate scheduler."""
         schedule = str(self.train_config.lr_schedule).lower()
 
-        if schedule in ('none', 'false', '0'):
+        if schedule == 'none':
             return None
 
         if schedule == 'step':
@@ -433,6 +436,14 @@ class TrainModel:
         """Return loss and pixel endpoint error."""
         return {'loss': float(loss), 'error_px': float(error_px)}
 
+    @staticmethod
+    def validate_finite_metrics(phase, metrics):
+        """Stop training when a reported metric is NaN or infinite."""
+        invalid_metrics = {name: value for name, value in metrics.items() if not np.isfinite(value)}
+
+        if invalid_metrics:
+            raise FloatingPointError(f'Non-finite {phase} metric(s) detected: {invalid_metrics}')
+
     def save_checkpoint(self, model, optimiser, checkpoint_type, epoch, metrics):
         """Save one model checkpoint with reconstruction-focused metadata."""
         checkpoint_path = self.get_checkpoint_path(checkpoint_type)
@@ -444,10 +455,7 @@ class TrainModel:
 
     def load_checkpoint_state(self, model, checkpoint_path):
         """Load checkpoint weights into a model."""
-        try:
-            checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
-        except TypeError:
-            checkpoint = torch.load(checkpoint_path, map_location=self.device)
+        checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
 
         state_dict = checkpoint.get('state_dict') if isinstance(checkpoint, dict) else None
 
@@ -483,6 +491,7 @@ class TrainModel:
         model_init_config = dict(model_config)
         model_init_config.pop('network_name', None)
         model_init_args = {'num_of_points': int(self.data_config.num_of_points), 'input_channels': input_channels, **model_init_config}
+        registry_entry = get_model_registry_entry(self.model_config.network_name)
 
         return {
             'schema': CHECKPOINT_SCHEMA_NAME,
@@ -491,7 +500,8 @@ class TrainModel:
             'checkpoint': {'format_version': CHECKPOINT_FORMAT_VERSION, 'type': checkpoint_type, 'epoch': None if epoch is None else int(epoch), 'metrics': metrics},
             'task': {'name': self.data_config.task_name, 'fold': int(self.data_config.fold), 'num_points': int(self.data_config.num_of_points),
                      'output_heads': int(self.data_config.num_of_points), 'prediction_type': 'landmark_heatmap_regression'},
-            'model': {'registry_name': self.model_config.network_name, 'module': 'Heatmaps.models', 'class_name': 'UNetHeatmap', 'init_args': model_init_args},
+            'model': {'registry_name': self.model_config.network_name, 'module': registry_entry['module'], 'class_name': registry_entry['class_name'],
+                      'init_args': model_init_args},
             'data': {'fold': int(self.data_config.fold), 'fold_lists_path': str(self.data_config.fold_lists_path),
                      'mark_list_file': str(self.data_config.mark_list_file), 'image_data_dir': str(self.data_config.image_data_dir),
                      'recursive_image_search': bool(self.data_config.recursive_image_search), 'input_channels': input_channels},
@@ -512,7 +522,7 @@ class TrainModel:
         """Return the oversampling and augmentation policy stored in checkpoints."""
         oversampling_factor = int(self.data_config.oversampling_factor)
         return {'enabled': oversampling_factor > 1, 'oversampling_factor': oversampling_factor, 'applies_to': 'train split only',
-                'policy': get_augmentation_policy(num_of_points=self.data_config.num_of_points)}
+                'policy': get_augmentation_policy()}
 
     @staticmethod
     def serialise(value):
@@ -552,6 +562,31 @@ class TrainModel:
             raise ValueError(f'image_size must be at least {minimum_image_size} x {minimum_image_size} for depth={self.model_config.depth}. '
                              f'Got: {image_height} x {image_width}')
 
+        deepest_height = image_height // minimum_image_size
+        deepest_width = image_width // minimum_image_size
+
+        if self.model_config.normalisation in ('batch', 'instance') and deepest_height * deepest_width < 2:
+            raise ValueError(f'image_size produces a {deepest_height} x {deepest_width} deepest feature map. '
+                             f'Use a larger image, a shallower network, or normalisation=None.')
+
+        if self.model_config.normalisation == 'group':
+            deepest_channels = min(int(self.model_config.base_channels) * (int(self.model_config.channel_multiplier) ** int(self.model_config.depth)),
+                                   int(self.model_config.max_channels))
+            groups = min(8, deepest_channels)
+
+            while deepest_channels % groups != 0:
+                groups -= 1
+
+            values_per_group = (deepest_channels // groups) * deepest_height * deepest_width
+
+            if values_per_group < 2:
+                raise ValueError(f'normalisation=group would have only {values_per_group} value per group at the deepest feature map. '
+                                 f'Use a larger image, wider channels, or normalisation=None.')
+
+        if self.model_config.padding_mode == 'reflect' and (deepest_height < 2 or deepest_width < 2):
+            raise ValueError(f'padding_mode=reflect requires both deepest feature-map dimensions to be at least 2. '
+                             f'Current deepest feature map: {deepest_height} x {deepest_width}.')
+
         if self.data_config.heatmap_sigma <= 0:
             raise ValueError(f'heatmap_sigma must be greater than 0. Got: {self.data_config.heatmap_sigma}')
 
@@ -572,6 +607,30 @@ class TrainModel:
 
         if int(self.data_config.oversampling_factor) < 1:
             raise ValueError(f'oversampling_factor must be at least 1. Got: {self.data_config.oversampling_factor}')
+
+        if self.train_config.positive_weight < 0:
+            raise ValueError(f'positive_weight must be at least 0. Got: {self.train_config.positive_weight}')
+
+        if self.train_config.weight_decay < 0:
+            raise ValueError(f'weight_decay must be at least 0. Got: {self.train_config.weight_decay}')
+
+        if self.train_config.momentum < 0:
+            raise ValueError(f'momentum must be at least 0. Got: {self.train_config.momentum}')
+
+        if self.train_config.lr_step_size < 1:
+            raise ValueError(f'lr_step_size must be at least 1. Got: {self.train_config.lr_step_size}')
+
+        if self.train_config.lr_gamma <= 0:
+            raise ValueError(f'lr_gamma must be greater than 0. Got: {self.train_config.lr_gamma}')
+
+        if self.train_config.early_stop_patience < 1:
+            raise ValueError(f'early_stop_patience must be at least 1. Got: {self.train_config.early_stop_patience}')
+
+        if self.train_config.early_stop_min_delta < 0:
+            raise ValueError(f'early_stop_min_delta must be at least 0. Got: {self.train_config.early_stop_min_delta}')
+
+        if self.train_config.early_stop_warmup_epochs < 0:
+            raise ValueError(f'early_stop_warmup_epochs must be at least 0. Got: {self.train_config.early_stop_warmup_epochs}')
 
         if self.train_config.loss_name == 'bce_logits' and self.model_config.output_activation != 'none':
             raise ValueError('loss_name=bce_logits requires output_activation=none because BCEWithLogitsLoss expects raw logits.')

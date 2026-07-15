@@ -36,7 +36,7 @@ class HeatmapDataset(Dataset):
         self.mark_records = read_mark_list(config.mark_list_file, expected_points=config.num_of_points)
         self.records = self.build_records()
         self.oversampling_factor = self.resolve_oversampling_factor()
-        self.oversampling_transform = get_default_heatmap_transforms(num_of_points=config.num_of_points) if self.oversampling_factor > 1 else None
+        self.oversampling_transform = get_default_heatmap_transforms() if self.oversampling_factor > 1 else None
 
     def __len__(self):
         return len(self.records) * self.oversampling_factor
