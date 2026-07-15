@@ -21,8 +21,8 @@ from torch.utils.data import DataLoader
 
 from .custom_dataset import HeatmapDataset, HeatmapDatasetConfig
 from .heatmap_transforms import get_augmentation_policy
-from .model_registry import build_heatmap_model, get_model_registry_entry
-from .models import count_trainable_parameters
+from .model_registry import build_heatmap_model, get_model_config_fields, get_model_kwargs, get_model_registry_entry
+from .models import count_trainable_parameters, unpack_heatmap_output
 from .utils.io_utils import heatmaps_to_points, infer_image_channel_count, safe_file_stem, scale_points_to_original
 from .utils.progress_bar import ProgressBar
 from .utils.visualisation_utils import save_validation_overlays
@@ -93,6 +93,21 @@ class HeatmapModelConfig:
     output_activation: str = 'none'
     padding_mode: str = 'zeros'
     final_kernel_size: int = 1
+    hrnet_width: int = 32
+    hrnet_modules: int = 3
+    hrnet_blocks: int = 2
+    hourglass_features: int = 128
+    hourglass_stacks: int = 2
+    hourglass_depth: int = 4
+    hourglass_blocks: int = 1
+    auxiliary_loss_weight: float = 1.0
+    vit_patch_size: int = 16
+    vit_embed_dim: int = 384
+    vit_depth: int = 8
+    vit_heads: int = 6
+    vit_mlp_ratio: float = 4.0
+    vit_dropout: float = 0.0
+    vit_decoder_channels: int = 256
 
 
 class WeightedMSELoss(nn.Module):
@@ -210,8 +225,9 @@ class TrainModel:
             optimiser.zero_grad(set_to_none=True)
 
             with torch.amp.autocast('cuda', enabled=self.train_config.use_amp and self.device.type == 'cuda'):
-                outputs = model(images)
-                loss = criterion(outputs, targets)
+                model_output = model(images)
+                outputs, auxiliary_outputs = unpack_heatmap_output(model_output)
+                loss = self.calculate_model_loss(outputs=outputs, auxiliary_outputs=auxiliary_outputs, targets=targets, criterion=criterion)
 
             scaler.scale(loss).backward()
             scaler.step(optimiser)
@@ -236,8 +252,9 @@ class TrainModel:
                 targets = batch['heatmaps'].to(self.device, non_blocking=True)
                 points_original = batch['points_original'].to(self.device, non_blocking=True)
                 original_size = batch['original_size'].to(self.device, non_blocking=True)
-                outputs = model(images)
-                loss = criterion(outputs, targets)
+                model_output = model(images)
+                outputs, auxiliary_outputs = unpack_heatmap_output(model_output)
+                loss = self.calculate_model_loss(outputs=outputs, auxiliary_outputs=auxiliary_outputs, targets=targets, criterion=criterion)
                 batch_error = self.calculate_batch_error(outputs=outputs, points_original=points_original, original_size=original_size)
                 total_loss += loss.item() * images.size(0)
                 total_error_px += batch_error.sum().item()
@@ -273,7 +290,8 @@ class TrainModel:
                 images = batch['image'].to(self.device, non_blocking=True)
                 points_original = batch['points_original'].to(self.device, non_blocking=True)
                 original_size = batch['original_size'].to(self.device, non_blocking=True)
-                outputs = model(images)
+                model_output = model(images)
+                outputs, _ = unpack_heatmap_output(model_output)
                 predicted_resized = heatmaps_to_points(outputs)
                 predicted_original = scale_points_to_original(points=predicted_resized, original_sizes=original_size, image_size=self.data_config.image_size)
                 errors = torch.linalg.norm(predicted_original - points_original, dim=2)
@@ -369,17 +387,23 @@ class TrainModel:
 
     def build_model(self):
         """Build the configured heatmap model."""
-        model_kwargs = {'base_channels': self.model_config.base_channels, 'depth': self.model_config.depth, 'channel_multiplier': self.model_config.channel_multiplier,
-                        'max_channels': self.model_config.max_channels, 'normalisation': self.model_config.normalisation, 'activation': self.model_config.activation,
-                        'dropout': self.model_config.dropout, 'upsampling': self.model_config.upsampling, 'output_activation': self.model_config.output_activation,
-                        'padding_mode': self.model_config.padding_mode, 'final_kernel_size': self.model_config.final_kernel_size}
-
         if self.data_config.input_channels is None:
             raise ValueError('input_channels has not been resolved. Build data loaders before constructing the model.')
 
+        model_kwargs = get_model_kwargs(self.model_config.network_name, self.model_config)
         model = build_heatmap_model(network_name=self.model_config.network_name, num_of_points=self.data_config.num_of_points,
-                                    input_channels=int(self.data_config.input_channels), **model_kwargs)
+                                    input_channels=int(self.data_config.input_channels), image_size=self.data_config.image_size, **model_kwargs)
         return model.to(self.device)
+
+    def calculate_model_loss(self, outputs, auxiliary_outputs, targets, criterion):
+        """Calculate final and optional intermediate-supervision losses."""
+        loss = criterion(outputs, targets)
+
+        if auxiliary_outputs and float(self.model_config.auxiliary_loss_weight) > 0:
+            auxiliary_loss = torch.stack([criterion(auxiliary_output, targets) for auxiliary_output in auxiliary_outputs]).mean()
+            loss = loss + float(self.model_config.auxiliary_loss_weight) * auxiliary_loss
+
+        return loss
 
     def build_criterion(self):
         """Build the requested loss function."""
@@ -488,9 +512,12 @@ class TrainModel:
         model_config = self.serialise(asdict(self.model_config))
         image_height, image_width = [int(value) for value in self.data_config.image_size]
         input_channels = None if self.data_config.input_channels is None else int(self.data_config.input_channels)
-        model_init_config = dict(model_config)
-        model_init_config.pop('network_name', None)
+        model_init_config = self.serialise(get_model_kwargs(self.model_config.network_name, self.model_config))
         model_init_args = {'num_of_points': int(self.data_config.num_of_points), 'input_channels': input_channels, **model_init_config}
+
+        if self.model_config.network_name == 'vitpose':
+            model_init_args['image_size'] = [image_height, image_width]
+
         registry_entry = get_model_registry_entry(self.model_config.network_name)
 
         return {
@@ -514,7 +541,7 @@ class TrainModel:
                           'resized_coordinate_space': {'height': image_height, 'width': image_width}},
             'augmentation': self.build_augmentation_metadata(),
             'training': {'train_config': train_config, 'optimiser': self.train_config.optimiser_name, 'loss': self.train_config.loss_name,
-                         'random_seed': int(self.train_config.random_seed)},
+                         'random_seed': int(self.train_config.random_seed), 'auxiliary_loss_weight': float(self.model_config.auxiliary_loss_weight) if self.model_config.network_name == 'stacked_hourglass' else None},
             'raw_configs': {'data_config': data_config, 'train_config': train_config, 'model_config': model_config}
         }
 
@@ -549,43 +576,12 @@ class TrainModel:
         if len(tuple(self.data_config.image_size)) != 2:
             raise ValueError('image_size must be a two-item tuple: height, width.')
 
-        if any(int(value) < 1 for value in self.data_config.image_size):
-            raise ValueError(f'image_size values must be positive. Got: {self.data_config.image_size}')
-
-        if int(self.model_config.depth) < 1:
-            raise ValueError(f'depth must be at least 1. Got: {self.model_config.depth}')
-
-        minimum_image_size = 2 ** int(self.model_config.depth)
         image_height, image_width = (int(value) for value in self.data_config.image_size)
 
-        if image_height < minimum_image_size or image_width < minimum_image_size:
-            raise ValueError(f'image_size must be at least {minimum_image_size} x {minimum_image_size} for depth={self.model_config.depth}. '
-                             f'Got: {image_height} x {image_width}')
+        if image_height < 1 or image_width < 1:
+            raise ValueError(f'image_size values must be positive. Got: {self.data_config.image_size}')
 
-        deepest_height = image_height // minimum_image_size
-        deepest_width = image_width // minimum_image_size
-
-        if self.model_config.normalisation in ('batch', 'instance') and deepest_height * deepest_width < 2:
-            raise ValueError(f'image_size produces a {deepest_height} x {deepest_width} deepest feature map. '
-                             f'Use a larger image, a shallower network, or normalisation=None.')
-
-        if self.model_config.normalisation == 'group':
-            deepest_channels = min(int(self.model_config.base_channels) * (int(self.model_config.channel_multiplier) ** int(self.model_config.depth)),
-                                   int(self.model_config.max_channels))
-            groups = min(8, deepest_channels)
-
-            while deepest_channels % groups != 0:
-                groups -= 1
-
-            values_per_group = (deepest_channels // groups) * deepest_height * deepest_width
-
-            if values_per_group < 2:
-                raise ValueError(f'normalisation=group would have only {values_per_group} value per group at the deepest feature map. '
-                                 f'Use a larger image, wider channels, or normalisation=None.')
-
-        if self.model_config.padding_mode == 'reflect' and (deepest_height < 2 or deepest_width < 2):
-            raise ValueError(f'padding_mode=reflect requires both deepest feature-map dimensions to be at least 2. '
-                             f'Current deepest feature map: {deepest_height} x {deepest_width}.')
+        self.validate_model_config(image_height=image_height, image_width=image_width)
 
         if self.data_config.heatmap_sigma <= 0:
             raise ValueError(f'heatmap_sigma must be greater than 0. Got: {self.data_config.heatmap_sigma}')
@@ -634,6 +630,78 @@ class TrainModel:
 
         if self.train_config.loss_name == 'bce_logits' and self.model_config.output_activation != 'none':
             raise ValueError('loss_name=bce_logits requires output_activation=none because BCEWithLogitsLoss expects raw logits.')
+
+    def validate_model_config(self, image_height, image_width):
+        """Validate the selected architecture and its image-size requirements."""
+        network_name = str(self.model_config.network_name).lower()
+        get_model_config_fields(network_name)
+
+        if self.model_config.dropout < 0 or self.model_config.dropout >= 1:
+            raise ValueError(f'dropout must be in the range [0, 1). Got: {self.model_config.dropout}')
+
+        if self.model_config.vit_dropout < 0 or self.model_config.vit_dropout >= 1:
+            raise ValueError(f'vit_dropout must be in the range [0, 1). Got: {self.model_config.vit_dropout}')
+
+        if self.model_config.auxiliary_loss_weight < 0:
+            raise ValueError(f'auxiliary_loss_weight must be at least 0. Got: {self.model_config.auxiliary_loss_weight}')
+
+        if network_name == 'unet_basic':
+            if self.model_config.base_channels < 1 or self.model_config.depth < 1 or self.model_config.channel_multiplier < 1:
+                raise ValueError('U-Net base_channels, depth, and channel_multiplier must be at least 1.')
+
+            if self.model_config.max_channels < self.model_config.base_channels:
+                raise ValueError('max_channels must be greater than or equal to base_channels.')
+
+            minimum_image_size = 2 ** int(self.model_config.depth)
+            deepest_height = image_height // minimum_image_size
+            deepest_width = image_width // minimum_image_size
+
+            if self.model_config.normalisation in ('batch', 'instance') and deepest_height * deepest_width < 2:
+                raise ValueError(f'image_size produces a {deepest_height} x {deepest_width} deepest U-Net feature map. Use a larger image, a shallower network, or normalisation=None.')
+
+            if self.model_config.normalisation == 'group':
+                deepest_channels = min(int(self.model_config.base_channels) * (int(self.model_config.channel_multiplier) ** int(self.model_config.depth)), int(self.model_config.max_channels))
+                groups = min(8, deepest_channels)
+
+                while deepest_channels % groups != 0:
+                    groups -= 1
+
+                if (deepest_channels // groups) * deepest_height * deepest_width < 2:
+                    raise ValueError('The deepest U-Net feature map does not contain enough values per group for group normalisation.')
+
+            if self.model_config.padding_mode == 'reflect' and (deepest_height < 2 or deepest_width < 2):
+                raise ValueError('padding_mode=reflect requires both deepest U-Net feature-map dimensions to be at least 2.')
+        elif network_name == 'hrnet':
+            if self.model_config.hrnet_width < 4 or self.model_config.hrnet_modules < 1 or self.model_config.hrnet_blocks < 1:
+                raise ValueError('HRNet requires hrnet_width >= 4, hrnet_modules >= 1, and hrnet_blocks >= 1.')
+
+            minimum_image_size = 64
+        elif network_name == 'stacked_hourglass':
+            if self.model_config.hourglass_features < 16 or self.model_config.hourglass_stacks < 1 or self.model_config.hourglass_depth < 1 or self.model_config.hourglass_blocks < 1:
+                raise ValueError('Stacked hourglass requires hourglass_features >= 16 and positive stack, depth, and block counts.')
+
+            minimum_image_size = 8 * (2 ** int(self.model_config.hourglass_depth))
+        elif network_name == 'vitpose':
+            patch_size = int(self.model_config.vit_patch_size)
+
+            if patch_size < 2 or patch_size & (patch_size - 1):
+                raise ValueError('vit_patch_size must be a power of two greater than or equal to 2.')
+
+            if self.model_config.vit_embed_dim < 8 or self.model_config.vit_depth < 1 or self.model_config.vit_heads < 1:
+                raise ValueError('ViTPose requires vit_embed_dim >= 8 and positive transformer depth and head counts.')
+
+            if self.model_config.vit_embed_dim % self.model_config.vit_heads != 0:
+                raise ValueError('vit_heads must divide vit_embed_dim exactly.')
+
+            if self.model_config.vit_mlp_ratio <= 0 or self.model_config.vit_decoder_channels < 16:
+                raise ValueError('ViTPose requires vit_mlp_ratio > 0 and vit_decoder_channels >= 16.')
+
+            minimum_image_size = patch_size
+        else:
+            raise ValueError(f'Unknown heatmap model: {network_name}')
+
+        if image_height < minimum_image_size or image_width < minimum_image_size:
+            raise ValueError(f'image_size must be at least {minimum_image_size} x {minimum_image_size} for {network_name}. Got: {image_height} x {image_width}')
 
     @staticmethod
     def set_random_seed(seed):

@@ -50,6 +50,24 @@ $OUTPUT_ACTIVATION = "none"
 $PADDING_MODE = "zeros"
 $FINAL_KERNEL_SIZE = 1
 
+$HRNET_WIDTH = 32
+$HRNET_MODULES = 3
+$HRNET_BLOCKS = 2
+
+$HOURGLASS_FEATURES = 128
+$HOURGLASS_STACKS = 2
+$HOURGLASS_DEPTH = 4
+$HOURGLASS_BLOCKS = 1
+$AUXILIARY_LOSS_WEIGHT = 1.0
+
+$VIT_PATCH_SIZE = 16
+$VIT_EMBED_DIM = 384
+$VIT_DEPTH = 8
+$VIT_HEADS = 6
+$VIT_MLP_RATIO = 4.0
+$VIT_DROPOUT = 0.0
+$VIT_DECODER_CHANNELS = 256
+
 $Arguments = @(
     $FOLD, $TASK_NAME, $TRAIN_MODEL, $COPY_FILES,
     "--run-dir", $RUN_DIR,
@@ -91,7 +109,22 @@ $Arguments = @(
     "--upsampling", $UPSAMPLING,
     "--output-activation", $OUTPUT_ACTIVATION,
     "--padding-mode", $PADDING_MODE,
-    "--final-kernel-size", $FINAL_KERNEL_SIZE
+    "--final-kernel-size", $FINAL_KERNEL_SIZE,
+    "--hrnet-width", $HRNET_WIDTH,
+    "--hrnet-modules", $HRNET_MODULES,
+    "--hrnet-blocks", $HRNET_BLOCKS,
+    "--hourglass-features", $HOURGLASS_FEATURES,
+    "--hourglass-stacks", $HOURGLASS_STACKS,
+    "--hourglass-depth", $HOURGLASS_DEPTH,
+    "--hourglass-blocks", $HOURGLASS_BLOCKS,
+    "--auxiliary-loss-weight", $AUXILIARY_LOSS_WEIGHT,
+    "--vit-patch-size", $VIT_PATCH_SIZE,
+    "--vit-embed-dim", $VIT_EMBED_DIM,
+    "--vit-depth", $VIT_DEPTH,
+    "--vit-heads", $VIT_HEADS,
+    "--vit-mlp-ratio", $VIT_MLP_RATIO,
+    "--vit-dropout", $VIT_DROPOUT,
+    "--vit-decoder-channels", $VIT_DECODER_CHANNELS
 )
 
 if ($RUN_NAME -ne "") {

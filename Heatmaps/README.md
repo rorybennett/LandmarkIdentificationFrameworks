@@ -4,14 +4,14 @@ Full-image heatmap-regression landmark localisation for the `LandmarkIdentificat
 
 The package trains a convolutional neural network to produce one heatmap per landmark. Source images are loaded directly, resized into a common training coordinate system, and paired with Gaussian target heatmaps generated from the supplied landmark coordinates.
 
-**Package version:** `0.2.0`
+**Package version:** `0.3.0`
 
 ## Current scope
 
 The package currently provides:
 
 - fold-based training and validation;
-- a configurable U-Net heatmap regressor;
+- configurable U-Net, HRNet, stacked-hourglass, and ViTPose heatmap regressors;
 - landmark-preserving image augmentation;
 - automatic greyscale, RGB, or RGBA input-channel detection;
 - deterministic seeding for Python, NumPy, PyTorch, and DataLoader workers;
@@ -166,17 +166,18 @@ fold_membership.csv
 
 ## Choosing an image size
 
-`--image-size HEIGHT WIDTH` is required. Every image and landmark set is resized into this common coordinate system.
+`--image-size HEIGHT WIDTH` is required. Every image and landmark set is resized into this common coordinate system, and every model returns heatmaps at exactly that size.
 
-Each image dimension must be at least:
+Architecture-specific minimum sizes are checked before training:
 
-```text
-2 ** depth
-```
+| Model | Minimum size rule |
+|---|---|
+| `unet_basic` | Each dimension must be at least `2 ** depth`; normalisation and reflect padding can require a larger deepest feature map |
+| `hrnet` | Each dimension must be at least `64` pixels |
+| `stacked_hourglass` | Each dimension must be at least `8 * (2 ** hourglass_depth)` |
+| `vitpose` | Each dimension must be at least `vit_patch_size` |
 
-This ensures that every U-Net downsampling level remains valid. Odd or non-divisible dimensions are supported; decoder outputs are aligned to the corresponding skip-connection sizes.
-
-For `batch` or `instance` normalisation, the deepest feature map must contain at least two spatial values. Group normalisation is checked against the number of values available per group. Reflect padding additionally requires both deepest feature-map dimensions to be at least `2`. Invalid combinations are rejected before training.
+Odd and non-divisible dimensions are supported. CNN decoder outputs are aligned to the requested image size, while ViTPose pads internally to a complete patch grid and crops the result back to the requested size.
 
 A helper utility can calculate average source-image dimensions. Edit `IMAGE_DATA_DIR` in:
 
@@ -362,13 +363,22 @@ Training stops immediately with a clear error when a reported loss or endpoint-e
 
 ## Model settings
 
-The current model registry contains:
+The model registry contains:
 
 ```text
 unet_basic
+hrnet
+stacked_hourglass
+vitpose
 ```
 
-Its options are:
+Every architecture produces one full-resolution heatmap per configured landmark and can be selected through `--network-name` without changing the training, validation, checkpoint, or export workflow.
+
+These are native PyTorch implementations for this package. They preserve the main design of the cited architectures but do not copy the authors' official repositories or bundle pretrained weights.
+
+### U-Net
+
+`unet_basic` uses a contracting encoder to collect wider anatomical context and a symmetric decoder with skip connections to recover fine spatial detail. The implementation is based on [U-Net: Convolutional Networks for Biomedical Image Segmentation](https://arxiv.org/abs/1505.04597).
 
 ```text
 --network-name unet_basic
@@ -376,18 +386,71 @@ Its options are:
 --depth
 --channel-multiplier
 --max-channels
+--upsampling bilinear|transpose
+```
+
+### HRNet
+
+`hrnet` maintains a high-resolution stream while processing lower-resolution streams in parallel. Repeated fusion moves contextual information between the streams before their features are combined for heatmap prediction. The implementation is based on [Deep High-Resolution Representation Learning for Human Pose Estimation](https://arxiv.org/abs/1902.09212).
+
+```text
+--network-name hrnet
+--hrnet-width
+--hrnet-modules
+--hrnet-blocks
+```
+
+### Stacked Hourglass
+
+`stacked_hourglass` repeatedly applies bottom-up and top-down processing so that local landmark evidence and whole-image anatomical relationships can refine one another. Heatmaps from earlier stacks are fed into later stacks, and intermediate heatmaps receive auxiliary supervision during training. The implementation is based on [Stacked Hourglass Networks for Human Pose Estimation](https://arxiv.org/abs/1603.06937).
+
+```text
+--network-name stacked_hourglass
+--hourglass-features
+--hourglass-stacks
+--hourglass-depth
+--hourglass-blocks
+--auxiliary-loss-weight
+```
+
+`--auxiliary-loss-weight` multiplies the mean loss from all non-final stacks before it is added to the final heatmap loss. Set it to `0` to disable intermediate supervision while retaining stack-to-stack feature feedback.
+
+### ViTPose
+
+`vitpose` divides the image into patches, embeds them as tokens, applies a plain Vision Transformer to model long-range relationships, and uses a lightweight transposed-convolution decoder to reconstruct landmark heatmaps. The implementation is based on [ViTPose: Simple Vision Transformer Baselines for Human Pose Estimation](https://arxiv.org/abs/2204.12484).
+
+```text
+--network-name vitpose
+--vit-patch-size
+--vit-embed-dim
+--vit-depth
+--vit-heads
+--vit-mlp-ratio
+--vit-dropout
+--vit-decoder-channels
+```
+
+`--vit-patch-size` must be a power of two. `--vit-heads` must divide `--vit-embed-dim` exactly. ViTPose is normally the most memory-intensive option and is particularly dependent on dataset size or suitable pretraining; this package currently trains it from scratch.
+
+### Shared CNN and output settings
+
+The CNN architectures use:
+
+```text
 --normalisation batch|instance|group|none
 --activation relu|leaky_relu|elu|gelu
 --dropout
---upsampling bilinear|transpose
---output-activation none|sigmoid|softplus
 --padding-mode zeros|reflect|replicate|circular
+```
+
+All architectures use:
+
+```text
+--output-activation none|sigmoid|softplus
 --final-kernel-size 1|3
 ```
 
-The network returns one output heatmap per configured landmark. The registry stores the implementation module and class name so that checkpoint metadata is not hard-coded to a particular architecture.
-
-Additional models can be added to `models.py` and registered in `model_registry.py`. Model-specific configuration fields will also need to be added to `HeatmapModelConfig`, the command-line parser, and the model-building logic.
+The registry stores the implementation module, class name, paper link, and architecture-specific constructor fields. Checkpoint metadata contains only the constructor fields used by the selected model, together with the resolved image size and input-channel count.
 
 ## Validation outputs
 

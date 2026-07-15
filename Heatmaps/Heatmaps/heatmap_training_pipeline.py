@@ -12,7 +12,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from . import parameters as pms
-from .model_registry import get_available_model_names
+from .model_registry import get_available_model_names, get_model_config_fields
 from .train_model import HeatmapDataConfig, HeatmapModelConfig, TrainConfig, TrainModel
 from .utils.io_utils import discover_fold_numbers, str_to_bool, validate_fold_split_overlaps
 
@@ -220,17 +220,12 @@ class HeatmapTrainingPipeline:
         print(f'\tUse AMP: {self.train_config.use_amp}', flush=True)
         print(f'\tSave validation predictions and overlays: {self.train_config.save_validation_predictions}', flush=True)
         print(f'\tNetwork: {self.model_config.network_name}', flush=True)
-        print(f'\tBase channels: {self.model_config.base_channels}', flush=True)
-        print(f'\tDepth: {self.model_config.depth}', flush=True)
-        print(f'\tChannel multiplier: {self.model_config.channel_multiplier}', flush=True)
-        print(f'\tMax channels: {self.model_config.max_channels}', flush=True)
-        print(f'\tNormalisation: {self.model_config.normalisation}', flush=True)
-        print(f'\tActivation: {self.model_config.activation}', flush=True)
-        print(f'\tDropout: {self.model_config.dropout}', flush=True)
-        print(f'\tUpsampling: {self.model_config.upsampling}', flush=True)
-        print(f'\tOutput activation: {self.model_config.output_activation}', flush=True)
-        print(f'\tPadding mode: {self.model_config.padding_mode}', flush=True)
-        print(f'\tFinal kernel size: {self.model_config.final_kernel_size}', flush=True)
+
+        for field_name in get_model_config_fields(self.model_config.network_name):
+            print(f'\t{field_name}: {getattr(self.model_config, field_name)}', flush=True)
+
+        if self.model_config.network_name == 'stacked_hourglass':
+            print(f'\tauxiliary_loss_weight: {self.model_config.auxiliary_loss_weight}', flush=True)
         print(f'\tRun dir: {self.run_config.run_dir}', flush=True)
         print(f'\tSave dir: {self.run_config.save_dir}', flush=True)
         print(f'\tTraining results dir: {self.run_results_root}', flush=True)
@@ -347,54 +342,84 @@ def validate_args(args, num_of_folds):
     if args.early_stop_warmup_epochs < 0:
         raise ValueError('--early-stop-warmup-epochs must be at least 0.')
 
-    if args.base_channels < 1:
-        raise ValueError('--base-channels must be at least 1.')
-
-    if args.depth < 1:
-        raise ValueError('--depth must be at least 1.')
-
-    minimum_image_size = 2 ** int(args.depth)
-
-    if image_height < minimum_image_size or image_width < minimum_image_size:
-        raise ValueError(f'--image-size must be at least {minimum_image_size} x {minimum_image_size} for --depth {args.depth}. Got {image_height} x {image_width}.')
-
-    deepest_height = image_height // minimum_image_size
-    deepest_width = image_width // minimum_image_size
-
-    if args.normalisation in ('batch', 'instance') and deepest_height * deepest_width < 2:
-        raise ValueError(f'--image-size produces a {deepest_height} x {deepest_width} deepest feature map. '
-                         f'Use a larger image, a shallower network, or --normalisation none.')
-
-    if args.normalisation == 'group':
-        deepest_channels = min(int(args.base_channels) * (int(args.channel_multiplier) ** int(args.depth)), int(args.max_channels))
-        groups = min(8, deepest_channels)
-
-        while deepest_channels % groups != 0:
-            groups -= 1
-
-        values_per_group = (deepest_channels // groups) * deepest_height * deepest_width
-
-        if values_per_group < 2:
-            raise ValueError(f'--normalisation group would have only {values_per_group} value per group at the deepest feature map. '
-                             f'Use a larger image, wider channels, fewer groups through a different channel width, or --normalisation none.')
-
-    if args.padding_mode == 'reflect' and (deepest_height < 2 or deepest_width < 2):
-        raise ValueError(f'--padding-mode reflect requires both deepest feature-map dimensions to be at least 2. '
-                         f'Current deepest feature map: {deepest_height} x {deepest_width}.')
-
-    if args.channel_multiplier < 1:
-        raise ValueError('--channel-multiplier must be at least 1.')
-
-    if args.max_channels < args.base_channels:
-        raise ValueError('--max-channels must be greater than or equal to --base-channels.')
-
-    if args.dropout < 0 or args.dropout >= 1:
-        raise ValueError('--dropout must be in the range [0, 1).')
+    validate_model_args(args=args, image_height=image_height, image_width=image_width)
 
     if args.loss_name == 'bce_logits' and args.output_activation != 'none':
         raise ValueError('--loss-name bce_logits requires --output-activation none because BCEWithLogitsLoss expects raw logits.')
 
     validate_fold_split_overlaps(fold_lists_path=args.fold_lists_path, fold=args.fold)
+
+
+def validate_model_args(args, image_height, image_width):
+    """Validate options and image-size requirements for the selected architecture."""
+    network_name = str(args.network_name).lower()
+
+    if args.dropout < 0 or args.dropout >= 1:
+        raise ValueError('--dropout must be in the range [0, 1).')
+
+    if args.vit_dropout < 0 or args.vit_dropout >= 1:
+        raise ValueError('--vit-dropout must be in the range [0, 1).')
+
+    if args.auxiliary_loss_weight < 0:
+        raise ValueError('--auxiliary-loss-weight must be at least 0.')
+
+    if network_name == 'unet_basic':
+        if args.base_channels < 1 or args.depth < 1 or args.channel_multiplier < 1:
+            raise ValueError('U-Net base channels, depth, and channel multiplier must be at least 1.')
+
+        if args.max_channels < args.base_channels:
+            raise ValueError('--max-channels must be greater than or equal to --base-channels.')
+
+        minimum_image_size = 2 ** int(args.depth)
+        deepest_height = image_height // minimum_image_size
+        deepest_width = image_width // minimum_image_size
+
+        if args.normalisation in ('batch', 'instance') and deepest_height * deepest_width < 2:
+            raise ValueError(f'--image-size produces a {deepest_height} x {deepest_width} deepest U-Net feature map. Use a larger image, a shallower network, or --normalisation none.')
+
+        if args.normalisation == 'group':
+            deepest_channels = min(int(args.base_channels) * (int(args.channel_multiplier) ** int(args.depth)), int(args.max_channels))
+            groups = min(8, deepest_channels)
+
+            while deepest_channels % groups != 0:
+                groups -= 1
+
+            if (deepest_channels // groups) * deepest_height * deepest_width < 2:
+                raise ValueError('The deepest U-Net feature map does not contain enough values per group for group normalisation.')
+
+        if args.padding_mode == 'reflect' and (deepest_height < 2 or deepest_width < 2):
+            raise ValueError('--padding-mode reflect requires both deepest U-Net feature-map dimensions to be at least 2.')
+    elif network_name == 'hrnet':
+        if args.hrnet_width < 4 or args.hrnet_modules < 1 or args.hrnet_blocks < 1:
+            raise ValueError('HRNet requires --hrnet-width >= 4, --hrnet-modules >= 1, and --hrnet-blocks >= 1.')
+
+        minimum_image_size = 64
+    elif network_name == 'stacked_hourglass':
+        if args.hourglass_features < 16 or args.hourglass_stacks < 1 or args.hourglass_depth < 1 or args.hourglass_blocks < 1:
+            raise ValueError('Stacked hourglass requires --hourglass-features >= 16 and positive stack, depth, and block counts.')
+
+        minimum_image_size = 8 * (2 ** int(args.hourglass_depth))
+    elif network_name == 'vitpose':
+        patch_size = int(args.vit_patch_size)
+
+        if patch_size < 2 or patch_size & (patch_size - 1):
+            raise ValueError('--vit-patch-size must be a power of two greater than or equal to 2.')
+
+        if args.vit_embed_dim < 8 or args.vit_depth < 1 or args.vit_heads < 1:
+            raise ValueError('ViTPose requires --vit-embed-dim >= 8 and positive depth and head counts.')
+
+        if args.vit_embed_dim % args.vit_heads != 0:
+            raise ValueError('--vit-heads must divide --vit-embed-dim exactly.')
+
+        if args.vit_mlp_ratio <= 0 or args.vit_decoder_channels < 16:
+            raise ValueError('ViTPose requires --vit-mlp-ratio > 0 and --vit-decoder-channels >= 16.')
+
+        minimum_image_size = patch_size
+    else:
+        raise ValueError(f'Unknown heatmap model: {network_name}')
+
+    if image_height < minimum_image_size or image_width < minimum_image_size:
+        raise ValueError(f'--image-size must be at least {minimum_image_size} x {minimum_image_size} for {network_name}. Got {image_height} x {image_width}.')
 
 
 def validate_num_points(value):
@@ -440,17 +465,8 @@ def build_run_name(args, num_of_folds):
         'early_stop_warmup_epochs': args.early_stop_warmup_epochs,
         'use_amp': args.use_amp,
         'network_name': args.network_name,
-        'base_channels': args.base_channels,
-        'depth': args.depth,
-        'channel_multiplier': args.channel_multiplier,
-        'max_channels': args.max_channels,
-        'normalisation': args.normalisation,
-        'activation': args.activation,
-        'dropout': args.dropout,
-        'upsampling': args.upsampling,
-        'output_activation': args.output_activation,
-        'padding_mode': args.padding_mode,
-        'final_kernel_size': args.final_kernel_size,
+        'model_options': {field_name: getattr(args, field_name) for field_name in get_model_config_fields(args.network_name)},
+        'auxiliary_loss_weight': args.auxiliary_loss_weight if args.network_name == 'stacked_hourglass' else None,
     }
     fingerprint_text = json.dumps(fingerprint_payload, sort_keys=True, separators=(',', ':'))
     fingerprint = hashlib.sha256(fingerprint_text.encode('utf-8')).hexdigest()[:12]
@@ -526,17 +542,37 @@ def parse_args():
     parser.add_argument('--save-validation-predictions', type=str_to_bool, default=True, help='Save validation predictions, metrics, heatmap overlays, and point overlays.')
 
     parser.add_argument('--network-name', choices=get_available_model_names(), default='unet_basic', help='Model architecture.')
+
     parser.add_argument('--base-channels', type=int, default=32, help='First U-Net channel width.')
     parser.add_argument('--depth', type=int, default=4, help='Number of U-Net downsampling levels.')
-    parser.add_argument('--channel-multiplier', type=int, default=2, help='Channel multiplier per level.')
+    parser.add_argument('--channel-multiplier', type=int, default=2, help='U-Net channel multiplier per level.')
     parser.add_argument('--max-channels', type=int, default=512, help='Maximum U-Net channel width.')
-    parser.add_argument('--normalisation', choices=['batch', 'instance', 'group', 'none'], default='batch', help='Normalisation layer.')
-    parser.add_argument('--activation', choices=['relu', 'leaky_relu', 'elu', 'gelu'], default='relu', help='Activation function.')
-    parser.add_argument('--dropout', type=float, default=0.0, help='Dropout probability.')
-    parser.add_argument('--upsampling', choices=['bilinear', 'transpose'], default='bilinear', help='Decoder upsampling method.')
+    parser.add_argument('--upsampling', choices=['bilinear', 'transpose'], default='bilinear', help='U-Net decoder upsampling method.')
+
+    parser.add_argument('--hrnet-width', type=int, default=32, help='HRNet high-resolution branch width.')
+    parser.add_argument('--hrnet-modules', type=int, default=3, help='Number of repeated HRNet multi-resolution fusion modules.')
+    parser.add_argument('--hrnet-blocks', type=int, default=2, help='Residual blocks per branch in each HRNet module.')
+
+    parser.add_argument('--hourglass-features', type=int, default=128, help='Feature width used by the stacked-hourglass model.')
+    parser.add_argument('--hourglass-stacks', type=int, default=2, help='Number of hourglass modules.')
+    parser.add_argument('--hourglass-depth', type=int, default=4, help='Recursive downsampling depth inside each hourglass.')
+    parser.add_argument('--hourglass-blocks', type=int, default=1, help='Residual blocks at each hourglass level.')
+    parser.add_argument('--auxiliary-loss-weight', type=float, default=1.0, help='Weight applied to intermediate stacked-hourglass heatmap losses.')
+
+    parser.add_argument('--vit-patch-size', type=int, default=16, help='ViTPose patch size. Must be a power of two.')
+    parser.add_argument('--vit-embed-dim', type=int, default=384, help='ViTPose transformer embedding width.')
+    parser.add_argument('--vit-depth', type=int, default=8, help='ViTPose transformer layer count.')
+    parser.add_argument('--vit-heads', type=int, default=6, help='ViTPose attention-head count.')
+    parser.add_argument('--vit-mlp-ratio', type=float, default=4.0, help='ViTPose transformer MLP expansion ratio.')
+    parser.add_argument('--vit-dropout', type=float, default=0.0, help='ViTPose transformer dropout probability.')
+    parser.add_argument('--vit-decoder-channels', type=int, default=256, help='Initial ViTPose heatmap-decoder width.')
+
+    parser.add_argument('--normalisation', choices=['batch', 'instance', 'group', 'none'], default='batch', help='CNN normalisation layer.')
+    parser.add_argument('--activation', choices=['relu', 'leaky_relu', 'elu', 'gelu'], default='relu', help='CNN activation function.')
+    parser.add_argument('--dropout', type=float, default=0.0, help='CNN dropout probability.')
     parser.add_argument('--output-activation', choices=['none', 'sigmoid', 'softplus'], default='none', help='Final heatmap activation.')
-    parser.add_argument('--padding-mode', choices=['zeros', 'reflect', 'replicate', 'circular'], default='zeros', help='Convolution padding mode.')
-    parser.add_argument('--final-kernel-size', type=int, choices=[1, 3], default=1, help='Final convolution kernel size.')
+    parser.add_argument('--padding-mode', choices=['zeros', 'reflect', 'replicate', 'circular'], default='zeros', help='CNN convolution padding mode.')
+    parser.add_argument('--final-kernel-size', type=int, choices=[1, 3], default=1, help='Final heatmap convolution kernel size.')
 
     return parser.parse_args()
 
@@ -568,7 +604,12 @@ def build_configs(args):
     model_config = HeatmapModelConfig(network_name=args.network_name, base_channels=args.base_channels, depth=args.depth, channel_multiplier=args.channel_multiplier,
                                       max_channels=args.max_channels, normalisation=None if args.normalisation == 'none' else args.normalisation,
                                       activation=args.activation, dropout=args.dropout, upsampling=args.upsampling, output_activation=args.output_activation,
-                                      padding_mode=args.padding_mode, final_kernel_size=args.final_kernel_size)
+                                      padding_mode=args.padding_mode, final_kernel_size=args.final_kernel_size, hrnet_width=args.hrnet_width,
+                                      hrnet_modules=args.hrnet_modules, hrnet_blocks=args.hrnet_blocks, hourglass_features=args.hourglass_features,
+                                      hourglass_stacks=args.hourglass_stacks, hourglass_depth=args.hourglass_depth, hourglass_blocks=args.hourglass_blocks,
+                                      auxiliary_loss_weight=args.auxiliary_loss_weight, vit_patch_size=args.vit_patch_size, vit_embed_dim=args.vit_embed_dim,
+                                      vit_depth=args.vit_depth, vit_heads=args.vit_heads, vit_mlp_ratio=args.vit_mlp_ratio, vit_dropout=args.vit_dropout,
+                                      vit_decoder_channels=args.vit_decoder_channels)
     return run_config, data_config, train_config, model_config
 
 
