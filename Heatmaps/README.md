@@ -4,7 +4,7 @@ Full-image heatmap-regression landmark localisation for the `LandmarkIdentificat
 
 The package trains a convolutional neural network to produce one heatmap per landmark. Source images are loaded directly, resized into a common training coordinate system, and paired with Gaussian target heatmaps generated from the supplied landmark coordinates.
 
-**Package version:** `0.3.0`
+**Package version:** `0.1.0`
 
 ## Current scope
 

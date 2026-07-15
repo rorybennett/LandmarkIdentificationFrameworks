@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "landmark-heatmaps"
-version = "0.3.0"
+version = "0.1.0"
 description = "Heatmap-regression landmark localisation package."
 readme = "README.md"
 requires-python = ">=3.10"
