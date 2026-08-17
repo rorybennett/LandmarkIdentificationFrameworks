@@ -2,7 +2,8 @@
 
 Full-image heatmap-regression landmark localisation for the `LandmarkIdentificationFrameworks/Heatmaps` package.
 
-The package trains a convolutional neural network to produce one heatmap per landmark. Source images are loaded directly, resized into a common training coordinate system, and paired with Gaussian target heatmaps generated from the supplied landmark coordinates.
+The package trains a convolutional neural network to produce one heatmap per landmark. Source images are loaded directly, resized into a common training coordinate
+system, and paired with Gaussian target heatmaps generated from the supplied landmark coordinates.
 
 **Package version:** `0.1.0`
 
@@ -19,7 +20,8 @@ The package currently provides:
 - validation predictions, endpoint metrics, heatmap overlays, and point overlays;
 - optional copying of a completed run to a separate save directory.
 
-Standalone held-out test evaluation, checkpoint resumption, and general-purpose inference are not yet included. Fold test lists are still required so that each fold definition can be checked for completeness and overlap.
+Standalone held-out test evaluation, checkpoint resumption, and general-purpose inference are not yet included. Fold test lists are still required so that each fold
+definition can be checked for completeness and overlap.
 
 The code targets Python 3.10 or later and PyTorch 2.4 or later. It does not contain legacy PyTorch-loading fallbacks or older command aliases.
 
@@ -112,7 +114,8 @@ Each mark-list row contains an image name followed by landmark coordinates:
 A1.jpg (236, 214) (342, 271) (245, 354) (134, 291)
 ```
 
-Coordinates use `(x, y)` order, where `x` is horizontal and `y` is vertical. Every row must contain at least the number of points specified by `--num-points`. Additional points on a row are ignored.
+Coordinates use `(x, y)` order, where `x` is horizontal and `y` is vertical. Every row must contain at least the number of points specified by `--num-points`. Additional
+points on a row are ignored.
 
 Every selected landmark is checked against the resolved source image. For an image with width `W` and height `H`, each point must satisfy:
 
@@ -133,7 +136,8 @@ Supported image suffixes are:
 
 Images may be greyscale, RGB, or RGBA. The selected fold's training and validation images must all have the same source channel count.
 
-Integer images are converted to `float32` in the `0` to `1` range. Floating-point source images must already contain finite values within that range; the run stops if NaN, infinity, or out-of-range values are found.
+Integer images are converted to `float32` in the `0` to `1` range. Floating-point source images must already contain finite values within that range; the run stops if
+NaN, infinity, or out-of-range values are found.
 
 Images are searched directly beneath `--image-data-dir` by default. Enable recursive searching with:
 
@@ -166,18 +170,20 @@ fold_membership.csv
 
 ## Choosing an image size
 
-`--image-size HEIGHT WIDTH` is required. Every image and landmark set is resized into this common coordinate system, and every model returns heatmaps at exactly that size.
+`--image-size HEIGHT WIDTH` is required. Every image and landmark set is resized into this common coordinate system, and every model returns heatmaps at exactly that
+size.
 
 Architecture-specific minimum sizes are checked before training:
 
-| Model | Minimum size rule |
-|---|---|
-| `unet_basic` | Each dimension must be at least `2 ** depth`; normalisation and reflect padding can require a larger deepest feature map |
-| `hrnet` | Each dimension must be at least `64` pixels |
-| `stacked_hourglass` | Each dimension must be at least `8 * (2 ** hourglass_depth)` |
-| `vitpose` | Each dimension must be at least `vit_patch_size` |
+| Model               | Minimum size rule                                                                                                        |
+|---------------------|--------------------------------------------------------------------------------------------------------------------------|
+| `unet_basic`        | Each dimension must be at least `2 ** depth`; normalisation and reflect padding can require a larger deepest feature map |
+| `hrnet`             | Each dimension must be at least `64` pixels                                                                              |
+| `stacked_hourglass` | Each dimension must be at least `8 * (2 ** hourglass_depth)`                                                             |
+| `vitpose`           | Each dimension must be at least `vit_patch_size`                                                                         |
 
-Odd and non-divisible dimensions are supported. CNN decoder outputs are aligned to the requested image size, while ViTPose pads internally to a complete patch grid and crops the result back to the requested size.
+Odd and non-divisible dimensions are supported. CNN decoder outputs are aligned to the requested image size, while ViTPose pads internally to a complete patch grid and
+crops the result back to the requested size.
 
 A helper utility can calculate average source-image dimensions. Edit `IMAGE_DATA_DIR` in:
 
@@ -230,7 +236,8 @@ The supplied `run_pipeline.sh` and `run_pipeline.ps1` files expose paths, action
 
 ## Training and copying actions
 
-`TRAIN_MODEL=true` trains the selected fold. Existing outputs belonging to that fold and run are cleared before training. Outputs from other folds in the same run directory are retained.
+`TRAIN_MODEL=true` trains the selected fold. Existing outputs belonging to that fold and run are cleared before training. Outputs from other folds in the same run
+directory are retained.
 
 `COPY_FILES=true` copies the complete run directory to:
 
@@ -247,7 +254,8 @@ TRAIN_MODEL=false
 COPY_FILES=true
 ```
 
-The matching run directory must already exist. Copy-only operation does not create an empty run directory or rewrite the original run metadata. The resolved copy source and destination must be separate paths and must not contain one another.
+The matching run directory must already exist. Copy-only operation does not create an empty run directory or rewrite the original run metadata. The resolved copy source
+and destination must be separate paths and must not contain one another.
 
 `--save-dir` is required only when `COPY_FILES=true`.
 
@@ -266,7 +274,8 @@ The main data options are:
 --recursive-image-search
 ```
 
-`--heatmap-sigma` controls the Gaussian spread of each target landmark heatmap in resized-image pixels. Each target heatmap is normalised so that its maximum value is `1.0`.
+`--heatmap-sigma` controls the Gaussian spread of each target landmark heatmap in resized-image pixels. Each target heatmap is normalised so that its maximum value is
+`1.0`.
 
 `--oversampling-factor` affects the training split only:
 
@@ -291,9 +300,11 @@ GaussianNoise
 GaussianBlur
 ```
 
-`RandomAffine` applies the same spatial transform to the image and landmark coordinates. A sampled transform is accepted only when every landmark remains within the image.
+`RandomAffine` applies the same spatial transform to the image and landmark coordinates. A sampled transform is accepted only when every landmark remains within the
+image.
 
-`GaussianNoise` and `GaussianBlur` do not move landmarks. For RGBA input, the alpha channel is preserved by these intensity transforms. `RandomErasing` remains available for experiments but is not enabled by default.
+`GaussianNoise` and `GaussianBlur` do not move landmarks. For RGBA input, the alpha channel is preserved by these intensity transforms. `RandomErasing` remains available
+for experiments but is not enabled by default.
 
 The complete augmentation policy is stored in checkpoint metadata.
 
@@ -316,10 +327,10 @@ Press the space bar to select another marked image and resample the chosen trans
 Input channels are detected from all training and validation images in the selected fold. There is no public input-channel argument.
 
 | Source image type | Model input channels |
-|---|---:|
-| Greyscale | 1 |
-| RGB | 3 |
-| RGBA | 4 |
+|-------------------|---------------------:|
+| Greyscale         |                    1 |
+| RGB               |                    3 |
+| RGBA              |                    4 |
 
 The resolved channel count configures the first network layer and is written to run metadata and checkpoints.
 
@@ -372,13 +383,16 @@ stacked_hourglass
 vitpose
 ```
 
-Every architecture produces one full-resolution heatmap per configured landmark and can be selected through `--network-name` without changing the training, validation, checkpoint, or export workflow.
+Every architecture produces one full-resolution heatmap per configured landmark and can be selected through `--network-name` without changing the training, validation,
+checkpoint, or export workflow.
 
-These are native PyTorch implementations for this package. They preserve the main design of the cited architectures but do not copy the authors' official repositories or bundle pretrained weights.
+These are native PyTorch implementations for this package. They preserve the main design of the cited architectures but do not copy the authors' official repositories or
+bundle pretrained weights.
 
 ### U-Net
 
-`unet_basic` uses a contracting encoder to collect wider anatomical context and a symmetric decoder with skip connections to recover fine spatial detail. The implementation is based on [U-Net: Convolutional Networks for Biomedical Image Segmentation](https://arxiv.org/abs/1505.04597).
+`unet_basic` uses a contracting encoder to collect wider anatomical context and a symmetric decoder with skip connections to recover fine spatial detail. The
+implementation is based on [U-Net: Convolutional Networks for Biomedical Image Segmentation](https://arxiv.org/abs/1505.04597).
 
 ```text
 --network-name unet_basic
@@ -391,7 +405,9 @@ These are native PyTorch implementations for this package. They preserve the mai
 
 ### HRNet
 
-`hrnet` maintains a high-resolution stream while processing lower-resolution streams in parallel. Repeated fusion moves contextual information between the streams before their features are combined for heatmap prediction. The implementation is based on [Deep High-Resolution Representation Learning for Human Pose Estimation](https://arxiv.org/abs/1902.09212).
+`hrnet` maintains a high-resolution stream while processing lower-resolution streams in parallel. Repeated fusion moves contextual information between the streams before
+their features are combined for heatmap prediction. The implementation is based
+on [Deep High-Resolution Representation Learning for Human Pose Estimation](https://arxiv.org/abs/1902.09212).
 
 ```text
 --network-name hrnet
@@ -402,7 +418,9 @@ These are native PyTorch implementations for this package. They preserve the mai
 
 ### Stacked Hourglass
 
-`stacked_hourglass` repeatedly applies bottom-up and top-down processing so that local landmark evidence and whole-image anatomical relationships can refine one another. Heatmaps from earlier stacks are fed into later stacks, and intermediate heatmaps receive auxiliary supervision during training. The implementation is based on [Stacked Hourglass Networks for Human Pose Estimation](https://arxiv.org/abs/1603.06937).
+`stacked_hourglass` repeatedly applies bottom-up and top-down processing so that local landmark evidence and whole-image anatomical relationships can refine one another.
+Heatmaps from earlier stacks are fed into later stacks, and intermediate heatmaps receive auxiliary supervision during training. The implementation is based
+on [Stacked Hourglass Networks for Human Pose Estimation](https://arxiv.org/abs/1603.06937).
 
 ```text
 --network-name stacked_hourglass
@@ -413,11 +431,14 @@ These are native PyTorch implementations for this package. They preserve the mai
 --auxiliary-loss-weight
 ```
 
-`--auxiliary-loss-weight` multiplies the mean loss from all non-final stacks before it is added to the final heatmap loss. Set it to `0` to disable intermediate supervision while retaining stack-to-stack feature feedback.
+`--auxiliary-loss-weight` multiplies the mean loss from all non-final stacks before it is added to the final heatmap loss. Set it to `0` to disable intermediate
+supervision while retaining stack-to-stack feature feedback.
 
 ### ViTPose
 
-`vitpose` divides the image into patches, embeds them as tokens, applies a plain Vision Transformer to model long-range relationships, and uses a lightweight transposed-convolution decoder to reconstruct landmark heatmaps. The implementation is based on [ViTPose: Simple Vision Transformer Baselines for Human Pose Estimation](https://arxiv.org/abs/2204.12484).
+`vitpose` divides the image into patches, embeds them as tokens, applies a plain Vision Transformer to model long-range relationships, and uses a lightweight
+transposed-convolution decoder to reconstruct landmark heatmaps. The implementation is based
+on [ViTPose: Simple Vision Transformer Baselines for Human Pose Estimation](https://arxiv.org/abs/2204.12484).
 
 ```text
 --network-name vitpose
@@ -430,7 +451,8 @@ These are native PyTorch implementations for this package. They preserve the mai
 --vit-decoder-channels
 ```
 
-`--vit-patch-size` must be a power of two. `--vit-heads` must divide `--vit-embed-dim` exactly. ViTPose is normally the most memory-intensive option and is particularly dependent on dataset size or suitable pretraining; this package currently trains it from scratch.
+`--vit-patch-size` must be a power of two. `--vit-heads` must divide `--vit-embed-dim` exactly. ViTPose is normally the most memory-intensive option and is particularly
+dependent on dataset size or suitable pretraining; this package currently trains it from scratch.
 
 ### Shared CNN and output settings
 
@@ -450,7 +472,8 @@ All architectures use:
 --final-kernel-size 1|3
 ```
 
-The registry stores the implementation module, class name, paper link, and architecture-specific constructor fields. Checkpoint metadata contains only the constructor fields used by the selected model, together with the resolved image size and input-channel count.
+The registry stores the implementation module, class name, paper link, and architecture-specific constructor fields. Checkpoint metadata contains only the constructor
+fields used by the selected model, together with the resolved image size and input-channel count.
 
 ## Validation outputs
 
@@ -460,7 +483,8 @@ Validation export is enabled by default:
 --save-validation-predictions true
 ```
 
-After training, the best checkpoint is reloaded when available; otherwise the last checkpoint is used. Heatmap maxima are converted to resized-image coordinates and then scaled back into original-image pixels before endpoint errors are calculated.
+After training, the best checkpoint is reloaded when available; otherwise the last checkpoint is used. Heatmap maxima are converted to resized-image coordinates and then
+scaled back into original-image pixels before endpoint errors are calculated.
 
 Set the option to `false` to skip the complete validation export.
 
@@ -492,7 +516,8 @@ validation_results_F1/
     validation_run_metadata.json
 ```
 
-The validation workbook contains `image_summary` and `endpoints` sheets. Ground-truth points are shown in green and predicted points in red on point overlays. Heatmap overlays show the combined model response and predicted endpoint labels.
+The validation workbook contains `image_summary` and `endpoints` sheets. Ground-truth points are shown in green and predicted points in red on point overlays. Heatmap
+overlays show the combined model response and predicted endpoint labels.
 
 ## Checkpoints and metadata
 
@@ -525,16 +550,21 @@ training
 raw_configs
 ```
 
-It records the model registry entry, implementation module and class, reconstruction arguments, landmark count, input channels, image size, heatmap sigma, coordinate conventions, augmentation policy, training settings, and checkpoint metrics.
+It records the model registry entry, implementation module and class, reconstruction arguments, landmark count, input channels, image size, heatmap sigma, coordinate
+conventions, augmentation policy, training settings, and checkpoint metrics.
 
-`run_info_TASK_NAME_fN.json` contains the resolved run, data, training, and model configurations. It is rewritten after automatic channel detection so that the final metadata reflects the model that was actually trained.
+`run_info_TASK_NAME_fN.json` contains the resolved run, data, training, and model configurations. It is rewritten after automatic channel detection so that the final
+metadata reflects the model that was actually trained.
 
 ## Run and task names
 
 `TASK_NAME` and `--run-name` are used as directory components. Unsupported characters are replaced with underscores, and empty cleaned names are rejected.
 
-When `--run-name` is omitted, the package creates a readable name containing the fold count, point count, model, image size, heatmap sigma, loss, oversampling factor, batch size, and learning rate. A 12-character SHA-256 configuration fingerprint is appended.
+When `--run-name` is omitted, the package creates a readable name containing the fold count, point count, model, image size, heatmap sigma, loss, oversampling factor,
+batch size, and learning rate. A 12-character SHA-256 configuration fingerprint is appended.
 
-The fingerprint includes all data-processing, optimisation, early-stopping, AMP, and model options that can affect the trained result. This prevents two materially different configurations from silently using the same automatically generated output directory.
+The fingerprint includes all data-processing, optimisation, early-stopping, AMP, and model options that can affect the trained result. This prevents two materially
+different configurations from silently using the same automatically generated output directory.
 
-Dataset paths and file contents are not included in the fingerprint. Use a distinct `TASK_NAME` or explicit `--run-name` when training different datasets with otherwise identical settings.
+Dataset paths and file contents are not included in the fingerprint. Use a distinct `TASK_NAME` or explicit `--run-name` when training different datasets with otherwise
+identical settings.

@@ -51,7 +51,6 @@ class HeatmapTrainingPipeline:
         self.print_inputs()
 
         if self.run_config.train_model:
-            self.write_run_info()
             self.train_model()
 
         if self.run_config.copy_files:
@@ -68,7 +67,7 @@ class HeatmapTrainingPipeline:
         self.print_section_start(f'Fold {self.run_config.fold} {self.run_config.task_name} training')
         start_time = dt.datetime.now()
         trainer = TrainModel(data_config=self.data_config, train_config=self.train_config, model_config=self.model_config, output_save_path=self.run_results_path)
-        trainer.train()
+        trainer.train(on_dataset_validated=self.prepare_validated_training_outputs)
         self.write_run_info()
         end_time = dt.datetime.now()
         print(f'\tFold {self.run_config.fold} {self.run_config.task_name} training complete in {self.format_runtime(start_time, end_time)}.', flush=True)
@@ -122,12 +121,17 @@ class HeatmapTrainingPipeline:
         self.run_results_root.mkdir(exist_ok=True, parents=True)
 
         if self.run_config.train_model:
-            self.clear_existing_fold_outputs()
             self.run_results_path.mkdir(exist_ok=True, parents=True)
             return
 
         if not self.run_results_path.is_dir():
             raise ValueError(f'Copy-only operation requires an existing run results path: {self.run_results_path}')
+
+    def prepare_validated_training_outputs(self):
+        """Clear prior fold outputs only after complete dataset validation."""
+        self.clear_existing_fold_outputs()
+        self.run_results_path.mkdir(exist_ok=True, parents=True)
+        self.write_run_info()
 
     def clear_existing_fold_outputs(self):
         """Remove outputs from an earlier run of the requested fold without affecting other folds."""

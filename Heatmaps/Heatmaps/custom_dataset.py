@@ -70,6 +70,33 @@ class HeatmapDataset(Dataset):
 
         return factor
 
+    def validate_all_records(self):
+        """Validate the complete preprocessing path for every original record."""
+        if self.config.input_channels is None:
+            raise ValueError('input_channels must be resolved before validating dataset records.')
+
+        image_height, image_width = map(int, self.config.image_size)
+        expected_image_shape = (int(self.config.input_channels), image_height, image_width)
+        expected_heatmap_shape = (int(self.config.num_of_points), image_height, image_width)
+
+        for record_index in range(len(self.records)):
+            sample = self[record_index]
+            sample_name = sample['sample_name']
+
+            if tuple(sample['image'].shape) != expected_image_shape:
+                raise ValueError(f'Preprocessed image for {sample_name} has shape {tuple(sample["image"].shape)}, expected {expected_image_shape}.')
+
+            if tuple(sample['heatmaps'].shape) != expected_heatmap_shape:
+                raise ValueError(f'Target heatmaps for {sample_name} have shape {tuple(sample["heatmaps"].shape)}, expected {expected_heatmap_shape}.')
+
+            if not torch.isfinite(sample['image']).all():
+                raise ValueError(f'Preprocessed image for {sample_name} contains NaN or infinite values.')
+
+            if not torch.isfinite(sample['heatmaps']).all():
+                raise ValueError(f'Target heatmaps for {sample_name} contain NaN or infinite values.')
+
+        return len(self.records)
+
     def build_records(self):
         """Build image and point records for this split."""
         split_names = read_split_names(fold_lists_path=self.config.fold_lists_path, split_name=self.config.split_name, fold=self.config.fold)

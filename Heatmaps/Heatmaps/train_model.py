@@ -10,7 +10,7 @@ import shutil
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-import matplotlib.pyplot as plt
+import matplotlib
 import numpy as np
 import torch
 from openpyxl import Workbook
@@ -26,6 +26,9 @@ from .models import count_trainable_parameters, unpack_heatmap_output
 from .utils.io_utils import heatmaps_to_points, infer_image_channel_count, safe_file_stem, scale_points_to_original
 from .utils.progress_bar import ProgressBar
 from .utils.visualisation_utils import save_validation_overlays
+
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
 
 
 def seed_worker(_worker_id):
@@ -133,11 +136,15 @@ class TrainModel:
         self.device = device or torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.validate_configs()
 
-    def train(self):
+    def train(self, on_dataset_validated=None):
         """Run the fold training workflow."""
         self.set_random_seed(self.train_config.random_seed)
         self.output_path.mkdir(exist_ok=True, parents=True)
         train_loader, val_loader = self.build_data_loaders()
+
+        if on_dataset_validated is not None:
+            on_dataset_validated()
+
         model = self.build_model()
         criterion = self.build_criterion()
         optimiser = self.build_optimiser(model)
@@ -327,8 +334,11 @@ class TrainModel:
         train_dataset = HeatmapDataset(self.build_dataset_config(split_name='train'))
         val_dataset = HeatmapDataset(self.build_dataset_config(split_name='val'))
         self.resolve_input_channels(train_dataset=train_dataset, val_dataset=val_dataset)
+        validated_train_records = train_dataset.validate_all_records()
+        validated_val_records = val_dataset.validate_all_records()
         generator = torch.Generator()
         generator.manual_seed(int(self.train_config.random_seed))
+        print(f'\tDataset validation complete: {validated_train_records} training and {validated_val_records} validation records.', flush=True)
         print(f'	Train samples: {len(train_dataset)} ({len(train_dataset.records)} original, oversampling_factor={train_dataset.oversampling_factor}).', flush=True)
         print(f'	Validation samples: {len(val_dataset)}.', flush=True)
         train_loader = DataLoader(train_dataset, batch_size=self.train_config.batch_size, shuffle=True, num_workers=self.train_config.num_workers,
