@@ -1,0 +1,7 @@
+# Python 3.10 or later
+numpy
+torch>=2.4
+matplotlib
+opencv-python
+scikit-image
+openpyxl
