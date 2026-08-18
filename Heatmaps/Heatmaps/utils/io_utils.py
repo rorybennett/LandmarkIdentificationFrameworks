@@ -12,9 +12,10 @@ import torch
 from skimage import io
 from skimage.util import img_as_float32
 
-POINT_PATTERN = re.compile(r'\((-?\d+(?:\.\d+)?),\s*(-?\d+(?:\.\d+)?)\)')
-TRAIN_LIST_PATTERN = re.compile(r'^train_f(\d+)\.txt$')
-FOLD_LIST_FILE_PREFIXES = ('train', 'val', 'test')
+REPETITION_DIR_PATTERN = re.compile(r'^repetition_(\d+)$')
+TRAINING_LIST_PATTERN = re.compile(r'^training_f(\d+)\.txt$')
+VALIDATION_LIST_PATTERN = re.compile(r'^val_f(\d+)\.txt$')
+SPLIT_FILE_PREFIXES = {'training': 'training', 'validation': 'val'}
 SUPPORTED_IMAGE_SUFFIXES = ('.png', '.jpg', '.jpeg', '.bmp', '.tif', '.tiff')
 
 
@@ -49,42 +50,95 @@ def safe_file_stem(value):
     return safe_value
 
 
-def discover_fold_numbers(fold_lists_path):
-    """Return contiguous fold numbers and validate train/val/test files."""
+def get_repetition_dir(fold_lists_path, repetition):
+    """Return the directory containing one repetition's fold lists."""
+    return Path(fold_lists_path) / f'repetition_{int(repetition)}'
+
+
+def discover_repetition_numbers(fold_lists_path):
+    """Return contiguous repetition numbers with identical fold counts."""
     fold_lists_path = Path(fold_lists_path)
 
     if not fold_lists_path.is_dir():
         raise ValueError(f'fold_lists_path does not exist or is not a directory: {fold_lists_path}')
 
-    fold_numbers = []
+    repetition_numbers = []
 
-    for file_path in fold_lists_path.iterdir():
-        if file_path.is_file():
-            match = TRAIN_LIST_PATTERN.fullmatch(file_path.name)
+    for directory_path in fold_lists_path.iterdir():
+        if directory_path.is_dir():
+            match = REPETITION_DIR_PATTERN.fullmatch(directory_path.name)
             if match:
-                fold_numbers.append(int(match.group(1)))
+                repetition_numbers.append(int(match.group(1)))
 
-    fold_numbers = sorted(set(fold_numbers))
+    repetition_numbers = sorted(set(repetition_numbers))
+
+    if not repetition_numbers:
+        raise ValueError(f'No repetition_N directories found in {fold_lists_path}')
+
+    expected = list(range(1, repetition_numbers[-1] + 1))
+
+    if repetition_numbers != expected:
+        raise ValueError(f'Repetition directories must be contiguous from repetition_1. Found {repetition_numbers}, expected {expected}')
+
+    fold_number_sets = {repetition: discover_fold_numbers(fold_lists_path=fold_lists_path, repetition=repetition)
+                        for repetition in repetition_numbers}
+    reference_folds = fold_number_sets[repetition_numbers[0]]
+    inconsistent = {repetition: folds for repetition, folds in fold_number_sets.items() if folds != reference_folds}
+
+    if inconsistent:
+        raise ValueError(f'Every repetition must contain identical contiguous fold numbers. Found: {fold_number_sets}')
+
+    return repetition_numbers
+
+
+def discover_fold_numbers(fold_lists_path, repetition):
+    """Return contiguous fold numbers and validate training/validation file pairs."""
+    repetition_dir = get_repetition_dir(fold_lists_path=fold_lists_path, repetition=repetition)
+
+    if not repetition_dir.is_dir():
+        raise ValueError(f'Repetition directory does not exist: {repetition_dir}')
+
+    training_fold_numbers = []
+    validation_fold_numbers = []
+
+    for file_path in repetition_dir.iterdir():
+        if file_path.is_file():
+            training_match = TRAINING_LIST_PATTERN.fullmatch(file_path.name)
+            validation_match = VALIDATION_LIST_PATTERN.fullmatch(file_path.name)
+
+            if training_match:
+                training_fold_numbers.append(int(training_match.group(1)))
+
+            if validation_match:
+                validation_fold_numbers.append(int(validation_match.group(1)))
+
+    fold_numbers = sorted(set(training_fold_numbers))
+    validation_fold_numbers = sorted(set(validation_fold_numbers))
 
     if not fold_numbers:
-        raise ValueError(f'No train_fN.txt files found in {fold_lists_path}')
+        raise ValueError(f'No training_fN.txt files found in {repetition_dir}')
 
     expected = list(range(1, fold_numbers[-1] + 1))
 
     if fold_numbers != expected:
-        raise ValueError(f'Fold files must be contiguous from train_f1.txt. Found {fold_numbers}, expected {expected}')
+        raise ValueError(f'Fold files in {repetition_dir} must be contiguous from training_f1.txt. Found {fold_numbers}, expected {expected}')
+
+    if validation_fold_numbers != fold_numbers:
+        raise ValueError(f'Training and validation fold numbers in {repetition_dir} must match exactly. '
+                         f'Found training={fold_numbers}, validation={validation_fold_numbers}.')
 
     missing_files = []
 
     for fold_number in fold_numbers:
-        for prefix in FOLD_LIST_FILE_PREFIXES:
-            fold_file = fold_lists_path / f'{prefix}_f{fold_number}.txt'
+        for prefix in SPLIT_FILE_PREFIXES.values():
+            fold_file = repetition_dir / f'{prefix}_f{fold_number}.txt'
+
             if not fold_file.is_file():
                 missing_files.append(str(fold_file))
 
     if missing_files:
         missing_text = '\n'.join(missing_files)
-        raise ValueError(f'Every fold must have train_fN.txt, val_fN.txt, and test_fN.txt files. Missing files:\n{missing_text}')
+        raise ValueError(f'Every fold must have training_fN.txt and val_fN.txt files. Missing files:\n{missing_text}')
 
     return fold_numbers
 
@@ -94,9 +148,20 @@ def canonical_split_name(value):
     return Path(str(value).split()[0]).stem
 
 
-def read_split_names(fold_lists_path, split_name, fold):
-    """Read sample names for one fold split."""
-    split_file = Path(fold_lists_path) / f'{split_name.lower()}_f{int(fold)}.txt'
+def get_split_file_path(fold_lists_path, repetition, split_name, fold):
+    """Return one repetition/fold split-list path."""
+    canonical_name = str(split_name).lower()
+
+    if canonical_name not in SPLIT_FILE_PREFIXES:
+        raise ValueError(f'Unknown split name: {split_name}. Expected one of {tuple(SPLIT_FILE_PREFIXES)}.')
+
+    prefix = SPLIT_FILE_PREFIXES[canonical_name]
+    return get_repetition_dir(fold_lists_path=fold_lists_path, repetition=repetition) / f'{prefix}_f{int(fold)}.txt'
+
+
+def read_split_names(fold_lists_path, repetition, split_name, fold):
+    """Read sample names for one repetition and fold split."""
+    split_file = get_split_file_path(fold_lists_path=fold_lists_path, repetition=repetition, split_name=split_name, fold=fold)
 
     if not split_file.is_file():
         raise FileNotFoundError(f'Split file not found: {split_file}')
@@ -115,7 +180,7 @@ def read_split_names(fold_lists_path, split_name, fold):
     return names
 
 
-def validate_split_duplicates(split_name, names, fold):
+def validate_split_duplicates(split_name, names, repetition, fold):
     """Raise an error if a split file contains duplicate sample IDs."""
     seen = set()
     duplicates = set()
@@ -130,72 +195,67 @@ def validate_split_duplicates(split_name, names, fold):
 
     if duplicates:
         duplicate_text = ', '.join(sorted(duplicates, key=natural_key))
-        raise ValueError(f'Fold {fold} {split_name} split contains duplicate sample ID(s): {duplicate_text}')
+        raise ValueError(f'Repetition {repetition}, fold {fold} {split_name} split contains duplicate sample ID(s): {duplicate_text}')
 
 
-def validate_fold_split_overlaps(fold_lists_path, fold):
-    """Validate that train, validation, and test fold lists are disjoint."""
-    split_names = {split_name: read_split_names(fold_lists_path=fold_lists_path, split_name=split_name, fold=fold) for split_name in FOLD_LIST_FILE_PREFIXES}
+def validate_fold_split_overlaps(fold_lists_path, repetition, fold):
+    """Validate that one fold's training and validation lists are disjoint."""
+    split_names = {split_name: read_split_names(fold_lists_path=fold_lists_path, repetition=repetition, split_name=split_name, fold=fold)
+                   for split_name in SPLIT_FILE_PREFIXES}
     split_sets = {}
 
     for split_name, names in split_names.items():
-        validate_split_duplicates(split_name=split_name, names=names, fold=fold)
+        validate_split_duplicates(split_name=split_name, names=names, repetition=repetition, fold=fold)
         split_sets[split_name] = {canonical_split_name(name) for name in names}
 
-    for left_index, left_name in enumerate(FOLD_LIST_FILE_PREFIXES):
-        for right_name in FOLD_LIST_FILE_PREFIXES[left_index + 1:]:
-            overlap = split_sets[left_name] & split_sets[right_name]
+    overlap = split_sets['training'] & split_sets['validation']
 
-            if overlap:
-                overlap_text = ', '.join(sorted(overlap, key=natural_key))
-                raise ValueError(f'Fold {fold} has overlapping sample ID(s) between {left_name}_f{fold}.txt and {right_name}_f{fold}.txt: {overlap_text}')
+    if overlap:
+        overlap_text = ', '.join(sorted(overlap, key=natural_key))
+        training_file = get_split_file_path(fold_lists_path, repetition, 'training', fold)
+        validation_file = get_split_file_path(fold_lists_path, repetition, 'validation', fold)
+        raise ValueError(f'Repetition {repetition}, fold {fold} has overlapping sample ID(s) between {training_file.name} and '
+                         f'{validation_file.name}: {overlap_text}')
 
     return split_sets
 
 
-def read_mark_list(mark_list_file, expected_points):
-    """Read a mark-list file keyed by sample stem."""
-    mark_list_file = Path(mark_list_file)
+def validate_repeated_kfold_lists(fold_lists_path):
+    """Validate the complete repeated k-fold collection."""
+    repetition_numbers = discover_repetition_numbers(fold_lists_path)
+    reference_sample_set = None
+    fold_numbers = discover_fold_numbers(fold_lists_path=fold_lists_path, repetition=repetition_numbers[0])
 
-    if not mark_list_file.is_file():
-        raise FileNotFoundError(f'Mark-list file not found: {mark_list_file}')
+    for repetition in repetition_numbers:
+        repetition_sample_set = None
+        validation_occurrences = []
 
-    records = {}
+        for fold in fold_numbers:
+            split_sets = validate_fold_split_overlaps(fold_lists_path=fold_lists_path, repetition=repetition, fold=fold)
+            fold_sample_set = split_sets['training'] | split_sets['validation']
 
-    with open(mark_list_file, 'r', encoding='utf-8') as mark_handle:
-        for line_number, line in enumerate(mark_handle, start=1):
-            line = line.strip()
+            if repetition_sample_set is None:
+                repetition_sample_set = fold_sample_set
+            elif fold_sample_set != repetition_sample_set:
+                raise ValueError(f'Repetition {repetition}, fold {fold} does not cover the same full dataset as the other folds.')
 
-            if not line:
-                continue
+            if split_sets['training'] != fold_sample_set - split_sets['validation']:
+                raise ValueError(f'Repetition {repetition}, fold {fold} training split is not the complement of its validation split.')
 
-            image_name = line.split()[0]
-            points = [(float(x), float(y)) for x, y in POINT_PATTERN.findall(line)]
+            validation_occurrences.extend(split_sets['validation'])
 
-            if len(points) < int(expected_points):
-                raise ValueError(f'Mark-list row {line_number} for {image_name} has {len(points)} points, expected at least {expected_points}.')
+        if len(validation_occurrences) != len(set(validation_occurrences)):
+            raise ValueError(f'Repetition {repetition} uses at least one sample as validation in more than one fold.')
 
-            sample_stem = Path(image_name).stem
+        if set(validation_occurrences) != repetition_sample_set:
+            raise ValueError(f'Repetition {repetition} does not use every sample as validation exactly once.')
 
-            if sample_stem in records:
-                raise ValueError(f'Duplicate sample stem in mark list: {sample_stem}')
+        if reference_sample_set is None:
+            reference_sample_set = repetition_sample_set
+        elif repetition_sample_set != reference_sample_set:
+            raise ValueError(f'Repetition {repetition} does not contain the same full dataset as repetition {repetition_numbers[0]}.')
 
-            records[sample_stem] = {'image_name': image_name, 'points': points[:int(expected_points)]}
-
-    if not records:
-        raise ValueError(f'No valid mark-list rows found in {mark_list_file}')
-
-    return records
-
-
-def resolve_mark_record(sample_name, mark_records):
-    """Match a fold-list sample name to a mark-list record."""
-    sample_stem = Path(str(sample_name)).stem
-
-    if sample_stem in mark_records:
-        return sample_stem, mark_records[sample_stem]
-
-    raise KeyError(f'Sample {sample_name} was not found in the mark list.')
+    return {'repetitions': repetition_numbers, 'folds': fold_numbers, 'sample_count': len(reference_sample_set)}
 
 
 def resolve_image_path(image_data_dir, image_name, sample_stem, recursive=False, supported_suffixes=SUPPORTED_IMAGE_SUFFIXES):

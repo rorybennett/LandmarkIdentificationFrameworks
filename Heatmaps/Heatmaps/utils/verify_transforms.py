@@ -2,7 +2,7 @@
 Interactively verify one selected heatmap transform on randomly selected marked images.
 
 Usage:
-python -m Heatmaps.utils.verify_transforms /path/to/images /path/to/points.txt affine
+python -m Heatmaps.utils.verify_transforms /path/to/images /path/to/points.txt affine --num-points 4
 
 Press SPACE to select a new random image and resample the selected transform.
 """
@@ -10,7 +10,6 @@ Press SPACE to select a new random image and resample the selected transform.
 import argparse
 import pprint
 import random
-import re
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -19,8 +18,8 @@ from skimage import io
 from skimage.util import img_as_float32
 
 from .. import heatmap_transforms as htf
+from .annotation_utils import read_mark_list, validate_annotation_point_count
 
-POINT_PATTERN = re.compile(r'\((-?\d+(?:\.\d+)?),\s*(-?\d+(?:\.\d+)?)\)')
 SUPPORTED_IMAGE_SUFFIXES = ('.png', '.jpg', '.jpeg', '.bmp', '.tif', '.tiff')
 TRANSFORM_CHOICES = ('erasing', 'affine', 'noise', 'blur', 'default')
 POINT_MARKER_SIZE = 50
@@ -28,27 +27,15 @@ POINT_LABEL_OFFSET = (7, -7)
 POINT_LABEL_FONT_SIZE = 10
 
 
-def read_mark_rows(mark_list_file):
-    """Read image names and landmark points from a mark-list file."""
+def read_mark_rows(mark_list_file, expected_points):
+    """Read rows through the shared exact-count annotation parser."""
+    mark_records = read_mark_list(mark_list_file)
     rows = []
 
-    with open(mark_list_file, 'r', encoding='utf-8') as file:
-        for line_number, line in enumerate(file, start=1):
-            line = line.strip()
-
-            if not line:
-                continue
-
-            image_name = line.split()[0]
-            points = [(float(x), float(y)) for x, y in POINT_PATTERN.findall(line)]
-
-            if not points:
-                raise ValueError(f'No points found on line {line_number}: {line}')
-
-            rows.append({'image_name': image_name, 'points': np.asarray(points, dtype=np.float32)})
-
-    if not rows:
-        raise ValueError(f'No mark-list rows found in {mark_list_file}')
+    for sample_name, mark_record in mark_records.items():
+        validate_annotation_point_count(mark_record=mark_record, expected_points=expected_points, sample_name=sample_name,
+                                        mark_list_file=mark_list_file)
+        rows.append({'image_name': mark_record['image_name'], 'points': np.asarray(mark_record['points'], dtype=np.float32)})
 
     return rows
 
@@ -213,13 +200,17 @@ def parse_args():
     parser.add_argument('image_dir', type=Path, help='Directory containing the images.')
     parser.add_argument('mark_list_file', type=Path, help='Text file containing image names and landmark points.')
     parser.add_argument('transform', choices=TRANSFORM_CHOICES, help='Transform to apply.')
+    parser.add_argument('--num-points', type=int, required=True, help='Exact number of landmark points required on every annotation row.')
     return parser.parse_args()
 
 
 def main():
     """Open the viewer and resample on SPACE."""
     args = parse_args()
-    rows = read_mark_rows(args.mark_list_file)
+    if args.num_points < 1:
+        raise ValueError('--num-points must be at least 1.')
+
+    rows = read_mark_rows(args.mark_list_file, expected_points=args.num_points)
     viewer = TransformViewer(image_dir=args.image_dir, rows=rows, transform_name=args.transform)
     viewer.show_next()
     plt.show()

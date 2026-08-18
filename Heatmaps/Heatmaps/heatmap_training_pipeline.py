@@ -14,7 +14,7 @@ from pathlib import Path
 from . import parameters as pms
 from .model_registry import get_available_model_names, get_model_config_fields
 from .train_model import HeatmapDataConfig, HeatmapModelConfig, TrainConfig, TrainModel
-from .utils.io_utils import discover_fold_numbers, str_to_bool, validate_fold_split_overlaps
+from .utils.io_utils import discover_fold_numbers, discover_repetition_numbers, get_split_file_path, str_to_bool, validate_fold_split_overlaps, validate_repeated_kfold_lists
 
 RESULTS_DIR_NAME = 'TRAINING_RESULTS'
 MIN_POINTS_PER_IMAGE = 1
@@ -23,6 +23,7 @@ MAX_POINTS_PER_IMAGE = 30
 
 @dataclass
 class RunConfig:
+    repetition: int
     fold: int
     task_name: str
     num_of_points: int
@@ -31,10 +32,11 @@ class RunConfig:
     run_dir: Path
     save_dir: Path | None
     run_name: str
+    fold_collection_sha256: str
 
 
 class HeatmapTrainingPipeline:
-    """Run heatmap training and optional result copying for one fold."""
+    """Run heatmap training and optional result copying for one repetition and fold."""
 
     def __init__(self, run_config, data_config, train_config, model_config):
         self.run_config = run_config
@@ -64,19 +66,20 @@ class HeatmapTrainingPipeline:
 
     def train_model(self):
         """Train one heatmap model for the configured fold."""
-        self.print_section_start(f'Fold {self.run_config.fold} {self.run_config.task_name} training')
+        self.print_section_start(f'Repetition {self.run_config.repetition}, fold {self.run_config.fold} {self.run_config.task_name} training')
         start_time = dt.datetime.now()
         trainer = TrainModel(data_config=self.data_config, train_config=self.train_config, model_config=self.model_config, output_save_path=self.run_results_path)
         trainer.train(on_dataset_validated=self.prepare_validated_training_outputs)
         self.write_run_info()
         end_time = dt.datetime.now()
-        print(f'\tFold {self.run_config.fold} {self.run_config.task_name} training complete in {self.format_runtime(start_time, end_time)}.', flush=True)
+        print(f'\tRepetition {self.run_config.repetition}, fold {self.run_config.fold} {self.run_config.task_name} training complete in '
+              f'{self.format_runtime(start_time, end_time)}.', flush=True)
         print(f'\tRaw elapsed time: {end_time - start_time}', flush=True)
         self.print_section_end()
 
     def copy_files(self):
         """Copy run outputs to the optional save directory."""
-        self.print_section_start(f'Fold {self.run_config.fold} {self.run_config.task_name} copying outputs')
+        self.print_section_start(f'Repetition {self.run_config.repetition}, fold {self.run_config.fold} {self.run_config.task_name} copying outputs')
         start_time = dt.datetime.now()
         save_path = self.get_save_copy_path()
 
@@ -112,7 +115,8 @@ class HeatmapTrainingPipeline:
                 shutil.copy2(entry_path, destination_path)
 
         end_time = dt.datetime.now()
-        print(f'\tFold {self.run_config.fold} outputs copied in {self.format_runtime(start_time, end_time)}.', flush=True)
+        print(f'\tRepetition {self.run_config.repetition}, fold {self.run_config.fold} outputs copied in '
+              f'{self.format_runtime(start_time, end_time)}.', flush=True)
         print(f'\tRaw elapsed time: {end_time - start_time}', flush=True)
         self.print_section_end()
 
@@ -138,22 +142,22 @@ class HeatmapTrainingPipeline:
         if not self.run_config.train_model or not self.run_results_path.exists():
             return
 
-        fold = self.run_config.fold
         targets = [
-            self.run_results_path / f'model_f{fold}_best.pth',
-            self.run_results_path / f'model_f{fold}_last.pth',
-            self.run_results_path / f'checkpoint_summary_f{fold}.json',
-            self.run_results_path / f'train_log_f{fold}.csv',
-            self.run_results_path / f'train_plot_f{fold}.png',
-            self.run_results_path / f'run_info_{self.run_config.task_name}_f{fold}.json',
-            self.run_results_path / f'validation_results_F{fold}',
+            self.run_results_path / 'model_best_validation_loss.pth',
+            self.run_results_path / 'model_last_epoch.pth',
+            self.run_results_path / 'validation_checkpoint_summary.json',
+            self.run_results_path / 'training_validation_log.csv',
+            self.run_results_path / 'training_validation_plot.png',
+            self.run_results_path / 'run_info.json',
+            self.run_results_path / 'validation_results',
         ]
         existing_targets = [target for target in targets if target.exists()]
 
         if not existing_targets:
             return
 
-        print(f'\tExisting outputs found for fold {fold} in {self.run_results_path}. Clearing them before training.', flush=True)
+        print(f'\tExisting outputs found for repetition {self.run_config.repetition}, fold {self.run_config.fold} in '
+              f'{self.run_results_path}. Clearing them before training.', flush=True)
 
         for target in existing_targets:
             if target.is_dir():
@@ -165,11 +169,11 @@ class HeatmapTrainingPipeline:
 
     def write_run_info(self):
         """Write full run metadata."""
-        run_info = {'schema': 'heatmap_training_run_info', 'schema_version': 2, 'created_at': dt.datetime.now().isoformat(),
+        run_info = {'schema': 'heatmap_training_run_info', 'schema_version': 3, 'created_at': dt.datetime.now().isoformat(),
                     'run_results_root': self.run_results_root, 'run_results_path': self.run_results_path,
                     'save_copy_path': self.get_save_copy_path(), 'run_config': asdict(self.run_config), 'data_config': asdict(self.data_config),
                     'train_config': asdict(self.train_config), 'model_config': asdict(self.model_config)}
-        run_info_path = self.run_results_path / f'run_info_{self.run_config.task_name}_f{self.run_config.fold}.json'
+        run_info_path = self.run_results_path / 'run_info.json'
 
         with open(run_info_path, 'w', encoding='utf-8') as run_info_file:
             json.dump(run_info, run_info_file, indent=4, default=str)
@@ -182,25 +186,29 @@ class HeatmapTrainingPipeline:
         if self.run_config.save_dir is None:
             raise ValueError('save_dir must be supplied when copy_files is True.')
 
-        return self.run_config.save_dir / self.run_config.task_name / self.run_config.run_name
+        return (self.run_config.save_dir / self.run_config.task_name / self.run_config.run_name /
+                f'repetition_{self.run_config.repetition}' / f'fold_{self.run_config.fold}')
 
     def build_run_results_root(self):
         """Build the run-level results root."""
         return self.run_config.run_dir / RESULTS_DIR_NAME
 
     def build_run_results_path(self):
-        """Build the folder for this task and run name."""
-        return self.run_results_root / self.run_config.task_name / self.run_config.run_name
+        """Build the collision-safe leaf folder for one repetition and fold."""
+        return (self.run_results_root / self.run_config.task_name / self.run_config.run_name /
+                f'repetition_{self.run_config.repetition}' / f'fold_{self.run_config.fold}')
 
     def print_inputs(self):
         """Print the resolved pipeline settings."""
         self.print_section_start('Input arguments')
+        print(f'\tRepetition: {self.run_config.repetition}', flush=True)
         print(f'\tFold: {self.run_config.fold}', flush=True)
         print(f'\tTask name: {self.run_config.task_name}', flush=True)
         print(f'\tNumber of landmark points: {self.run_config.num_of_points}', flush=True)
         print(f'\tTrain model: {self.run_config.train_model}', flush=True)
         print(f'\tCopy files: {self.run_config.copy_files}', flush=True)
-        print(f'\tNumber of folds: {len(discover_fold_numbers(self.data_config.fold_lists_path))}', flush=True)
+        print(f'\tNumber of repetitions: {len(discover_repetition_numbers(self.data_config.fold_lists_path))}', flush=True)
+        print(f'\tFolds per repetition: {len(discover_fold_numbers(self.data_config.fold_lists_path, self.data_config.repetition))}', flush=True)
         print(f'\tImage size: {self.data_config.image_size}', flush=True)
         print(f'\tHeatmap sigma: {self.data_config.heatmap_sigma}', flush=True)
         print(f'\tOversampling factor: {self.data_config.oversampling_factor}', flush=True)
@@ -237,6 +245,7 @@ class HeatmapTrainingPipeline:
         print(f'\tRun results path: {self.run_results_path}', flush=True)
         print(f'\tSave copy path: {self.get_save_copy_path()}', flush=True)
         print(f'\tFold lists path: {self.data_config.fold_lists_path}', flush=True)
+        print(f'\tFold collection SHA-256: {self.run_config.fold_collection_sha256}', flush=True)
         print(f'\tMark list file: {self.data_config.mark_list_file}', flush=True)
         print(f'\tImage data dir: {self.data_config.image_data_dir}', flush=True)
         self.print_section_end()
@@ -271,12 +280,15 @@ def normalise_save_dir(args):
         raise ValueError('--save-dir must be supplied when COPY_FILES is true.')
 
 
-def validate_args(args, num_of_folds):
+def validate_args(args, num_of_repetitions, num_of_folds):
     """Validate numeric, path, split, training, and model terminal arguments."""
     normalise_save_dir(args)
 
     if not args.train_model and not args.copy_files:
         raise ValueError('At least one action must be enabled: TRAIN_MODEL or COPY_FILES.')
+
+    if args.repetition < 1 or args.repetition > num_of_repetitions:
+        raise ValueError(f'repetition must be between 1 and {num_of_repetitions}. Got repetition={args.repetition}.')
 
     if args.fold < 1 or args.fold > num_of_folds:
         raise ValueError(f'fold must be between 1 and {num_of_folds}. Got fold={args.fold}.')
@@ -337,6 +349,9 @@ def validate_args(args, num_of_folds):
     if args.lr_gamma <= 0:
         raise ValueError('--lr-gamma must be greater than 0.')
 
+    if args.lr_schedule == 'plateau' and args.lr_gamma >= 1:
+        raise ValueError('--lr-gamma must be less than 1 when --lr-schedule plateau is selected.')
+
     if args.early_stop_patience < 1:
         raise ValueError('--early-stop-patience must be at least 1.')
 
@@ -351,7 +366,7 @@ def validate_args(args, num_of_folds):
     if args.loss_name == 'bce_logits' and args.output_activation != 'none':
         raise ValueError('--loss-name bce_logits requires --output-activation none because BCEWithLogitsLoss expects raw logits.')
 
-    validate_fold_split_overlaps(fold_lists_path=args.fold_lists_path, fold=args.fold)
+    validate_fold_split_overlaps(fold_lists_path=args.fold_lists_path, repetition=args.repetition, fold=args.fold)
 
 
 def validate_model_args(args, image_height, image_width):
@@ -441,11 +456,31 @@ def format_number(value):
     return f'{value:g}'.replace('-', 'm').replace('.', 'p')
 
 
-def build_run_name(args, num_of_folds):
-    """Build a deterministic folder name shared by every fold in the same experiment."""
+def calculate_fold_collection_sha256(fold_lists_path, repetition_numbers, fold_numbers):
+    """Hash every active training/validation list so regenerated splits receive a new automatic run name."""
+    fold_lists_path = Path(fold_lists_path)
+    digest = hashlib.sha256()
+
+    for repetition in repetition_numbers:
+        for fold in fold_numbers:
+            for split_name in ('training', 'validation'):
+                split_path = get_split_file_path(fold_lists_path=fold_lists_path, repetition=repetition, split_name=split_name, fold=fold)
+                relative_name = split_path.relative_to(fold_lists_path).as_posix()
+                digest.update(relative_name.encode('utf-8'))
+                digest.update(b'\0')
+                digest.update(split_path.read_bytes())
+                digest.update(b'\0')
+
+    return digest.hexdigest()
+
+
+def build_run_name(args, num_of_repetitions, num_of_folds, fold_collection_sha256):
+    """Build a deterministic folder name shared by every repetition and fold in one experiment."""
     height, width = args.image_size
     fingerprint_payload = {
-        'num_of_folds': num_of_folds,
+        'num_of_repetitions': num_of_repetitions,
+        'num_of_folds_per_repetition': num_of_folds,
+        'fold_collection_sha256': fold_collection_sha256,
         'num_points': args.num_points,
         'image_size': list(args.image_size),
         'heatmap_sigma': args.heatmap_sigma,
@@ -474,7 +509,7 @@ def build_run_name(args, num_of_folds):
     }
     fingerprint_text = json.dumps(fingerprint_payload, sort_keys=True, separators=(',', ':'))
     fingerprint = hashlib.sha256(fingerprint_text.encode('utf-8')).hexdigest()[:12]
-    parts = ['heatmap', f'{num_of_folds}fold', f'{args.num_points}points', args.network_name, f'im{height}x{width}',
+    parts = ['heatmap', f'{num_of_repetitions}rep', f'{num_of_folds}fold', f'{args.num_points}points', args.network_name, f'im{height}x{width}',
              f'sigma{format_number(args.heatmap_sigma)}', f'loss{args.loss_name}', f'of{args.oversampling_factor}', f'bs{args.batch_size}',
              f'lr{format_number(args.learning_rate)}', f'cfg{fingerprint}']
     return clean_run_name('_'.join(parts))
@@ -505,7 +540,8 @@ def parse_args():
     parser = argparse.ArgumentParser(description='Train a heatmap landmark model using fold lists and mark-list annotations.',
                                      formatter_class=argparse.ArgumentDefaultsHelpFormatter)
 
-    parser.add_argument('fold', type=int, help='Fold number to train.')
+    parser.add_argument('repetition', type=int, help='Repeated k-fold repetition number to train.')
+    parser.add_argument('fold', type=int, help='Fold number within the selected repetition.')
     parser.add_argument('task_name', type=str, help='Task/output name, for example prostate_transverse.')
     parser.add_argument('train_model', type=str_to_bool, nargs='?', default=True, help='Train the model.')
     parser.add_argument('copy_files', type=str_to_bool, nargs='?', default=False, help='Copy results to save-dir after training.')
@@ -515,7 +551,8 @@ def parse_args():
     parser.add_argument('--run-name', type=str, default=None, help='Optional output-folder override. If omitted, a name is generated from settings.')
     parser.add_argument('--num-points', type=validate_num_points, required=True,
                         help=f'Number of landmarks per image, from {MIN_POINTS_PER_IMAGE} to {MAX_POINTS_PER_IMAGE}.')
-    parser.add_argument('--fold-lists-path', type=Path, required=True, help='Directory containing train_fN.txt, val_fN.txt, and test_fN.txt files.')
+    parser.add_argument('--fold-lists-path', type=Path, required=True,
+                        help='Root containing repetition_N directories with training_fN.txt and val_fN.txt files.')
     parser.add_argument('--mark-list-file', type=Path, required=True, help='Landmark mark-list file.')
     parser.add_argument('--image-data-dir', type=Path, required=True, help='Directory containing source images.')
     parser.add_argument('--image-size', type=int, nargs=2, required=True, metavar=('HEIGHT', 'WIDTH'),
@@ -583,18 +620,29 @@ def parse_args():
 
 def build_configs(args):
     """Build dataclass configurations from terminal arguments."""
-    fold_numbers = discover_fold_numbers(args.fold_lists_path)
+    repeated_kfold_info = validate_repeated_kfold_lists(args.fold_lists_path)
+    repetition_numbers = repeated_kfold_info['repetitions']
+    fold_numbers = repeated_kfold_info['folds']
+    num_of_repetitions = len(repetition_numbers)
     num_of_folds = len(fold_numbers)
+    fold_collection_sha256 = calculate_fold_collection_sha256(fold_lists_path=args.fold_lists_path,
+                                                               repetition_numbers=repetition_numbers, fold_numbers=fold_numbers)
+
+    if args.repetition not in repetition_numbers:
+        raise ValueError(f'Repetition {args.repetition} was requested, but available repetitions are {repetition_numbers}.')
 
     if args.fold not in fold_numbers:
         raise ValueError(f'Fold {args.fold} was requested, but available folds are {fold_numbers}.')
 
-    validate_args(args=args, num_of_folds=num_of_folds)
-    run_name = clean_run_name(args.run_name) if args.run_name else build_run_name(args=args, num_of_folds=num_of_folds)
+    validate_args(args=args, num_of_repetitions=num_of_repetitions, num_of_folds=num_of_folds)
+    run_name = clean_run_name(args.run_name) if args.run_name else build_run_name(
+        args=args, num_of_repetitions=num_of_repetitions, num_of_folds=num_of_folds, fold_collection_sha256=fold_collection_sha256)
     task_name = clean_task_name(args.task_name)
-    run_config = RunConfig(fold=args.fold, task_name=task_name, num_of_points=args.num_points, train_model=args.train_model, copy_files=args.copy_files,
-                           run_dir=args.run_dir, save_dir=args.save_dir, run_name=run_name)
-    data_config = HeatmapDataConfig(fold=args.fold, task_name=task_name, num_of_points=args.num_points, fold_lists_path=args.fold_lists_path,
+    run_config = RunConfig(repetition=args.repetition, fold=args.fold, task_name=task_name, num_of_points=args.num_points,
+                           train_model=args.train_model, copy_files=args.copy_files, run_dir=args.run_dir, save_dir=args.save_dir, run_name=run_name,
+                           fold_collection_sha256=fold_collection_sha256)
+    data_config = HeatmapDataConfig(repetition=args.repetition, fold=args.fold, task_name=task_name, num_of_points=args.num_points,
+                                    fold_lists_path=args.fold_lists_path,
                                     mark_list_file=args.mark_list_file, image_data_dir=args.image_data_dir, image_size=tuple(args.image_size),
                                     heatmap_sigma=args.heatmap_sigma, input_channels=None, recursive_image_search=args.recursive_image_search,
                                     oversampling_factor=args.oversampling_factor)

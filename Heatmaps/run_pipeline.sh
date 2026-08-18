@@ -7,6 +7,7 @@ FOLD_LISTS_DIR="$HOME/DATA/folds"
 MARK_LIST_FILE="$HOME/DATA/doctors_resampled_transverseMarkList.txt"
 IMAGE_DATA_DIR="$HOME/DATA/TRANSVERSE"
 
+REPETITION=1
 FOLD=1
 TASK_NAME="prostate_transverse"
 NUM_POINTS=4
@@ -72,7 +73,7 @@ VIT_DROPOUT=0.0
 VIT_DECODER_CHANNELS=256
 
 ARGS=(
-    "$FOLD" "$TASK_NAME" "$TRAIN_MODEL" "$COPY_FILES"
+    "$REPETITION" "$FOLD" "$TASK_NAME" "$TRAIN_MODEL" "$COPY_FILES"
     --run-dir "$RUN_DIR"
     --save-dir "$SAVE_DIR"
     --num-points "$NUM_POINTS"

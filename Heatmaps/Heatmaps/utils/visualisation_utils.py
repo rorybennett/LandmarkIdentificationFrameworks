@@ -98,8 +98,8 @@ def draw_points(image, points, colour, prefix):
 def save_validation_overlays(image_path, output_dir, output_stem, target_points, predicted_points, predicted_heatmaps):
     """Save heatmap and point overlays for one validation image."""
     output_dir = Path(output_dir)
-    heatmap_dir = output_dir / 'heatmap_overlays'
-    point_dir = output_dir / 'point_overlays'
+    heatmap_dir = output_dir / 'validation_heatmap_overlays'
+    point_dir = output_dir / 'validation_point_overlays'
     heatmap_dir.mkdir(exist_ok=True, parents=True)
     point_dir.mkdir(exist_ok=True, parents=True)
 

@@ -11,7 +11,7 @@ system, and paired with Gaussian target heatmaps generated from the supplied lan
 
 The package currently provides:
 
-- fold-based training and validation;
+- repeated k-fold training and validation;
 - configurable U-Net, HRNet, stacked-hourglass, and ViTPose heatmap regressors;
 - landmark-preserving image augmentation;
 - automatic greyscale, RGB, or RGBA input-channel detection;
@@ -20,8 +20,7 @@ The package currently provides:
 - validation predictions, endpoint metrics, heatmap overlays, and point overlays;
 - optional copying of a completed run to a separate save directory.
 
-Standalone held-out test evaluation, checkpoint resumption, and general-purpose inference are not yet included. Fold test lists are still required so that each fold
-definition can be checked for completeness and overlap.
+Checkpoint resumption and general-purpose inference are not yet included.
 
 The code targets Python 3.10 or later and PyTorch 2.4 or later. It does not contain legacy PyTorch-loading fallbacks or older command aliases.
 
@@ -44,12 +43,17 @@ Heatmaps/
     train_model.py
     utils/
       __init__.py
+      annotation_utils.py
       calculate_image_size.py
       generate_folds.py
       io_utils.py
       progress_bar.py
       verify_transforms.py
       visualisation_utils.py
+  tests/
+    test_annotation_utils.py
+    test_repeated_kfold.py
+    test_runtime_integration.py
 ```
 
 ## Installation
@@ -78,33 +82,41 @@ A training run requires:
 
 1. a source-image directory;
 2. a landmark mark-list file;
-3. train, validation, and test sample lists for each fold;
+3. repeated k-fold training and validation sample lists;
 4. a common training image size.
 
 ### Fold lists
 
-Fold files must use these names:
+Fold files are grouped by repetition and must use these names:
 
 ```text
 folds/
-  train_f1.txt
-  val_f1.txt
-  test_f1.txt
-  train_f2.txt
-  val_f2.txt
-  test_f2.txt
-  ...
+  repeated_kfold_summary.csv
+  repeated_kfold_membership.csv
+  repetition_1/
+    training_f1.txt
+    val_f1.txt
+    training_f2.txt
+    val_f2.txt
+    ...
+  repetition_2/
+    training_f1.txt
+    val_f1.txt
+    ...
 ```
 
 Each file contains one sample identifier per line. Entries may be stems such as `A1` or filenames such as `A1.jpg`.
 
-Before training, the selected fold is checked for:
+Before training, the complete repeated k-fold collection is checked for:
 
+- contiguous `repetition_N` directories;
+- identical contiguous fold numbers in every repetition;
+- the presence of `training_fN.txt` and `val_fN.txt` for every fold;
 - duplicate sample identifiers within a split;
-- overlap between training, validation, and test splits;
-- the presence of all three split files.
-
-The training workflow currently reads the training and validation lists. Test lists are reserved for later held-out evaluation.
+- overlap between the training and validation lists;
+- complete dataset coverage in every fold;
+- use of every sample as validation exactly once per repetition;
+- use of the same full dataset in every repetition.
 
 ### Landmark mark list
 
@@ -114,8 +126,8 @@ Each mark-list row contains an image name followed by landmark coordinates:
 A1.jpg (236, 214) (342, 271) (245, 354) (134, 291)
 ```
 
-Coordinates use `(x, y)` order, where `x` is horizontal and `y` is vertical. Every row must contain at least the number of points specified by `--num-points`. Additional
-points on a row are ignored.
+Coordinates use `(x, y)` order, where `x` is horizontal and `y` is vertical. Every row used by the selected repetition and fold must contain exactly the number of points
+specified by `--num-points`. Missing and additional points both cancel training; points are never silently discarded.
 
 Every selected landmark is checked against the resolved source image. For an image with width `W` and height `H`, each point must satisfy:
 
@@ -124,7 +136,8 @@ Every selected landmark is checked against the resolved source image. For an ima
 0 <= y < H
 ```
 
-The run stops with the sample, point number, coordinate, image path, and valid bounds when a landmark is invalid.
+The run stops with the sample, point number, coordinate, image path, and valid bounds when a landmark is invalid. Landmark-count errors identify the repetition, fold,
+split, patient/sample, annotation file, and source line. Complete annotation and image validation occurs before earlier outputs for that repetition and fold are removed.
 
 ### Source images
 
@@ -155,17 +168,31 @@ The utility at:
 Heatmaps/utils/generate_folds.py
 ```
 
-creates deterministic five-fold train, validation, and test lists with approximate 80/10/10 splits. Edit the top-level paths and switches, then run:
+creates deterministic repeated k-fold training and validation lists. Edit these top-level settings before running it:
+
+```text
+NUM_REPETITIONS
+NUM_FOLDS_PER_REPETITION
+BASE_SEED
+MARK_LIST_PATH
+OUTPUT_DIR
+CLEAN_OUTPUT_DIR
+```
+
+Each repetition starts from the full dataset, uses `BASE_SEED + repetition - 1`, builds balanced validation folds, and uses all remaining samples for training. Run:
 
 ```bash
 python -m Heatmaps.utils.generate_folds
 ```
 
+Regeneration replaces managed `repetition_N` directories and summary files. It also removes legacy flat `*_fN.txt`, `fold_summary.csv`, and `fold_membership.csv`
+artefacts from the selected output root; unrelated files are retained unless `CLEAN_OUTPUT_DIR` is enabled.
+
 It can also write:
 
 ```text
-fold_summary.csv
-fold_membership.csv
+repeated_kfold_summary.csv
+repeated_kfold_membership.csv
 ```
 
 ## Choosing an image size
@@ -208,7 +235,7 @@ The utility prints average and rounded dimensions together with a ready-to-use a
 The command format is:
 
 ```text
-heatmaps-train FOLD TASK_NAME TRAIN_MODEL COPY_FILES [OPTIONS]
+heatmaps-train REPETITION FOLD TASK_NAME TRAIN_MODEL COPY_FILES [OPTIONS]
 ```
 
 At least one of `TRAIN_MODEL` or `COPY_FILES` must be `true`.
@@ -216,7 +243,7 @@ At least one of `TRAIN_MODEL` or `COPY_FILES` must be `true`.
 A transverse prostate example is:
 
 ```bash
-heatmaps-train 1 prostate_transverse true false \
+heatmaps-train 1 1 prostate_transverse true false \
     --run-dir "$HOME/HEATMAP_TRAINING" \
     --num-points 4 \
     --fold-lists-path "$HOME/DATA/folds" \
@@ -236,13 +263,14 @@ The supplied `run_pipeline.sh` and `run_pipeline.ps1` files expose paths, action
 
 ## Training and copying actions
 
-`TRAIN_MODEL=true` trains the selected fold. Existing outputs belonging to that fold and run are cleared before training. Outputs from other folds in the same run
-directory are retained.
+`TRAIN_MODEL=true` trains the selected repetition and fold. Existing outputs belonging to that repetition/fold leaf are cleared only after complete training and
+validation annotation, image, channel, preprocessing, and target-heatmap validation. Outputs from every other repetition and fold are retained. A validation failure
+leaves existing results untouched.
 
-`COPY_FILES=true` copies the complete run directory to:
+`COPY_FILES=true` copies the selected repetition/fold output leaf to:
 
 ```text
-SAVE_DIR/TASK_NAME/RUN_NAME/
+SAVE_DIR/TASK_NAME/RUN_NAME/repetition_N/fold_N/
 ```
 
 When both actions are enabled, copying occurs after successful training.
@@ -311,7 +339,7 @@ The complete augmentation policy is stored in checkpoint metadata.
 Inspect transforms interactively with:
 
 ```bash
-python -m Heatmaps.utils.verify_transforms /path/to/images /path/to/points.txt default
+python -m Heatmaps.utils.verify_transforms /path/to/images /path/to/points.txt default --num-points 4
 ```
 
 Available transform names are:
@@ -371,6 +399,9 @@ This increases the contribution of landmark peak regions relative to the backgro
 The training CSV records the learning rate used during each epoch, not the rate prepared for the following epoch.
 
 Training stops immediately with a clear error when a reported loss or endpoint-error metric becomes NaN or infinite.
+
+Validation loss is primarily an internal control signal for learning-rate scheduling, early stopping, and best-checkpoint selection within one run. Cross-model validation
+losses must not be compared. Architecture-specific objectives can differ even when the exported final-heatmap endpoint errors use the same calculation.
 
 ## Model settings
 
@@ -434,6 +465,11 @@ on [Stacked Hourglass Networks for Human Pose Estimation](https://arxiv.org/abs/
 `--auxiliary-loss-weight` multiplies the mean loss from all non-final stacks before it is added to the final heatmap loss. Set it to `0` to disable intermediate
 supervision while retaining stack-to-stack feature feedback.
 
+For `stacked_hourglass`, both training loss and validation loss are the final-stack heatmap loss plus `auxiliary_loss_weight` multiplied by the mean loss from all non-final
+stacks. Other architectures report only their final-output loss. This is why validation-loss values must not be compared across architectures. The combined validation
+loss is used only within that stacked-hourglass run for the plateau scheduler, early stopping, and best-checkpoint selection; exported predictions and endpoint errors use
+the final stack only.
+
 ### ViTPose
 
 `vitpose` divides the image into patches, embeds them as tokens, applies a plain Vision Transformer to model long-range relationships, and uses a lightweight
@@ -493,31 +529,32 @@ Set the option to `false` to skip the complete validation export.
 Training outputs are written to:
 
 ```text
-RUN_DIR/TRAINING_RESULTS/TASK_NAME/RUN_NAME/
+RUN_DIR/TRAINING_RESULTS/TASK_NAME/RUN_NAME/repetition_N/fold_N/
 ```
 
 Typical outputs are:
 
 ```text
-model_f1_best.pth
-model_f1_last.pth
-checkpoint_summary_f1.json
-train_log_f1.csv
-train_plot_f1.png
-run_info_TASK_NAME_f1.json
-validation_results_F1/
+model_best_validation_loss.pth
+model_last_epoch.pth
+validation_checkpoint_summary.json
+training_validation_log.csv
+training_validation_plot.png
+run_info.json
+validation_results/
   validation_summary.xlsx
   validation_image_summary.csv
   validation_endpoints.csv
-  validation_predictions_f1.csv
-  heatmap_overlays/
-  point_overlays/
-  logs/
+  validation_predictions.csv
+  validation_heatmap_overlays/
+  validation_point_overlays/
+  validation_logs/
     validation_run_metadata.json
 ```
 
-The validation workbook contains `image_summary` and `endpoints` sheets. Ground-truth points are shown in green and predicted points in red on point overlays. Heatmap
-overlays show the combined model response and predicted endpoint labels.
+Every exported validation CSV row includes `dataset_split=validation`, repetition, and fold. The validation workbook contains `validation_image_summary` and
+`validation_endpoints` sheets. Ground-truth points are shown in green and predicted points in red on point overlays. Heatmap overlays show the combined model response and
+predicted endpoint labels.
 
 ## Checkpoints and metadata
 
@@ -532,7 +569,7 @@ epoch
 checkpoint_type
 state_dict
 optimiser_state_dict
-metrics
+validation_metrics
 metadata
 ```
 
@@ -550,21 +587,22 @@ training
 raw_configs
 ```
 
-It records the model registry entry, implementation module and class, reconstruction arguments, landmark count, input channels, image size, heatmap sigma, coordinate
-conventions, augmentation policy, training settings, and checkpoint metrics.
+It records the model registry entry, implementation module and class, reconstruction arguments, repetition, fold, landmark count, input channels, image size, heatmap
+sigma, coordinate conventions, augmentation policy, training settings, and explicitly named validation checkpoint metrics.
 
-`run_info_TASK_NAME_fN.json` contains the resolved run, data, training, and model configurations. It is rewritten after automatic channel detection so that the final
+`run_info.json` contains the resolved run, repetition, fold, data, training, and model configurations. It is rewritten after automatic channel detection so that the final
 metadata reflects the model that was actually trained.
 
 ## Run and task names
 
 `TASK_NAME` and `--run-name` are used as directory components. Unsupported characters are replaced with underscores, and empty cleaned names are rejected.
 
-When `--run-name` is omitted, the package creates a readable name containing the fold count, point count, model, image size, heatmap sigma, loss, oversampling factor,
-batch size, and learning rate. A 12-character SHA-256 configuration fingerprint is appended.
+When `--run-name` is omitted, the package creates a readable name containing the repetition count, folds per repetition, point count, model, image size, heatmap sigma,
+loss, oversampling factor, batch size, and learning rate. A 12-character SHA-256 configuration fingerprint is appended.
 
-The fingerprint includes all data-processing, optimisation, early-stopping, AMP, and model options that can affect the trained result. This prevents two materially
-different configurations from silently using the same automatically generated output directory.
+The fingerprint includes all data-processing, optimisation, early-stopping, AMP, and model options that can affect the trained result. It also includes a SHA-256 digest of
+every active training and validation list, so regenerated fold memberships do not silently reuse an earlier output directory. The complete fold-collection digest is
+stored in `run_info.json`.
 
-Dataset paths and file contents are not included in the fingerprint. Use a distinct `TASK_NAME` or explicit `--run-name` when training different datasets with otherwise
-identical settings.
+The annotation and image contents are not included in the fingerprint. Use a distinct `TASK_NAME` or explicit `--run-name` when training different datasets that use the
+same fold membership and otherwise identical settings.

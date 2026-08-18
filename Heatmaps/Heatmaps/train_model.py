@@ -38,8 +38,8 @@ def seed_worker(_worker_id):
     random.seed(worker_seed)
 
 
-CHECKPOINT_FORMAT_VERSION = 1
-CHECKPOINT_SCHEMA_VERSION = 1
+CHECKPOINT_FORMAT_VERSION = 2
+CHECKPOINT_SCHEMA_VERSION = 2
 CHECKPOINT_SCHEMA_NAME = 'heatmap_checkpoint_metadata'
 MIN_POINTS_PER_IMAGE = 1
 MAX_POINTS_PER_IMAGE = 30
@@ -47,6 +47,7 @@ MAX_POINTS_PER_IMAGE = 30
 
 @dataclass
 class HeatmapDataConfig:
+    repetition: int
     fold: int
     task_name: str
     num_of_points: int
@@ -140,7 +141,7 @@ class TrainModel:
         """Run the fold training workflow."""
         self.set_random_seed(self.train_config.random_seed)
         self.output_path.mkdir(exist_ok=True, parents=True)
-        train_loader, val_loader = self.build_data_loaders()
+        training_loader, validation_loader = self.build_data_loaders()
 
         if on_dataset_validated is not None:
             on_dataset_validated()
@@ -153,10 +154,10 @@ class TrainModel:
         history = self.empty_history()
         log_path = self.get_log_path()
         best_epoch = None
-        best_val_loss = float('inf')
-        early_stop_best_loss = float('inf')
+        best_validation_loss = float('inf')
+        early_stop_best_validation_loss = float('inf')
         last_epoch = 0
-        last_val_loss = None
+        last_validation_loss = None
         best_checkpoint_path = None
         last_checkpoint_path = None
         bad_epochs = 0
@@ -165,53 +166,57 @@ class TrainModel:
 
         with open(log_path, 'w', newline='', encoding='utf-8') as log_file:
             log_writer = csv.writer(log_file)
-            log_writer.writerow(['epoch', 'lr', 'train_loss', 'train_error_px', 'val_loss', 'val_error_px'])
+            log_writer.writerow(['epoch', 'lr', 'training_loss', 'training_error_px', 'validation_loss', 'validation_error_px'])
 
             for epoch in range(1, self.train_config.max_training_epochs + 1):
                 print(f"\t{dt.datetime.now().strftime('%d/%m/%Y %H:%M:%S')} - Epoch {epoch}/{self.train_config.max_training_epochs}", flush=True)
                 epoch_lr = self.get_current_lr(optimiser)
-                train_metrics = self.train_epoch(model=model, loader=train_loader, criterion=criterion, optimiser=optimiser, scaler=scaler)
-                val_metrics = self.validate(model=model, loader=val_loader, criterion=criterion)
-                self.validate_finite_metrics(phase='training', metrics=train_metrics)
-                self.validate_finite_metrics(phase='validation', metrics=val_metrics)
+                training_metrics = self.train_epoch(model=model, loader=training_loader, criterion=criterion, optimiser=optimiser, scaler=scaler)
+                validation_metrics = self.validate(model=model, loader=validation_loader, criterion=criterion)
+                self.validate_finite_metrics(phase='training', metrics=training_metrics)
+                self.validate_finite_metrics(phase='validation', metrics=validation_metrics)
 
                 if scheduler is not None:
-                    scheduler.step(val_metrics['loss']) if isinstance(scheduler, ReduceLROnPlateau) else scheduler.step()
+                    scheduler.step(validation_metrics['loss']) if isinstance(scheduler, ReduceLROnPlateau) else scheduler.step()
 
-                log_writer.writerow([epoch, epoch_lr, train_metrics['loss'], train_metrics['error_px'], val_metrics['loss'], val_metrics['error_px']])
+                log_writer.writerow([epoch, epoch_lr, training_metrics['loss'], training_metrics['error_px'], validation_metrics['loss'], validation_metrics['error_px']])
                 log_file.flush()
-                self.update_history(history=history, epoch=epoch, train_metrics=train_metrics, val_metrics=val_metrics)
+                self.update_history(history=history, epoch=epoch, training_metrics=training_metrics, validation_metrics=validation_metrics)
                 self.save_history_plot(history)
                 last_epoch = epoch
-                last_val_loss = val_metrics['loss']
-                last_checkpoint_path = self.save_checkpoint(model=model, optimiser=optimiser, checkpoint_type='last', epoch=epoch, metrics=val_metrics)
-                is_new_best = val_metrics['loss'] < best_val_loss
-                is_early_stop_improvement = val_metrics['loss'] < early_stop_best_loss - self.train_config.early_stop_min_delta
+                last_validation_loss = validation_metrics['loss']
+                last_checkpoint_path = self.save_checkpoint(model=model, optimiser=optimiser, checkpoint_type='last_epoch', epoch=epoch,
+                                                            validation_metrics=validation_metrics)
+                is_new_best = validation_metrics['loss'] < best_validation_loss
+                is_early_stop_improvement = validation_metrics['loss'] < early_stop_best_validation_loss - self.train_config.early_stop_min_delta
 
                 if is_new_best:
                     best_epoch = epoch
-                    best_val_loss = val_metrics['loss']
-                    best_checkpoint_path = self.save_checkpoint(model=model, optimiser=optimiser, checkpoint_type='best', epoch=epoch, metrics=val_metrics)
-                    print(f"\tNew best model saved from epoch {epoch} with val_loss={best_val_loss:.6f} and val_error={val_metrics['error_px']:.2f}px", flush=True)
+                    best_validation_loss = validation_metrics['loss']
+                    best_checkpoint_path = self.save_checkpoint(model=model, optimiser=optimiser, checkpoint_type='best_validation_loss', epoch=epoch,
+                                                                validation_metrics=validation_metrics)
+                    print(f"\tNew best model saved from epoch {epoch} with validation_loss={best_validation_loss:.6f} and "
+                          f"validation_error={validation_metrics['error_px']:.2f}px", flush=True)
 
                 if is_early_stop_improvement:
-                    early_stop_best_loss = val_metrics['loss']
+                    early_stop_best_validation_loss = validation_metrics['loss']
 
                 if epoch >= self.train_config.early_stop_warmup_epochs:
                     bad_epochs = 0 if is_early_stop_improvement else bad_epochs + 1
 
                     if bad_epochs >= self.train_config.early_stop_patience:
                         print(f'\tEarly stop: validation loss stopped improving by at least {self.train_config.early_stop_min_delta:g}. '
-                              f'Best checkpoint epoch: {best_epoch}; early-stop reference loss: {early_stop_best_loss:.6f}', flush=True)
+                              f'Best checkpoint epoch: {best_epoch}; early-stop reference loss: {early_stop_best_validation_loss:.6f}', flush=True)
                         break
 
         validation_output_paths = None
 
         if self.train_config.save_validation_predictions:
-            validation_output_paths = self.save_validation_predictions(model=model, val_loader=val_loader,
+            validation_output_paths = self.save_validation_predictions(model=model, validation_loader=validation_loader,
                                                                        checkpoint_path=best_checkpoint_path or last_checkpoint_path)
 
-        self.write_checkpoint_summary(best_epoch=best_epoch, last_epoch=last_epoch, best_val_loss=best_val_loss, last_val_loss=last_val_loss,
+        self.write_checkpoint_summary(best_epoch=best_epoch, last_epoch=last_epoch, best_validation_loss=best_validation_loss,
+                                      last_validation_loss=last_validation_loss,
                                       best_checkpoint_path=best_checkpoint_path, last_checkpoint_path=last_checkpoint_path,
                                       validation_output_paths=validation_output_paths)
         plt.clf()
@@ -269,7 +274,7 @@ class TrainModel:
 
         return self.format_metrics(loss=total_loss / max(len(loader.dataset), 1), error_px=total_error_px / max(total_points, 1))
 
-    def save_validation_predictions(self, model, val_loader, checkpoint_path):
+    def save_validation_predictions(self, model, validation_loader, checkpoint_path):
         """Save validation endpoint predictions using an IPV-like output layout."""
         if checkpoint_path is not None:
             self.load_checkpoint_state(model=model, checkpoint_path=checkpoint_path)
@@ -281,7 +286,7 @@ class TrainModel:
             print(f'\tExisting validation output directory found at {validation_output_path}. Clearing it before export.', flush=True)
             shutil.rmtree(validation_output_path)
 
-        logs_path = validation_output_path / 'logs'
+        logs_path = validation_output_path / 'validation_logs'
         validation_output_path.mkdir(exist_ok=True, parents=True)
         logs_path.mkdir(exist_ok=True, parents=True)
 
@@ -290,8 +295,8 @@ class TrainModel:
         prediction_rows = []
         checkpoint_type = self.get_checkpoint_type_from_path(checkpoint_path)
 
-        with torch.inference_mode(), ProgressBar(total=len(val_loader), label='Validation predictions') as progress_bar:
-            for batch in val_loader:
+        with torch.inference_mode(), ProgressBar(total=len(validation_loader), label='Validation predictions') as progress_bar:
+            for batch in validation_loader:
                 status = ', '.join(str(sample_name) for sample_name in list(batch['sample_name'])[:2])
                 progress_bar.set_status(status)
                 images = batch['image'].to(self.device, non_blocking=True)
@@ -326,30 +331,49 @@ class TrainModel:
                                                      endpoint_rows=endpoint_rows, prediction_rows=prediction_rows)
         self.write_validation_run_metadata(validation_output_path=validation_output_path, checkpoint_path=checkpoint_path, checkpoint_type=checkpoint_type,
                                            image_summary_rows=image_summary_rows, endpoint_rows=endpoint_rows, output_paths=output_paths)
-        print(f"\tValidation summary saved to {output_paths['summary_xlsx']}", flush=True)
+        print(f"\tValidation summary saved to {output_paths['validation_summary_xlsx']}", flush=True)
         return output_paths
 
     def build_data_loaders(self):
         """Build train and validation data loaders after resolving input channels."""
-        train_dataset = HeatmapDataset(self.build_dataset_config(split_name='train'))
-        val_dataset = HeatmapDataset(self.build_dataset_config(split_name='val'))
-        self.resolve_input_channels(train_dataset=train_dataset, val_dataset=val_dataset)
-        validated_train_records = train_dataset.validate_all_records()
-        validated_val_records = val_dataset.validate_all_records()
+        training_dataset = HeatmapDataset(self.build_dataset_config(split_name='training'))
+        validation_dataset = HeatmapDataset(self.build_dataset_config(split_name='validation'))
+        self.validate_dataset_coverage(training_dataset=training_dataset, validation_dataset=validation_dataset)
+        self.resolve_input_channels(training_dataset=training_dataset, validation_dataset=validation_dataset)
+        validated_training_records = training_dataset.validate_all_records()
+        validated_validation_records = validation_dataset.validate_all_records()
         generator = torch.Generator()
         generator.manual_seed(int(self.train_config.random_seed))
-        print(f'\tDataset validation complete: {validated_train_records} training and {validated_val_records} validation records.', flush=True)
-        print(f'	Train samples: {len(train_dataset)} ({len(train_dataset.records)} original, oversampling_factor={train_dataset.oversampling_factor}).', flush=True)
-        print(f'	Validation samples: {len(val_dataset)}.', flush=True)
-        train_loader = DataLoader(train_dataset, batch_size=self.train_config.batch_size, shuffle=True, num_workers=self.train_config.num_workers,
-                                  pin_memory=self.device.type == 'cuda', worker_init_fn=seed_worker, generator=generator)
-        val_loader = DataLoader(val_dataset, batch_size=self.train_config.batch_size, shuffle=False, num_workers=self.train_config.num_workers,
-                                pin_memory=self.device.type == 'cuda', worker_init_fn=seed_worker, generator=generator)
-        return train_loader, val_loader
+        print(f'\tDataset validation complete: {validated_training_records} training and {validated_validation_records} validation records.', flush=True)
+        print(f'\tTraining samples: {len(training_dataset)} ({len(training_dataset.records)} original, '
+              f'oversampling_factor={training_dataset.oversampling_factor}).', flush=True)
+        print(f'\tValidation samples: {len(validation_dataset)}.', flush=True)
+        training_loader = DataLoader(training_dataset, batch_size=self.train_config.batch_size, shuffle=True, num_workers=self.train_config.num_workers,
+                                     pin_memory=self.device.type == 'cuda', worker_init_fn=seed_worker, generator=generator)
+        validation_loader = DataLoader(validation_dataset, batch_size=self.train_config.batch_size, shuffle=False, num_workers=self.train_config.num_workers,
+                                       pin_memory=self.device.type == 'cuda', worker_init_fn=seed_worker, generator=generator)
+        return training_loader, validation_loader
 
-    def resolve_input_channels(self, train_dataset, val_dataset):
+    def validate_dataset_coverage(self, training_dataset, validation_dataset):
+        """Require the selected training and validation lists to cover the complete annotation dataset."""
+        annotation_samples = set(training_dataset.mark_records)
+        listed_samples = {record['sample_name'] for record in training_dataset.records} | {record['sample_name'] for record in validation_dataset.records}
+
+        if listed_samples == annotation_samples:
+            return
+
+        missing_from_lists = sorted(annotation_samples - listed_samples)
+        unexpected_in_lists = sorted(listed_samples - annotation_samples)
+        raise ValueError(
+            f'Dataset validation failed for repetition {self.data_config.repetition}, fold {self.data_config.fold}: training and validation lists must '
+            f'cover the complete annotation dataset. Missing from fold lists: {missing_from_lists}; not present in the annotation file: '
+            f'{unexpected_in_lists}. Training cancelled; existing outputs were not removed.'
+        )
+
+    def resolve_input_channels(self, training_dataset, validation_dataset):
         """Automatically resolve and validate image input channels before model construction."""
-        phase_counts = {'train': self.infer_dataset_channel_counts(train_dataset), 'val': self.infer_dataset_channel_counts(val_dataset)}
+        phase_counts = {'training': self.infer_dataset_channel_counts(training_dataset),
+                        'validation': self.infer_dataset_channel_counts(validation_dataset)}
         unique_source_channels = sorted({channel_count for counts in phase_counts.values() for channel_count in counts})
         counts_text = ', '.join(f'{phase}: {counts}' for phase, counts in phase_counts.items())
 
@@ -367,8 +391,8 @@ class TrainModel:
 
         resolved_channels = int(unique_source_channels[0])
         self.data_config.input_channels = resolved_channels
-        train_dataset.config.input_channels = resolved_channels
-        val_dataset.config.input_channels = resolved_channels
+        training_dataset.config.input_channels = resolved_channels
+        validation_dataset.config.input_channels = resolved_channels
 
         print(f'\tAutomatically detected {resolved_channels} input channel(s). Source channel counts: {counts_text}.', flush=True)
         return resolved_channels
@@ -389,7 +413,8 @@ class TrainModel:
 
     def build_dataset_config(self, split_name):
         """Build one dataset configuration."""
-        return HeatmapDatasetConfig(fold=self.data_config.fold, split_name=split_name, num_of_points=self.data_config.num_of_points,
+        return HeatmapDatasetConfig(repetition=self.data_config.repetition, fold=self.data_config.fold, split_name=split_name,
+                                    num_of_points=self.data_config.num_of_points,
                                     fold_lists_path=self.data_config.fold_lists_path, mark_list_file=self.data_config.mark_list_file,
                                     image_data_dir=self.data_config.image_data_dir, image_size=self.data_config.image_size, heatmap_sigma=self.data_config.heatmap_sigma,
                                     input_channels=self.data_config.input_channels, recursive_image_search=self.data_config.recursive_image_search,
@@ -478,13 +503,14 @@ class TrainModel:
         if invalid_metrics:
             raise FloatingPointError(f'Non-finite {phase} metric(s) detected: {invalid_metrics}')
 
-    def save_checkpoint(self, model, optimiser, checkpoint_type, epoch, metrics):
+    def save_checkpoint(self, model, optimiser, checkpoint_type, epoch, validation_metrics):
         """Save one model checkpoint with reconstruction-focused metadata."""
         checkpoint_path = self.get_checkpoint_path(checkpoint_type)
-        metadata = self.build_metadata(checkpoint_type=checkpoint_type, epoch=epoch, metrics=metrics)
+        labelled_validation_metrics = self.label_validation_metrics(validation_metrics)
+        metadata = self.build_metadata(checkpoint_type=checkpoint_type, epoch=epoch, validation_metrics=validation_metrics)
         torch.save({'format_version': CHECKPOINT_FORMAT_VERSION, 'schema': 'heatmap_training_checkpoint', 'schema_version': CHECKPOINT_SCHEMA_VERSION,
                     'created_at': dt.datetime.now().isoformat(), 'epoch': int(epoch), 'checkpoint_type': checkpoint_type, 'state_dict': model.state_dict(),
-                    'optimiser_state_dict': optimiser.state_dict(), 'metrics': metrics, 'metadata': metadata}, checkpoint_path)
+                    'optimiser_state_dict': optimiser.state_dict(), 'validation_metrics': labelled_validation_metrics, 'metadata': metadata}, checkpoint_path)
         return checkpoint_path
 
     def load_checkpoint_state(self, model, checkpoint_path):
@@ -499,15 +525,19 @@ class TrainModel:
         model.load_state_dict(state_dict)
         model.eval()
 
-    def write_checkpoint_summary(self, best_epoch, last_epoch, best_val_loss, last_val_loss, best_checkpoint_path, last_checkpoint_path, validation_output_paths):
-        """Write checkpoint and run metadata."""
-        validation_summary_path = None if validation_output_paths is None else validation_output_paths.get('summary_xlsx')
-        validation_predictions_path = None if validation_output_paths is None else validation_output_paths.get('predictions_csv')
-        summary = {'format_version': CHECKPOINT_FORMAT_VERSION, 'schema': 'heatmap_checkpoint_summary', 'schema_version': CHECKPOINT_SCHEMA_VERSION,
-                   'created_at': dt.datetime.now().isoformat(), 'fold': int(self.data_config.fold), 'task_name': self.data_config.task_name,
+    def write_checkpoint_summary(self, best_epoch, last_epoch, best_validation_loss, last_validation_loss, best_checkpoint_path, last_checkpoint_path,
+                                 validation_output_paths):
+        """Write validation-based checkpoint-selection and run metadata."""
+        validation_summary_path = None if validation_output_paths is None else validation_output_paths.get('validation_summary_xlsx')
+        validation_predictions_path = None if validation_output_paths is None else validation_output_paths.get('validation_predictions_csv')
+        summary = {'format_version': CHECKPOINT_FORMAT_VERSION, 'schema': 'heatmap_validation_checkpoint_summary',
+                   'schema_version': CHECKPOINT_SCHEMA_VERSION, 'created_at': dt.datetime.now().isoformat(),
+                   'repetition': int(self.data_config.repetition), 'fold': int(self.data_config.fold), 'task_name': self.data_config.task_name,
                    'num_of_points': int(self.data_config.num_of_points), 'checkpoints': {
-                'best': {'epoch': best_epoch, 'val_loss': best_val_loss, 'path': str(best_checkpoint_path) if best_checkpoint_path is not None else None},
-                'last': {'epoch': last_epoch, 'val_loss': last_val_loss, 'path': str(last_checkpoint_path) if last_checkpoint_path is not None else None}},
+                'best_validation_loss': {'epoch': best_epoch, 'validation_loss': best_validation_loss,
+                                         'path': str(best_checkpoint_path) if best_checkpoint_path is not None else None},
+                'last_epoch': {'epoch': last_epoch, 'validation_loss': last_validation_loss,
+                               'path': str(last_checkpoint_path) if last_checkpoint_path is not None else None}},
                    'validation_summary_path': str(validation_summary_path) if validation_summary_path is not None else None,
                    'validation_predictions_path': str(validation_predictions_path) if validation_predictions_path is not None else None,
                    'metadata': self.build_metadata()}
@@ -515,7 +545,7 @@ class TrainModel:
         with open(self.get_checkpoint_summary_path(), 'w', encoding='utf-8') as summary_file:
             json.dump(summary, summary_file, indent=4, default=str)
 
-    def build_metadata(self, checkpoint_type=None, epoch=None, metrics=None):
+    def build_metadata(self, checkpoint_type=None, epoch=None, validation_metrics=None):
         """Build serialisable checkpoint metadata using IPV-style sections."""
         data_config = self.serialise(asdict(self.data_config))
         train_config = self.serialise(asdict(self.train_config))
@@ -534,12 +564,15 @@ class TrainModel:
             'schema': CHECKPOINT_SCHEMA_NAME,
             'schema_version': CHECKPOINT_SCHEMA_VERSION,
             'created_at': dt.datetime.now().isoformat(),
-            'checkpoint': {'format_version': CHECKPOINT_FORMAT_VERSION, 'type': checkpoint_type, 'epoch': None if epoch is None else int(epoch), 'metrics': metrics},
-            'task': {'name': self.data_config.task_name, 'fold': int(self.data_config.fold), 'num_points': int(self.data_config.num_of_points),
+            'checkpoint': {'format_version': CHECKPOINT_FORMAT_VERSION, 'type': checkpoint_type, 'epoch': None if epoch is None else int(epoch),
+                           'validation_metrics': self.label_validation_metrics(validation_metrics)},
+            'task': {'name': self.data_config.task_name, 'repetition': int(self.data_config.repetition), 'fold': int(self.data_config.fold),
+                     'num_points': int(self.data_config.num_of_points),
                      'output_heads': int(self.data_config.num_of_points), 'prediction_type': 'landmark_heatmap_regression'},
             'model': {'registry_name': self.model_config.network_name, 'module': registry_entry['module'], 'class_name': registry_entry['class_name'],
                       'init_args': model_init_args},
-            'data': {'fold': int(self.data_config.fold), 'fold_lists_path': str(self.data_config.fold_lists_path),
+            'data': {'repetition': int(self.data_config.repetition), 'fold': int(self.data_config.fold),
+                     'fold_lists_path': str(self.data_config.fold_lists_path),
                      'mark_list_file': str(self.data_config.mark_list_file), 'image_data_dir': str(self.data_config.image_data_dir),
                      'recursive_image_search': bool(self.data_config.recursive_image_search), 'input_channels': input_channels},
             'preprocessing': {'image_size': {'height': image_height, 'width': image_width}, 'heatmap_sigma': float(self.data_config.heatmap_sigma),
@@ -555,10 +588,18 @@ class TrainModel:
             'raw_configs': {'data_config': data_config, 'train_config': train_config, 'model_config': model_config}
         }
 
+    @staticmethod
+    def label_validation_metrics(validation_metrics):
+        """Return externally stored validation metrics with unambiguous names."""
+        if validation_metrics is None:
+            return None
+
+        return {'validation_loss': float(validation_metrics['loss']), 'validation_error_px': float(validation_metrics['error_px'])}
+
     def build_augmentation_metadata(self):
         """Return the oversampling and augmentation policy stored in checkpoints."""
         oversampling_factor = int(self.data_config.oversampling_factor)
-        return {'enabled': oversampling_factor > 1, 'oversampling_factor': oversampling_factor, 'applies_to': 'train split only',
+        return {'enabled': oversampling_factor > 1, 'oversampling_factor': oversampling_factor, 'applies_to': 'training split only',
                 'policy': get_augmentation_policy()}
 
     @staticmethod
@@ -580,6 +621,12 @@ class TrainModel:
 
     def validate_configs(self):
         """Validate core configuration values."""
+        if int(self.data_config.repetition) < 1:
+            raise ValueError(f'repetition must be at least 1. Got: {self.data_config.repetition}')
+
+        if int(self.data_config.fold) < 1:
+            raise ValueError(f'fold must be at least 1. Got: {self.data_config.fold}')
+
         if int(self.data_config.num_of_points) < MIN_POINTS_PER_IMAGE or int(self.data_config.num_of_points) > MAX_POINTS_PER_IMAGE:
             raise ValueError(f'num_of_points must be between {MIN_POINTS_PER_IMAGE} and {MAX_POINTS_PER_IMAGE}. Got: {self.data_config.num_of_points}')
 
@@ -729,19 +776,19 @@ class TrainModel:
 
     def get_checkpoint_path(self, checkpoint_type):
         """Return a checkpoint path."""
-        return self.output_path / f'model_f{self.data_config.fold}_{checkpoint_type}.pth'
+        return self.output_path / f'model_{checkpoint_type}.pth'
 
     def get_checkpoint_summary_path(self):
-        """Return the checkpoint summary path."""
-        return self.output_path / f'checkpoint_summary_f{self.data_config.fold}.json'
+        """Return the validation checkpoint summary path."""
+        return self.output_path / 'validation_checkpoint_summary.json'
 
     def get_log_path(self):
-        """Return the training log path."""
-        return self.output_path / f'train_log_f{self.data_config.fold}.csv'
+        """Return the combined training and validation log path."""
+        return self.output_path / 'training_validation_log.csv'
 
     def get_plot_path(self):
-        """Return the training plot path."""
-        return self.output_path / f'train_plot_f{self.data_config.fold}.png'
+        """Return the combined training and validation plot path."""
+        return self.output_path / 'training_validation_plot.png'
 
 
     @staticmethod
@@ -752,16 +799,16 @@ class TrainModel:
     @staticmethod
     def empty_history():
         """Create the training history store."""
-        return {'epoch': [], 'train_loss': [], 'train_error_px': [], 'val_loss': [], 'val_error_px': []}
+        return {'epoch': [], 'training_loss': [], 'training_error_px': [], 'validation_loss': [], 'validation_error_px': []}
 
     @staticmethod
-    def update_history(history, epoch, train_metrics, val_metrics):
+    def update_history(history, epoch, training_metrics, validation_metrics):
         """Append one epoch to the training history."""
         history['epoch'].append(epoch)
-        history['train_loss'].append(train_metrics['loss'])
-        history['train_error_px'].append(train_metrics['error_px'])
-        history['val_loss'].append(val_metrics['loss'])
-        history['val_error_px'].append(val_metrics['error_px'])
+        history['training_loss'].append(training_metrics['loss'])
+        history['training_error_px'].append(training_metrics['error_px'])
+        history['validation_loss'].append(validation_metrics['loss'])
+        history['validation_error_px'].append(validation_metrics['error_px'])
 
     def save_history_plot(self, history):
         """Save loss and endpoint-error traces in the training plot."""
@@ -771,10 +818,10 @@ class TrainModel:
         plt.clf()
         figure, loss_axis = plt.subplots(figsize=(9, 5))
         error_axis = loss_axis.twinx()
-        loss_axis.plot(history['epoch'], history['train_loss'], label='train_loss')
-        loss_axis.plot(history['epoch'], history['val_loss'], label='val_loss')
-        error_axis.plot(history['epoch'], history['train_error_px'], linestyle='--', label='train_error_px')
-        error_axis.plot(history['epoch'], history['val_error_px'], linestyle='--', label='val_error_px')
+        loss_axis.plot(history['epoch'], history['training_loss'], label='training_loss')
+        loss_axis.plot(history['epoch'], history['validation_loss'], label='validation_loss')
+        error_axis.plot(history['epoch'], history['training_error_px'], linestyle='--', label='training_error_px')
+        error_axis.plot(history['epoch'], history['validation_error_px'], linestyle='--', label='validation_error_px')
         loss_axis.set_xlabel('Epoch')
         loss_axis.set_ylabel('Loss')
         error_axis.set_ylabel('Mean endpoint error (px)')
@@ -787,7 +834,7 @@ class TrainModel:
 
     def get_validation_output_path(self):
         """Return the validation output directory."""
-        return self.output_path / f'validation_results_F{self.data_config.fold}'
+        return self.output_path / 'validation_results'
 
     @staticmethod
     def get_checkpoint_type_from_path(checkpoint_path):
@@ -797,29 +844,29 @@ class TrainModel:
 
         name = Path(checkpoint_path).stem.lower()
 
-        if name.endswith('_best'):
-            return 'best'
+        if name == 'model_best_validation_loss':
+            return 'best_validation_loss'
 
-        if name.endswith('_last'):
-            return 'last'
+        if name == 'model_last_epoch':
+            return 'last_epoch'
 
         return None
 
-    @staticmethod
-    def create_image_summary_row(sample_name, image_path, image_height, image_width, point_errors, checkpoint_type=None):
+    def create_image_summary_row(self, sample_name, image_path, image_height, image_width, point_errors, checkpoint_type=None):
         """Create one image-level validation summary row."""
         point_errors = np.asarray(point_errors, dtype=np.float32)
-        return {'sample_name': sample_name, 'image_path': image_path, 'image_height': int(image_height), 'image_width': int(image_width),
+        return {'dataset_split': 'validation', 'repetition': int(self.data_config.repetition), 'fold': int(self.data_config.fold),
+                'sample_name': sample_name, 'image_path': image_path, 'image_height': int(image_height), 'image_width': int(image_width),
                 'num_points': int(point_errors.size), 'mean_error_px': float(np.mean(point_errors)), 'median_error_px': float(np.median(point_errors)),
                 'max_error_px': float(np.max(point_errors)), 'checkpoint_type': checkpoint_type}
 
-    @staticmethod
-    def create_endpoint_rows(sample_name, image_path, target_points, predicted_points, point_errors, checkpoint_type=None):
+    def create_endpoint_rows(self, sample_name, image_path, target_points, predicted_points, point_errors, checkpoint_type=None):
         """Create one endpoint-level validation row per landmark."""
         rows = []
 
         for point_index, (target, predicted, error) in enumerate(zip(target_points, predicted_points, point_errors), start=1):
-            rows.append({'sample_name': sample_name, 'image_path': image_path, 'point_index': point_index, 'target_x': float(target[0]),
+            rows.append({'dataset_split': 'validation', 'repetition': int(self.data_config.repetition), 'fold': int(self.data_config.fold),
+                         'sample_name': sample_name, 'image_path': image_path, 'point_index': point_index, 'target_x': float(target[0]),
                          'target_y': float(target[1]), 'pred_x': float(predicted[0]), 'pred_y': float(predicted[1]),
                          'error_px': float(error), 'checkpoint_type': checkpoint_type})
 
@@ -827,14 +874,14 @@ class TrainModel:
 
     def write_validation_outputs(self, validation_output_path, image_summary_rows, endpoint_rows, prediction_rows):
         """Write validation CSV and Excel outputs in an IPV-like format."""
-        output_paths = {'summary_xlsx': validation_output_path / 'validation_summary.xlsx',
-                        'image_summary_csv': validation_output_path / 'validation_image_summary.csv',
-                        'endpoints_csv': validation_output_path / 'validation_endpoints.csv',
-                        'predictions_csv': validation_output_path / f'validation_predictions_f{self.data_config.fold}.csv'}
-        self.write_rows_csv(output_paths['image_summary_csv'], image_summary_rows)
-        self.write_rows_csv(output_paths['endpoints_csv'], endpoint_rows)
-        self.write_rows_csv(output_paths['predictions_csv'], prediction_rows)
-        self.write_validation_workbook(output_paths['summary_xlsx'], image_summary_rows=image_summary_rows, endpoint_rows=endpoint_rows)
+        output_paths = {'validation_summary_xlsx': validation_output_path / 'validation_summary.xlsx',
+                        'validation_image_summary_csv': validation_output_path / 'validation_image_summary.csv',
+                        'validation_endpoints_csv': validation_output_path / 'validation_endpoints.csv',
+                        'validation_predictions_csv': validation_output_path / 'validation_predictions.csv'}
+        self.write_rows_csv(output_paths['validation_image_summary_csv'], image_summary_rows)
+        self.write_rows_csv(output_paths['validation_endpoints_csv'], endpoint_rows)
+        self.write_rows_csv(output_paths['validation_predictions_csv'], prediction_rows)
+        self.write_validation_workbook(output_paths['validation_summary_xlsx'], image_summary_rows=image_summary_rows, endpoint_rows=endpoint_rows)
         return output_paths
 
     @staticmethod
@@ -842,9 +889,9 @@ class TrainModel:
         """Write validation summaries to an Excel workbook matching the IPV sheet layout."""
         workbook = Workbook()
         image_sheet = workbook.active
-        image_sheet.title = 'image_summary'
+        image_sheet.title = 'validation_image_summary'
         TrainModel.write_rows_to_sheet(image_sheet, image_summary_rows)
-        endpoint_sheet = workbook.create_sheet('endpoints')
+        endpoint_sheet = workbook.create_sheet('validation_endpoints')
         TrainModel.write_rows_to_sheet(endpoint_sheet, endpoint_rows)
         workbook.save(output_xlsx)
 
@@ -873,20 +920,21 @@ class TrainModel:
 
     def write_validation_run_metadata(self, validation_output_path, checkpoint_path, checkpoint_type, image_summary_rows, endpoint_rows, output_paths):
         """Write validation run metadata."""
-        logs_path = validation_output_path / 'logs'
+        logs_path = validation_output_path / 'validation_logs'
         logs_path.mkdir(exist_ok=True, parents=True)
         metadata = {'schema': 'heatmap_validation_run_metadata', 'schema_version': CHECKPOINT_SCHEMA_VERSION, 'created_at': dt.datetime.now().isoformat(),
-                    'fold': int(self.data_config.fold), 'task_name': self.data_config.task_name, 'num_points': int(self.data_config.num_of_points),
+                    'dataset_split': 'validation', 'repetition': int(self.data_config.repetition), 'fold': int(self.data_config.fold),
+                    'task_name': self.data_config.task_name, 'num_points': int(self.data_config.num_of_points),
                     'image_count': len(image_summary_rows), 'endpoint_count': len(endpoint_rows), 'checkpoint_path': str(checkpoint_path) if checkpoint_path is not None else None,
                     'checkpoint_type': checkpoint_type, 'output_paths': {name: str(path) for name, path in output_paths.items()}, 'metadata': self.build_metadata()}
 
         with open(logs_path / 'validation_run_metadata.json', 'w', encoding='utf-8') as metadata_file:
             json.dump(metadata, metadata_file, indent=4, default=str)
 
-    @staticmethod
-    def create_prediction_row(sample_name, target_points, predicted_points, point_errors):
+    def create_prediction_row(self, sample_name, target_points, predicted_points, point_errors):
         """Create one prediction CSV row."""
-        row = {'sample_name': sample_name, 'mean_error_px': float(np.mean(point_errors))}
+        row = {'dataset_split': 'validation', 'repetition': int(self.data_config.repetition), 'fold': int(self.data_config.fold),
+               'sample_name': sample_name, 'mean_error_px': float(np.mean(point_errors))}
 
         for point_index, (target, predicted, error) in enumerate(zip(target_points, predicted_points, point_errors), start=1):
             row[f'target_x{point_index}'] = float(target[0])
