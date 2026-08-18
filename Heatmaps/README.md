@@ -93,6 +93,7 @@ Fold files are grouped by repetition and must use these names:
 folds/
   repeated_kfold_summary.csv
   repeated_kfold_membership.csv
+  test_cases.xlsx                 # only when fixed test cases are configured
   repetition_1/
     training_f1.txt
     val_f1.txt
@@ -105,7 +106,7 @@ folds/
     ...
 ```
 
-Each file contains one sample identifier per line. Entries may be stems such as `A1` or filenames such as `A1.jpg`.
+Each training and validation text file contains one sample identifier per line. Entries may be stems such as `A1` or filenames such as `A1.jpg`.
 
 Before training, the complete repeated k-fold collection is checked for:
 
@@ -114,9 +115,9 @@ Before training, the complete repeated k-fold collection is checked for:
 - the presence of `training_fN.txt` and `val_fN.txt` for every fold;
 - duplicate sample identifiers within a split;
 - overlap between the training and validation lists;
-- complete dataset coverage in every fold;
+- complete cross-validation-eligible dataset coverage in every fold;
 - use of every sample as validation exactly once per repetition;
-- use of the same full dataset in every repetition.
+- use of the same cross-validation-eligible dataset in every repetition.
 
 ### Landmark mark list
 
@@ -137,7 +138,9 @@ Every selected landmark is checked against the resolved source image. For an ima
 ```
 
 The run stops with the sample, point number, coordinate, image path, and valid bounds when a landmark is invalid. Landmark-count errors identify the repetition, fold,
-split, patient/sample, annotation file, and source line. Complete annotation and image validation occurs before earlier outputs for that repetition and fold are removed.
+split, patient/sample, annotation file, and source line. Complete annotation and image validation for the selected training and validation samples occurs before earlier
+outputs for that repetition and fold are removed. Annotation-only cases reserved by `TEST_SAMPLE_IDS` are parsed for sample identity and duplicate-stem checks, but are
+not included in either dataset; their images, landmark counts, coordinates, and preprocessing are not validated during training.
 
 ### Source images
 
@@ -174,26 +177,43 @@ creates deterministic repeated k-fold training and validation lists. Edit these 
 NUM_REPETITIONS
 NUM_FOLDS_PER_REPETITION
 BASE_SEED
+TEST_SAMPLE_IDS
 MARK_LIST_PATH
 OUTPUT_DIR
 CLEAN_OUTPUT_DIR
 ```
 
-Each repetition starts from the full dataset, uses `BASE_SEED + repetition - 1`, builds balanced validation folds, and uses all remaining samples for training. Run:
+`TEST_SAMPLE_IDS` reserves a fixed external test cohort before any folds are generated. Enter mark-list stems such as:
+
+```python
+TEST_SAMPLE_IDS = ['A4', 'A50', 'A8']
+```
+
+Use `TEST_SAMPLE_IDS = []` or `TEST_SAMPLE_IDS = None` to include every mark-list sample in repeated k-fold cross-validation. Configured IDs are checked for blanks,
+duplicates, and values missing from the mark list. Invalid configuration or too few remaining samples cancels generation before existing fold outputs are removed.
+
+Each repetition starts from the remaining cross-validation-eligible dataset, uses `BASE_SEED + repetition - 1`, builds balanced validation folds, and uses all other
+eligible samples for training. Run:
 
 ```bash
 python -m Heatmaps.utils.generate_folds
 ```
 
-Regeneration replaces managed `repetition_N` directories and summary files. It also removes legacy flat `*_fN.txt`, `fold_summary.csv`, and `fold_membership.csv`
-artefacts from the selected output root; unrelated files are retained unless `CLEAN_OUTPUT_DIR` is enabled.
+Regeneration replaces managed `repetition_N` directories, summary files, and any earlier `test_cases.xlsx` manifest only after the complete in-memory split collection is
+validated. It also removes legacy flat `*_fN.txt`, `fold_summary.csv`, and `fold_membership.csv` artefacts from the selected output root; unrelated files are retained
+unless `CLEAN_OUTPUT_DIR` is enabled.
 
 It can also write:
 
 ```text
 repeated_kfold_summary.csv
 repeated_kfold_membership.csv
+test_cases.xlsx
 ```
+
+`test_cases.xlsx` is created only for a non-empty `TEST_SAMPLE_IDS` list and records the held-out sample IDs in the output root beside the `repetition_N` directories.
+It is a manifest for later external MRI-reference evaluation only. Heatmaps training does not read it, and the generator does not create `test_fN.txt` files, a test
+loader, or test results.
 
 ## Choosing an image size
 

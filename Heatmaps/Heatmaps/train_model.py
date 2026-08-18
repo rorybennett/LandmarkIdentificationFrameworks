@@ -338,7 +338,7 @@ class TrainModel:
         """Build train and validation data loaders after resolving input channels."""
         training_dataset = HeatmapDataset(self.build_dataset_config(split_name='training'))
         validation_dataset = HeatmapDataset(self.build_dataset_config(split_name='validation'))
-        self.validate_dataset_coverage(training_dataset=training_dataset, validation_dataset=validation_dataset)
+        self.validate_dataset_membership(training_dataset=training_dataset, validation_dataset=validation_dataset)
         self.resolve_input_channels(training_dataset=training_dataset, validation_dataset=validation_dataset)
         validated_training_records = training_dataset.validate_all_records()
         validated_validation_records = validation_dataset.validate_all_records()
@@ -354,20 +354,19 @@ class TrainModel:
                                        pin_memory=self.device.type == 'cuda', worker_init_fn=seed_worker, generator=generator)
         return training_loader, validation_loader
 
-    def validate_dataset_coverage(self, training_dataset, validation_dataset):
-        """Require the selected training and validation lists to cover the complete annotation dataset."""
+    def validate_dataset_membership(self, training_dataset, validation_dataset):
+        """Require every selected training and validation sample to have an annotation record."""
         annotation_samples = set(training_dataset.mark_records)
         listed_samples = {record['sample_name'] for record in training_dataset.records} | {record['sample_name'] for record in validation_dataset.records}
+        unexpected_in_lists = sorted(listed_samples - annotation_samples)
 
-        if listed_samples == annotation_samples:
+        if not unexpected_in_lists:
             return
 
-        missing_from_lists = sorted(annotation_samples - listed_samples)
-        unexpected_in_lists = sorted(listed_samples - annotation_samples)
         raise ValueError(
-            f'Dataset validation failed for repetition {self.data_config.repetition}, fold {self.data_config.fold}: training and validation lists must '
-            f'cover the complete annotation dataset. Missing from fold lists: {missing_from_lists}; not present in the annotation file: '
-            f'{unexpected_in_lists}. Training cancelled; existing outputs were not removed.'
+            f'Dataset validation failed for repetition {self.data_config.repetition}, fold {self.data_config.fold}: training and validation lists contain '
+            f'sample IDs that are not present in the annotation file: {unexpected_in_lists}. Annotation-only samples may be deliberately held out, but '
+            f'every listed sample must have an annotation. Training cancelled; existing outputs were not removed.'
         )
 
     def resolve_input_channels(self, training_dataset, validation_dataset):

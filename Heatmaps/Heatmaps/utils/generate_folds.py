@@ -1,8 +1,9 @@
 """
 Create deterministic repeated k-fold training and validation lists from one mark-list file.
 
-Every repetition independently shuffles the full dataset, divides it into balanced validation folds, and uses the
-remaining samples for training. No separate evaluation split is created.
+An optional fixed test cohort can be excluded before cross-validation. Every repetition independently shuffles the
+remaining dataset, divides it into balanced validation folds, and uses all other eligible samples for training. The
+test cohort is recorded in an Excel manifest but is not written as a training-pipeline split.
 """
 
 import csv
@@ -11,13 +12,20 @@ import re
 import shutil
 from pathlib import Path
 
+from openpyxl import Workbook
+from openpyxl.styles import Font, PatternFill
+
 
 NUM_REPETITIONS = 3
 NUM_FOLDS_PER_REPETITION = 5
 BASE_SEED = 42
 
-MARK_LIST_PATH = Path(r'D:\Datasets\Heatmaps\OriginalData\doctors_resampled_transverseMarkList.txt')
-OUTPUT_DIR = Path(r'D:\GeneratedFiles\Heatmaps\folds')
+# Leave as [] or None to use every mark-list sample in repeated k-fold cross-validation.
+# Example: ['A4', 'A50', 'A8']
+TEST_SAMPLE_IDS = []
+
+MARK_LIST_PATH = Path(r'C:\Storage\Datasets\IPV\OriginalData\doctors_resampled_transverseMarkList.txt')
+OUTPUT_DIR = Path(r'C:\Storage\Datasets\IPV\OriginalData\folds_network_study')
 
 CLEAN_OUTPUT_DIR = False
 SORT_OUTPUT_FILES = True
@@ -29,6 +37,8 @@ TRAINING_PREFIX = 'training'
 VALIDATION_PREFIX = 'val'
 SUMMARY_FILE_NAME = 'repeated_kfold_summary.csv'
 MEMBERSHIP_FILE_NAME = 'repeated_kfold_membership.csv'
+TEST_CASES_WORKBOOK_NAME = 'test_cases.xlsx'
+TEST_CASES_SHEET_NAME = 'test_cases'
 REPETITION_DIR_PATTERN = re.compile(r'^repetition_(\d+)$')
 LEGACY_FOLD_FILE_PATTERN = re.compile(r'^[A-Za-z]+_f\d+\.txt$')
 LEGACY_SUMMARY_FILE_NAMES = ('fold_summary.csv', 'fold_membership.csv')
@@ -86,6 +96,48 @@ def load_unique_sample_ids(mark_list_path):
         raise ValueError(f'No sample IDs found in {mark_list_path}')
 
     return sorted(sample_ids, key=natural_key)
+
+
+def normalise_test_sample_ids(test_sample_ids, all_sample_ids, mark_list_path):
+    """Validate optional held-out test IDs and return naturally sorted mark-list stems."""
+    if test_sample_ids is None:
+        return []
+
+    if isinstance(test_sample_ids, (str, Path)):
+        raise ValueError('TEST_SAMPLE_IDS must be an iterable of sample IDs, not one bare string or path.')
+
+    try:
+        raw_sample_ids = list(test_sample_ids)
+    except TypeError as error:
+        raise ValueError('TEST_SAMPLE_IDS must be None or an iterable of sample ID strings.') from error
+
+    available_sample_set = set(all_sample_ids)
+    normalised_sample_ids = []
+
+    for index, raw_sample_id in enumerate(raw_sample_ids, start=1):
+        if not isinstance(raw_sample_id, (str, Path)):
+            raise ValueError(f'TEST_SAMPLE_IDS entry {index} must be a string or path. Got: {raw_sample_id!r}')
+
+        sample_text = str(raw_sample_id).strip()
+
+        if not sample_text:
+            raise ValueError(f'TEST_SAMPLE_IDS entry {index} is blank.')
+
+        sample_id = sample_text if sample_text in available_sample_set else Path(sample_text).stem
+
+        if not sample_id:
+            raise ValueError(f'TEST_SAMPLE_IDS entry {index} does not contain a valid sample ID: {raw_sample_id!r}')
+
+        normalised_sample_ids.append(sample_id)
+
+    check_duplicates(normalised_sample_ids, 'TEST_SAMPLE_IDS')
+    unknown_sample_ids = sorted(set(normalised_sample_ids) - available_sample_set, key=natural_key)
+
+    if unknown_sample_ids:
+        unknown_text = ', '.join(unknown_sample_ids)
+        raise ValueError(f'Test sample IDs were not found in mark-list file {mark_list_path}: {unknown_text}')
+
+    return sorted(normalised_sample_ids, key=natural_key)
 
 
 def validate_generation_args(sample_count, num_repetitions, num_folds):
@@ -154,7 +206,7 @@ def validate_kfold_splits(folds, all_sample_ids, repetition):
             raise ValueError(f'Repetition {repetition}, fold {fold_number} has training/validation overlap: {overlap_text}')
 
         if training_set | validation_set != all_sample_set:
-            raise ValueError(f'Repetition {repetition}, fold {fold_number} does not cover the full dataset.')
+            raise ValueError(f'Repetition {repetition}, fold {fold_number} does not cover the full cross-validation-eligible dataset.')
 
         if training_set != all_sample_set - validation_set:
             raise ValueError(f'Repetition {repetition}, fold {fold_number} training split is not the complement of its validation split.')
@@ -183,6 +235,24 @@ def create_repetitions(sample_ids, num_repetitions, num_folds, base_seed):
     return repetitions
 
 
+def validate_test_sample_exclusion(repetitions, test_sample_ids):
+    """Ensure held-out test IDs do not occur in any generated training or validation split."""
+    test_sample_set = set(test_sample_ids)
+
+    if not test_sample_set:
+        return
+
+    for repetition_data in repetitions:
+        for fold in repetition_data['folds']:
+            split_sample_set = set(fold['training']) | set(fold['validation'])
+            leaked_sample_ids = split_sample_set & test_sample_set
+
+            if leaked_sample_ids:
+                leaked_text = ', '.join(sorted(leaked_sample_ids, key=natural_key))
+                raise ValueError(f'Held-out test sample IDs leaked into repetition {repetition_data["repetition"]}, '
+                                 f'fold {fold["fold"]}: {leaked_text}')
+
+
 def prepare_output_dir(output_dir, clean_output_dir):
     """Prepare the root and remove stale fold artefacts managed by this generator."""
     output_dir = Path(output_dir)
@@ -196,11 +266,11 @@ def prepare_output_dir(output_dir, clean_output_dir):
         if child.is_dir() and REPETITION_DIR_PATTERN.fullmatch(child.name):
             shutil.rmtree(child)
 
-    for summary_name in (SUMMARY_FILE_NAME, MEMBERSHIP_FILE_NAME):
-        summary_path = output_dir / summary_name
+    for managed_file_name in (SUMMARY_FILE_NAME, MEMBERSHIP_FILE_NAME, TEST_CASES_WORKBOOK_NAME):
+        managed_file_path = output_dir / managed_file_name
 
-        if summary_path.exists():
-            summary_path.unlink()
+        if managed_file_path.exists():
+            managed_file_path.unlink()
 
     for child in output_dir.iterdir():
         if child.is_file() and (LEGACY_FOLD_FILE_PATTERN.fullmatch(child.name) or child.name in LEGACY_SUMMARY_FILE_NAMES):
@@ -232,21 +302,48 @@ def write_repetition_files(output_dir, repetitions):
             write_sample_list(repetition_dir / f'{VALIDATION_PREFIX}_f{fold_number}.txt', fold['validation'])
 
 
-def write_summary_csv(output_dir, repetitions, total_count):
+def write_test_cases_workbook(output_dir, test_sample_ids):
+    """Write a root-level Excel manifest for samples excluded from repeated k-fold cross-validation."""
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = TEST_CASES_SHEET_NAME
+    sheet.append(['sample_id', 'dataset_split', 'included_in_repeated_kfold'])
+
+    for sample_id in sorted(test_sample_ids, key=natural_key):
+        sheet.append([sample_id, 'test', False])
+
+    header_fill = PatternFill(fill_type='solid', fgColor='1F4E78')
+
+    for cell in sheet[1]:
+        cell.font = Font(bold=True, color='FFFFFF')
+        cell.fill = header_fill
+
+    sheet.freeze_panes = 'A2'
+    sheet.auto_filter.ref = f'A1:C{sheet.max_row}'
+    sheet.column_dimensions['A'].width = max(12, max(len(sample_id) for sample_id in test_sample_ids) + 2)
+    sheet.column_dimensions['B'].width = 16
+    sheet.column_dimensions['C'].width = 29
+    sheet.sheet_view.showGridLines = False
+    workbook.save(Path(output_dir) / TEST_CASES_WORKBOOK_NAME)
+
+
+def write_summary_csv(output_dir, repetitions, source_count, cross_validation_count, test_count):
     """Write repeated k-fold counts and fractions."""
     summary_path = Path(output_dir) / SUMMARY_FILE_NAME
 
     with open(summary_path, 'w', newline='', encoding='utf-8') as summary_file:
         writer = csv.writer(summary_file)
-        writer.writerow(['repetition', 'repetition_seed', 'fold', 'training_count', 'validation_count', 'training_fraction', 'validation_fraction'])
+        writer.writerow(['repetition', 'repetition_seed', 'fold', 'source_count', 'held_out_test_count', 'cross_validation_count',
+                         'training_count', 'validation_count', 'training_fraction', 'validation_fraction'])
 
         for repetition_data in repetitions:
             for fold in repetition_data['folds']:
                 training_count = len(fold['training'])
                 validation_count = len(fold['validation'])
                 writer.writerow([
-                    repetition_data['repetition'], repetition_data['seed'], fold['fold'], training_count, validation_count,
-                    round(training_count / total_count, 4), round(validation_count / total_count, 4),
+                    repetition_data['repetition'], repetition_data['seed'], fold['fold'], source_count, test_count, cross_validation_count,
+                    training_count, validation_count, round(training_count / cross_validation_count, 4),
+                    round(validation_count / cross_validation_count, 4),
                 ])
 
 
@@ -265,11 +362,13 @@ def write_membership_csv(output_dir, repetitions):
                         writer.writerow([repetition_data['repetition'], repetition_data['seed'], fold['fold'], split_name, sample_id])
 
 
-def print_summary(output_dir, repetitions, total_count, base_seed):
+def print_summary(output_dir, repetitions, source_count, cross_validation_count, test_count, base_seed):
     """Print repeated k-fold split counts to the terminal."""
     print('======================================================================================')
     print(f'Repeated k-fold output directory: {output_dir}')
-    print(f'Total samples: {total_count}')
+    print(f'Source samples: {source_count}')
+    print(f'Held-out test samples: {test_count}')
+    print(f'Cross-validation samples: {cross_validation_count}')
     print(f'Base seed: {base_seed}')
     print(f'Repetitions: {len(repetitions)}')
     print(f'Folds per repetition: {len(repetitions[0]["folds"])}')
@@ -283,36 +382,47 @@ def print_summary(output_dir, repetitions, total_count, base_seed):
             validation_count = len(fold['validation'])
             print(
                 f'  Fold {fold["fold"]}: '
-                f'training={training_count} ({training_count / total_count:.2%}), '
-                f'validation={validation_count} ({validation_count / total_count:.2%})'
+                f'training={training_count} ({training_count / cross_validation_count:.2%}), '
+                f'validation={validation_count} ({validation_count / cross_validation_count:.2%})'
             )
 
     print('======================================================================================')
 
 
-def create_repeated_kfold_lists(mark_list_path, output_dir, num_repetitions, num_folds, base_seed):
-    """Create all repeated k-fold list files from one mark list."""
-    sample_ids = load_unique_sample_ids(mark_list_path)
-    validate_generation_args(sample_count=len(sample_ids), num_repetitions=num_repetitions, num_folds=num_folds)
-    repetitions = create_repetitions(sample_ids=sample_ids, num_repetitions=num_repetitions, num_folds=num_folds, base_seed=base_seed)
+def create_repeated_kfold_lists(mark_list_path, output_dir, num_repetitions, num_folds, base_seed, test_sample_ids=None):
+    """Create repeated k-fold lists after optionally reserving a fixed external test cohort."""
+    all_sample_ids = load_unique_sample_ids(mark_list_path)
+    test_sample_ids = normalise_test_sample_ids(test_sample_ids=test_sample_ids, all_sample_ids=all_sample_ids,
+                                                mark_list_path=mark_list_path)
+    test_sample_set = set(test_sample_ids)
+    cross_validation_sample_ids = [sample_id for sample_id in all_sample_ids if sample_id not in test_sample_set]
+    validate_generation_args(sample_count=len(cross_validation_sample_ids), num_repetitions=num_repetitions, num_folds=num_folds)
+    repetitions = create_repetitions(sample_ids=cross_validation_sample_ids, num_repetitions=num_repetitions, num_folds=num_folds,
+                                     base_seed=base_seed)
+    validate_test_sample_exclusion(repetitions=repetitions, test_sample_ids=test_sample_ids)
 
     prepare_output_dir(output_dir=output_dir, clean_output_dir=CLEAN_OUTPUT_DIR)
     write_repetition_files(output_dir=output_dir, repetitions=repetitions)
 
+    if test_sample_ids:
+        write_test_cases_workbook(output_dir=output_dir, test_sample_ids=test_sample_ids)
+
     if WRITE_SUMMARY_CSV:
-        write_summary_csv(output_dir=output_dir, repetitions=repetitions, total_count=len(sample_ids))
+        write_summary_csv(output_dir=output_dir, repetitions=repetitions, source_count=len(all_sample_ids),
+                          cross_validation_count=len(cross_validation_sample_ids), test_count=len(test_sample_ids))
 
     if WRITE_MEMBERSHIP_CSV:
         write_membership_csv(output_dir=output_dir, repetitions=repetitions)
 
-    print_summary(output_dir=output_dir, repetitions=repetitions, total_count=len(sample_ids), base_seed=base_seed)
+    print_summary(output_dir=output_dir, repetitions=repetitions, source_count=len(all_sample_ids),
+                  cross_validation_count=len(cross_validation_sample_ids), test_count=len(test_sample_ids), base_seed=base_seed)
     return repetitions
 
 
 def main():
     """Run repeated k-fold generation using the configuration block."""
     create_repeated_kfold_lists(mark_list_path=MARK_LIST_PATH, output_dir=OUTPUT_DIR, num_repetitions=NUM_REPETITIONS,
-                                num_folds=NUM_FOLDS_PER_REPETITION, base_seed=BASE_SEED)
+                                num_folds=NUM_FOLDS_PER_REPETITION, base_seed=BASE_SEED, test_sample_ids=TEST_SAMPLE_IDS)
 
 
 if __name__ == '__main__':
