@@ -11,6 +11,7 @@ $NUM_POINTS = 4
 
 $TRAIN_MODEL = "true"
 $COPY_FILES = "false"
+$RESUME_TRAINING = "false"
 $RUN_NAME = ""
 
 $IMAGE_HEIGHT = 512
@@ -73,6 +74,7 @@ $Arguments = @(
     $REPETITION, $FOLD, $TASK_NAME, $TRAIN_MODEL, $COPY_FILES,
     "--run-dir", $RUN_DIR,
     "--save-dir", $SAVE_DIR,
+    "--resume-training", $RESUME_TRAINING,
     "--num-points", $NUM_POINTS,
     "--fold-lists-path", $FOLD_LISTS_DIR,
     "--mark-list-file", $MARK_LIST_FILE,

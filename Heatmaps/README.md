@@ -16,11 +16,11 @@ The package currently provides:
 - landmark-preserving image augmentation;
 - automatic greyscale, RGB, or RGBA input-channel detection;
 - deterministic seeding for Python, NumPy, PyTorch, and DataLoader workers;
-- best and last checkpoints with reconstruction metadata;
+- best checkpoints plus atomically committed last-epoch checkpoints that can continue interrupted training;
 - validation predictions, endpoint metrics, heatmap overlays, and point overlays;
 - optional copying of a completed run to a separate save directory.
 
-Checkpoint resumption and general-purpose inference are not yet included.
+General-purpose inference outside the training/validation workflow is not yet included.
 
 The code targets Python 3.10 or later and PyTorch 2.4 or later. It does not contain legacy PyTorch-loading fallbacks or older command aliases.
 
@@ -283,9 +283,12 @@ The supplied `run_pipeline.sh` and `run_pipeline.ps1` files expose paths, action
 
 ## Training and copying actions
 
-`TRAIN_MODEL=true` trains the selected repetition and fold. Existing outputs belonging to that repetition/fold leaf are cleared only after complete training and
+`TRAIN_MODEL=true` trains the selected repetition and fold. For a fresh run (`RESUME_TRAINING=false`), existing outputs belonging to that repetition/fold leaf are cleared only after complete training and
 validation annotation, image, channel, preprocessing, and target-heatmap validation. Outputs from every other repetition and fold are retained. A validation failure
 leaves existing results untouched.
+
+`RESUME_TRAINING=true` explicitly continues the same run from its `model_last_epoch.pth`. Resume mode never clears the fold output leaf. It first completes dataset
+validation, then validates the checkpoint schema and the complete compatibility signature before changing any saved output. `TRAIN_MODEL` must also be `true`.
 
 `COPY_FILES=true` copies the selected repetition/fold output leaf to:
 
@@ -306,6 +309,41 @@ The matching run directory must already exist. Copy-only operation does not crea
 and destination must be separate paths and must not contain one another.
 
 `--save-dir` is required only when `COPY_FILES=true`.
+
+### Resuming interrupted training
+
+Use the same repetition, fold, task, run name, data and training/model settings as the original command, and set:
+
+```text
+RESUME_TRAINING=true
+```
+
+or pass:
+
+```text
+--resume-training true
+```
+
+The option does not change the automatically generated run name. The pipeline resolves only the isolated checkpoint at:
+
+```text
+RUN_DIR/TRAINING_RESULTS/TASK_NAME/RUN_NAME/repetition_N/fold_N/model_last_epoch.pth
+```
+
+Resumption continues from the epoch after the last atomically committed epoch. If interruption occurs part-way through an epoch, that incomplete epoch is repeated. The
+checkpoint compatibility signature covers the selected training/validation lists and image contents, annotation file, repetition/fold, landmark and preprocessing settings, model
+constructor, optimiser, scheduler, early stopping, AMP, seed, workers, batch size, oversampling, active Heatmaps source code and relevant Python/PyTorch/CUDA runtime
+versions. A mismatch cancels resumption without deleting or rewriting existing
+outputs.
+
+If the final or early-stopping epoch was already committed but interruption occurred while writing the CSV, validation export, summary or run metadata, resume mode skips
+the optimiser loop and rebuilds those final outputs from the committed last/best state.
+
+The continuation checkpoint restores the model, optimiser, learning-rate scheduler, AMP scaler, best-loss state, early-stopping reference and counter, complete history,
+Python/NumPy/PyTorch/CUDA random-number states, and training/validation DataLoader generators. State-complete continuation assumes a compatible device and software environment;
+those versions are stored for audit. Deterministic PyTorch algorithms are enabled, cuDNN benchmarking and TF32 are disabled, and a deterministic cuBLAS workspace is
+configured; training stops with a PyTorch error if the selected environment has no deterministic implementation for a required operation. The best-validation-loss
+checkpoint is intended for prediction and reconstruction. Always resume from `model_last_epoch.pth`.
 
 ## Data and target-heatmap settings
 
@@ -417,6 +455,10 @@ This increases the contribution of landmark peak regions relative to the backgro
 `bce_logits` requires `--output-activation none` because `BCEWithLogitsLoss` expects raw logits.
 
 The training CSV records the learning rate used during each epoch, not the rate prepared for the following epoch.
+
+It also records UTC start/completion timestamps and training, validation and epoch-processing durations in seconds. The epoch duration runs from epoch start through
+validation and scheduler/control updates; checkpoint, plot and CSV output writes are excluded. Run metadata stores dataset-validation, model-setup/resume,
+validation-export and cumulative epoch timings, together with the termination reason and individual fresh/resumed execution sessions.
 
 Training stops immediately with a clear error when a reported loss or endpoint-error metric becomes NaN or infinite.
 
@@ -586,12 +628,29 @@ schema
 schema_version
 created_at
 epoch
+next_epoch
 checkpoint_type
+resume_capable
 state_dict
 optimiser_state_dict
 validation_metrics
 metadata
 ```
+
+`model_last_epoch.pth` additionally contains:
+
+```text
+scheduler_state_dict
+grad_scaler_state_dict
+training_state
+rng_state
+data_loader_generator_states
+best_model_state_dict
+resume_signature
+```
+
+The last checkpoint is written through a same-directory temporary file and atomic replacement. It is the commit record for the last completed epoch and embeds the
+corresponding best-model weights so the best checkpoint can be recovered if interruption occurs between the two checkpoint writes.
 
 The metadata contains these sections:
 
@@ -604,14 +663,21 @@ preprocessing
 inference
 augmentation
 training
+runtime_environment
+timing
 raw_configs
 ```
 
 It records the model registry entry, implementation module and class, reconstruction arguments, repetition, fold, landmark count, input channels, image size, heatmap
-sigma, coordinate conventions, augmentation policy, training settings, and explicitly named validation checkpoint metrics.
+sigma, coordinate conventions, augmentation policy, training settings, and explicitly named validation checkpoint metrics. A concrete checkpoint metadata block is written
+only when a concrete checkpoint is being described; run-level summary metadata does not contain null checkpoint placeholders.
+
+Runtime metadata includes framework version `0.1.0`, Python and operating-system information, dependency versions, the resolved compute device, AMP state, CUDA availability,
+PyTorch CUDA build, cuDNN version/settings, selected GPU name/index/compute capability/memory, NVIDIA driver when available, and Git commit/branch/dirty state when the source
+is inside a Git worktree.
 
 `run_info.json` contains the resolved run, repetition, fold, data, training, and model configurations. It is rewritten after automatic channel detection so that the final
-metadata reflects the model that was actually trained.
+metadata reflects the model that was actually trained. It also contains the current training status, termination reason, runtime environment, session history and timings.
 
 ## Run and task names
 

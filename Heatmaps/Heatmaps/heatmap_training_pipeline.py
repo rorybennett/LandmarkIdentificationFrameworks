@@ -33,6 +33,7 @@ class RunConfig:
     save_dir: Path | None
     run_name: str
     fold_collection_sha256: str
+    resume_training: bool = False
 
 
 class HeatmapTrainingPipeline:
@@ -45,6 +46,8 @@ class HeatmapTrainingPipeline:
         self.model_config = model_config
         self.run_results_root = self.build_run_results_root()
         self.run_results_path = self.build_run_results_path()
+        self.active_trainer = None
+        self.validated_outputs_prepared = False
 
     def run(self):
         """Run the requested pipeline stages."""
@@ -68,8 +71,17 @@ class HeatmapTrainingPipeline:
         """Train one heatmap model for the configured fold."""
         self.print_section_start(f'Repetition {self.run_config.repetition}, fold {self.run_config.fold} {self.run_config.task_name} training')
         start_time = dt.datetime.now()
-        trainer = TrainModel(data_config=self.data_config, train_config=self.train_config, model_config=self.model_config, output_save_path=self.run_results_path)
-        trainer.train(on_dataset_validated=self.prepare_validated_training_outputs)
+        trainer = TrainModel(data_config=self.data_config, train_config=self.train_config, model_config=self.model_config,
+                             output_save_path=self.run_results_path, resume_training=self.run_config.resume_training)
+        self.active_trainer = trainer
+
+        try:
+            trainer.train(on_dataset_validated=self.prepare_validated_training_outputs, on_training_state_ready=self.write_run_info)
+        except BaseException:
+            if self.validated_outputs_prepared or trainer.resume_state_validated:
+                self.write_run_info()
+            raise
+
         self.write_run_info()
         end_time = dt.datetime.now()
         print(f'\tRepetition {self.run_config.repetition}, fold {self.run_config.fold} {self.run_config.task_name} training complete in '
@@ -122,6 +134,14 @@ class HeatmapTrainingPipeline:
 
     def prepare_run_directories(self):
         """Prepare the run path for training or validate it for copy-only operation."""
+        if self.run_config.resume_training:
+            resume_checkpoint = self.run_results_path / 'model_last_epoch.pth'
+
+            if not resume_checkpoint.is_file():
+                raise ValueError(f'RESUME_TRAINING requires an existing last-epoch checkpoint: {resume_checkpoint}')
+
+            return
+
         self.run_results_root.mkdir(exist_ok=True, parents=True)
 
         if self.run_config.train_model:
@@ -133,23 +153,32 @@ class HeatmapTrainingPipeline:
 
     def prepare_validated_training_outputs(self):
         """Clear prior fold outputs only after complete dataset validation."""
+        if self.run_config.resume_training:
+            print(f'\tResume mode: preserving existing outputs in {self.run_results_path}.', flush=True)
+            return
+
         self.clear_existing_fold_outputs()
         self.run_results_path.mkdir(exist_ok=True, parents=True)
+        self.validated_outputs_prepared = True
         self.write_run_info()
 
     def clear_existing_fold_outputs(self):
         """Remove outputs from an earlier run of the requested fold without affecting other folds."""
-        if not self.run_config.train_model or not self.run_results_path.exists():
+        if not self.run_config.train_model or self.run_config.resume_training or not self.run_results_path.exists():
             return
 
         targets = [
             self.run_results_path / 'model_best_validation_loss.pth',
             self.run_results_path / 'model_last_epoch.pth',
+            self.run_results_path / '.model_best_validation_loss.pth.tmp',
+            self.run_results_path / '.model_last_epoch.pth.tmp',
             self.run_results_path / 'validation_checkpoint_summary.json',
             self.run_results_path / 'training_validation_log.csv',
             self.run_results_path / 'training_validation_plot.png',
             self.run_results_path / 'run_info.json',
             self.run_results_path / 'validation_results',
+            self.run_results_path / '.validation_results.tmp',
+            self.run_results_path / '.validation_results.backup',
         ]
         existing_targets = [target for target in targets if target.exists()]
 
@@ -169,11 +198,23 @@ class HeatmapTrainingPipeline:
 
     def write_run_info(self):
         """Write full run metadata."""
-        run_info = {'schema': 'heatmap_training_run_info', 'schema_version': 3, 'created_at': dt.datetime.now().isoformat(),
+        run_info_path = self.run_results_path / 'run_info.json'
+        created_at = dt.datetime.now(dt.timezone.utc).isoformat()
+
+        if run_info_path.is_file():
+            try:
+                created_at = json.loads(run_info_path.read_text(encoding='utf-8')).get('created_at', created_at)
+            except (OSError, ValueError, TypeError):
+                pass
+
+        training_report = self.active_trainer.get_run_report() if self.active_trainer is not None else None
+        runtime_environment = None if training_report is None else training_report.get('runtime_environment')
+        run_info = {'schema': 'heatmap_training_run_info', 'schema_version': 4, 'created_at': created_at,
+                    'updated_at': dt.datetime.now(dt.timezone.utc).isoformat(),
                     'run_results_root': self.run_results_root, 'run_results_path': self.run_results_path,
                     'save_copy_path': self.get_save_copy_path(), 'run_config': asdict(self.run_config), 'data_config': asdict(self.data_config),
-                    'train_config': asdict(self.train_config), 'model_config': asdict(self.model_config)}
-        run_info_path = self.run_results_path / 'run_info.json'
+                    'train_config': asdict(self.train_config), 'model_config': asdict(self.model_config),
+                    'runtime_environment': runtime_environment, 'training_run': training_report}
 
         with open(run_info_path, 'w', encoding='utf-8') as run_info_file:
             json.dump(run_info, run_info_file, indent=4, default=str)
@@ -206,6 +247,7 @@ class HeatmapTrainingPipeline:
         print(f'\tTask name: {self.run_config.task_name}', flush=True)
         print(f'\tNumber of landmark points: {self.run_config.num_of_points}', flush=True)
         print(f'\tTrain model: {self.run_config.train_model}', flush=True)
+        print(f'\tResume training: {self.run_config.resume_training}', flush=True)
         print(f'\tCopy files: {self.run_config.copy_files}', flush=True)
         print(f'\tNumber of repetitions: {len(discover_repetition_numbers(self.data_config.fold_lists_path))}', flush=True)
         print(f'\tFolds per repetition: {len(discover_fold_numbers(self.data_config.fold_lists_path, self.data_config.repetition))}', flush=True)
@@ -286,6 +328,9 @@ def validate_args(args, num_of_repetitions, num_of_folds):
 
     if not args.train_model and not args.copy_files:
         raise ValueError('At least one action must be enabled: TRAIN_MODEL or COPY_FILES.')
+
+    if args.resume_training and not args.train_model:
+        raise ValueError('--resume-training true requires TRAIN_MODEL=true.')
 
     if args.repetition < 1 or args.repetition > num_of_repetitions:
         raise ValueError(f'repetition must be between 1 and {num_of_repetitions}. Got repetition={args.repetition}.')
@@ -549,6 +594,8 @@ def parse_args():
     parser.add_argument('--run-dir', type=Path, required=True, help='Working directory for training outputs.')
     parser.add_argument('--save-dir', type=Path, default=None, help='Optional directory for copied final outputs.')
     parser.add_argument('--run-name', type=str, default=None, help='Optional output-folder override. If omitted, a name is generated from settings.')
+    parser.add_argument('--resume-training', type=str_to_bool, default=False,
+                        help='Continue this run from its model_last_epoch.pth after validating the dataset and checkpoint compatibility.')
     parser.add_argument('--num-points', type=validate_num_points, required=True,
                         help=f'Number of landmarks per image, from {MIN_POINTS_PER_IMAGE} to {MAX_POINTS_PER_IMAGE}.')
     parser.add_argument('--fold-lists-path', type=Path, required=True,
@@ -640,12 +687,12 @@ def build_configs(args):
     task_name = clean_task_name(args.task_name)
     run_config = RunConfig(repetition=args.repetition, fold=args.fold, task_name=task_name, num_of_points=args.num_points,
                            train_model=args.train_model, copy_files=args.copy_files, run_dir=args.run_dir, save_dir=args.save_dir, run_name=run_name,
-                           fold_collection_sha256=fold_collection_sha256)
+                           fold_collection_sha256=fold_collection_sha256, resume_training=args.resume_training)
     data_config = HeatmapDataConfig(repetition=args.repetition, fold=args.fold, task_name=task_name, num_of_points=args.num_points,
                                     fold_lists_path=args.fold_lists_path,
                                     mark_list_file=args.mark_list_file, image_data_dir=args.image_data_dir, image_size=tuple(args.image_size),
                                     heatmap_sigma=args.heatmap_sigma, input_channels=None, recursive_image_search=args.recursive_image_search,
-                                    oversampling_factor=args.oversampling_factor)
+                                    oversampling_factor=args.oversampling_factor, fold_collection_sha256=fold_collection_sha256)
     train_config = TrainConfig(batch_size=args.batch_size, learning_rate=args.learning_rate, max_training_epochs=args.max_training_epochs, num_workers=args.train_workers,
                                random_seed=args.random_seed, optimiser_name=args.optimiser_name, loss_name=args.loss_name, positive_weight=args.positive_weight,
                                weight_decay=args.weight_decay,

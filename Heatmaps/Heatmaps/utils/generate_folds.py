@@ -15,14 +15,14 @@ from pathlib import Path
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill
 
-
 NUM_REPETITIONS = 3
 NUM_FOLDS_PER_REPETITION = 5
 BASE_SEED = 42
 
 # Leave as [] or None to use every mark-list sample in repeated k-fold cross-validation.
 # Example: ['A4', 'A50', 'A8']
-TEST_SAMPLE_IDS = []
+TEST_SAMPLE_IDS = ['A303', 'A275', 'A270', 'A268', 'A259', 'A258', 'A257', 'A246', 'A243', 'A237', 'A235', 'A296', 'A230', 'A225', 'A222', 'A221', 'A217', 'A215', 'A242',
+                   'A207']
 
 MARK_LIST_PATH = Path(r'C:\Storage\Datasets\IPV\OriginalData\doctors_resampled_transverseMarkList.txt')
 OUTPUT_DIR = Path(r'C:\Storage\Datasets\IPV\OriginalData\folds_network_study')
