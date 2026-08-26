@@ -1,24 +1,50 @@
 import ast
 import csv
+import copy
 import datetime as dt
+import hashlib
 import json
+import os
+import random
+import shutil
+import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+os.environ.setdefault('CUBLAS_WORKSPACE_CONFIG', ':4096:8')
+
+import matplotlib
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
+import numpy as np
 import torch
 from torch import nn
-from torch.optim import SGD
-from torch.optim.lr_scheduler import StepLR
+from torch.optim import AdamW, SGD
+from torch.optim.lr_scheduler import ReduceLROnPlateau, StepLR
 from torch.utils.data import DataLoader
 
 from .custom_dataset import CustomDataset, ToTensor
-from .utils.landmark_inference_utils import LandmarkInferenceConfig, run_validation_inference_for_trained_model
+from .runtime_metadata import collect_runtime_metadata, utc_now_iso
+from .utils.landmark_inference_utils import (LandmarkInferenceConfig, accumulate_votes, detect_points, load_input_image,
+                                             read_mark_list, run_validation_inference_for_trained_model)
 
 MIN_POINTS_PER_IMAGE = 1
 MAX_POINTS_PER_IMAGE = 30
 CSV_METADATA_COLUMNS = 5
-CHECKPOINT_FORMAT_VERSION = 1
+CHECKPOINT_FORMAT_VERSION = 2
+CHECKPOINT_SCHEMA_VERSION = 2
+HISTORY_FIELDS = (
+    'epoch', 'epoch_started_at', 'epoch_completed_at', 'lr', 'training_loss', 'training_accuracy',
+    'validation_loss', 'validation_accuracy', 'validation_error_px', 'training_duration_seconds',
+    'validation_duration_seconds', 'epoch_duration_seconds',
+)
+
+
+def seed_worker(_worker_id):
+    """Seed NumPy and Python RNGs inside a DataLoader worker."""
+    worker_seed = torch.initial_seed() % 2**32
+    np.random.seed(worker_seed)
+    random.seed(worker_seed)
 
 
 @dataclass
@@ -36,124 +62,237 @@ class TrainConfig:
     batch_size: int
     learning_rate: float
     max_training_epochs: int
-    loss_print_interval: int
     num_workers: int = 8
+    random_seed: int = 42
+    optimiser_name: str = 'adamw'
+    weight_decay: float = 1e-4
     momentum: float = 0.9
-    lr_schedule: bool = False
-    lr_step_size: int = 1
-    lr_gamma: float = 0.1
-    early_stop_patience: int = 5
-    early_stop_min_delta: float = 0.001
-    early_stop_warmup_epochs: int = 3
+    lr_schedule: str = 'plateau'
+    lr_step_size: int = 20
+    lr_gamma: float = 0.5
+    early_stop_patience: int = 15
+    early_stop_min_delta: float = 1e-4
+    early_stop_warmup_epochs: int = 10
+    use_amp: bool = False
     save_validation_results: bool = True
     validation_inference_batch_size: int = 2048
     validation_vote_smoothing_sigma: float = 7.0
+    validation_use_probability_weights: bool = True
     validation_save_raw_vote_maps: bool = False
 
 
 class TrainModel:
-    def __init__(self, current_fold, num_of_points, data_save_path, tasks_classes, train_config, quadruplet_config, output_save_path=None, device=None):
-        self.fold = current_fold
-        self.num_of_points = num_of_points
+    def __init__(self, repetition, current_fold, num_of_points, data_save_path, tasks_classes, train_config, quadruplet_config,
+                 output_save_path=None, device=None, fold_collection_sha256=None, resume_training=False):
+        self.repetition = int(repetition)
+        self.fold = int(current_fold)
+        self.num_of_points = int(num_of_points)
         self.train_path = Path(data_save_path)
         self.output_path = Path(output_save_path) if output_save_path is not None else self.train_path
         self.tasks_classes = tasks_classes
         self.train_config = train_config
         self.quadruplet_config = quadruplet_config
-        self.device = device or torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.device = torch.device(device) if device is not None else torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.fold_collection_sha256 = fold_collection_sha256
+        self.resume_training = bool(resume_training)
         self.validate_num_of_points(self.num_of_points)
         self.validate_tasks_classes_structure(self.tasks_classes)
         self.tasks_per_point = len(self.tasks_classes)
         self.expected_label_count = self.num_of_points * self.tasks_per_point
         self.input_channels = None
         self.num_of_classes = [len(task_classes) for _ in range(self.num_of_points) for task_classes in self.tasks_classes]
+        self.runtime_metadata = None
+        self.training_status = 'initialising'
+        self.termination_reason = None
+        self.failure = None
+        self.workflow_started_at = None
+        self.workflow_completed_at = None
+        self.workflow_start_perf = None
+        self.workflow_duration_seconds = None
+        self.dataset_validation_duration_seconds = 0.0
+        self.model_setup_duration_seconds = 0.0
+        self.validation_export_duration_seconds = 0.0
+        self.training_generator = None
+        self.validation_generator = None
+        self.history = self.empty_history()
+        self.validate_configs()
 
-    def train(self):
-        """Run training for one fold."""
-        self.validate_training_inputs()
-        self.output_path.mkdir(exist_ok=True, parents=True)
-        train_loader, val_loader = self.build_data_loaders()
-        self.input_channels = self.resolve_input_channels(train_loader.dataset, val_loader.dataset)
-        model = self.build_model(input_channels=self.input_channels)
-        criterion = nn.CrossEntropyLoss()
-        optimiser = SGD(model.parameters(), lr=self.train_config.learning_rate, momentum=self.train_config.momentum)
-        scheduler = StepLR(optimiser, step_size=self.train_config.lr_step_size, gamma=self.train_config.lr_gamma) if self.train_config.lr_schedule else None
+    def train(self, on_dataset_validated=None, on_training_state_ready=None):
+        """Run or explicitly resume deterministic training for one repetition and fold."""
+        self.workflow_started_at = utc_now_iso()
+        self.workflow_start_perf = time.perf_counter()
+        self.set_random_seed(self.train_config.random_seed)
+        self.runtime_metadata = collect_runtime_metadata(self.device, self.train_config.use_amp)
 
-        history = self.empty_history()
-        previous_val_accuracy = None
-        log_path = self.get_log_path()
+        try:
+            self.output_path.mkdir(exist_ok=True, parents=True)
+            validation_start = time.perf_counter()
+            self.validate_training_inputs()
+            train_loader, val_loader = self.build_data_loaders()
+            self.input_channels = self.resolve_input_channels(train_loader.dataset, val_loader.dataset)
+            self.dataset_validation_duration_seconds = time.perf_counter() - validation_start
+            self.training_status = 'dataset_validated'
 
-        best_epoch = None
-        last_epoch = 0
-        best_val_loss = float('inf')
-        last_val_loss = None
-        best_checkpoint_path = None
-        last_checkpoint_path = None
-        bad_epochs = 0
+            if on_dataset_validated is not None:
+                on_dataset_validated()
 
-        print('\tData loaded...', flush=True)
-        print(f'\tNetwork loaded on {self.device}. Training network...', flush=True)
+            setup_start = time.perf_counter()
+            model = self.build_model(input_channels=self.input_channels)
+            criterion = nn.CrossEntropyLoss()
+            optimiser = self.build_optimiser(model)
+            scheduler = self.build_scheduler(optimiser)
+            scaler = torch.amp.GradScaler('cuda', enabled=self.train_config.use_amp and self.device.type == 'cuda')
+            resume_signature = self.build_resume_signature()
+            history = self.empty_history()
+            best_epoch = None
+            best_metrics = None
+            last_epoch = 0
+            last_metrics = None
+            best_checkpoint_path = None
+            last_checkpoint_path = None
+            best_model_state_dict = None
+            early_stop_best_validation_loss = float('inf')
+            bad_epochs = 0
+            start_epoch = 1
+            saved_termination_reason = None
 
-        with open(log_path, 'w', newline='', encoding='utf-8') as log_file:
-            log_writer = csv.writer(log_file)
-            log_writer.writerow(['lr', 'epoch', 'step', 'train_loss', 'train_accuracy', 'val_loss', 'val_accuracy'])
+            if self.resume_training:
+                state = self.load_training_checkpoint(model, optimiser, scheduler, scaler, resume_signature)
+                history = state['history']
+                best_epoch = state['best_epoch']
+                best_metrics = state['best_metrics']
+                last_epoch = state['completed_epoch']
+                last_metrics = state['last_metrics']
+                best_model_state_dict = state['best_model_state_dict']
+                early_stop_best_validation_loss = state['early_stop_best_validation_loss']
+                bad_epochs = state['bad_epochs']
+                start_epoch = last_epoch + 1
+                saved_termination_reason = state['termination_reason']
+                best_checkpoint_path = self.get_checkpoint_path('best_validation_loss')
+                last_checkpoint_path = self.get_checkpoint_path('last_epoch')
+                self.ensure_best_checkpoint(best_checkpoint_path, best_epoch, best_metrics, best_model_state_dict)
 
-            for epoch in range(1, self.train_config.max_training_epochs + 1):
+            self.model_setup_duration_seconds = time.perf_counter() - setup_start
+            self.training_status = 'running'
+            self.history = history
+            self.write_history_log(history)
+            self.save_history_plot(history)
+
+            if on_training_state_ready is not None:
+                on_training_state_ready()
+
+            print('\tData loaded...', flush=True)
+            print(f'\tNetwork loaded on {self.device}. Training network...', flush=True)
+
+            if self.resume_training:
+                print(f'\tResuming after completed epoch {last_epoch}.', flush=True)
+
+            epochs = (() if saved_termination_reason in ('early_stopping', 'max_epochs_reached')
+                      else range(start_epoch, self.train_config.max_training_epochs + 1))
+
+            for epoch in epochs:
+                epoch_started_at = utc_now_iso()
+                epoch_start = time.perf_counter()
+                epoch_lr = self.get_current_lr(optimiser)
                 print(f"\t{dt.datetime.now().strftime('%d/%m/%Y %H:%M:%S')} - Epoch {epoch}/{self.train_config.max_training_epochs}", flush=True)
 
-                epoch_result = self.train_epoch(model, train_loader, val_loader, criterion, optimiser, log_writer, history, epoch)
+                self.synchronise_device()
+                training_start = time.perf_counter()
+                training_metrics = self.train_epoch(model, train_loader, criterion, optimiser, scaler)
+                self.synchronise_device()
+                training_duration = time.perf_counter() - training_start
 
-                if scheduler is not None and previous_val_accuracy is not None and epoch_result['val_accuracy'] < previous_val_accuracy:
-                    scheduler.step()
+                validation_start = time.perf_counter()
+                validation_metrics = self.validate(model, val_loader, criterion)
+                self.synchronise_device()
+                validation_duration = time.perf_counter() - validation_start
+                self.validate_finite_metrics('training', training_metrics)
+                self.validate_finite_metrics('validation', validation_metrics)
 
-                previous_val_accuracy = epoch_result['val_accuracy']
-                last_epoch = epoch
-                last_val_loss = epoch_result['val_loss']
-                last_checkpoint_path = self.save_checkpoint(model=model, checkpoint_type='last', epoch=epoch, metrics=epoch_result)
+                if scheduler is not None:
+                    scheduler.step(validation_metrics['loss']) if isinstance(scheduler, ReduceLROnPlateau) else scheduler.step()
 
-                previous_best_val_loss = best_val_loss
-                is_new_best = epoch_result['val_loss'] < best_val_loss
-                is_early_stop_improvement = epoch_result['val_loss'] < best_val_loss - self.train_config.early_stop_min_delta
+                is_new_best = best_metrics is None or validation_metrics['loss'] < best_metrics['loss']
+                is_early_stop_improvement = validation_metrics['loss'] < early_stop_best_validation_loss - self.train_config.early_stop_min_delta
 
                 if is_new_best:
                     best_epoch = epoch
-                    best_val_loss = epoch_result['val_loss']
-                    best_checkpoint_path = self.save_checkpoint(model=model, checkpoint_type='best', epoch=epoch, metrics=epoch_result)
-                    print(f"\tNew best model saved from epoch {epoch} with val_loss={best_val_loss:.6f}", flush=True)
+                    best_metrics = dict(validation_metrics)
+                    best_model_state_dict = self.clone_state_dict_to_cpu(model.state_dict())
 
-                self.save_history_plot(history)
+                if is_early_stop_improvement:
+                    early_stop_best_validation_loss = validation_metrics['loss']
 
                 if epoch >= self.train_config.early_stop_warmup_epochs:
-                    if is_early_stop_improvement:
-                        bad_epochs = 0
-                    else:
-                        bad_epochs += 1
+                    bad_epochs = 0 if is_early_stop_improvement else bad_epochs + 1
 
-                    if bad_epochs >= self.train_config.early_stop_patience:
-                        print(f"\tEarly stop: validation loss stopped improving. Best val loss: {previous_best_val_loss:.6f}", flush=True)
-                        break
+                should_stop = epoch >= self.train_config.early_stop_warmup_epochs and bad_epochs >= self.train_config.early_stop_patience
+                epoch_reason = 'early_stopping' if should_stop else ('max_epochs_reached' if epoch >= self.train_config.max_training_epochs else 'in_progress')
+                last_epoch = epoch
+                last_metrics = dict(validation_metrics)
+                epoch_completed_at = utc_now_iso()
+                epoch_duration = time.perf_counter() - epoch_start
+                self.update_history(history, epoch, epoch_started_at, epoch_completed_at, epoch_lr, training_metrics,
+                                    validation_metrics, training_duration, validation_duration, epoch_duration)
+                self.history = history
+                training_state = self.build_training_state(last_epoch, history, best_epoch, best_metrics,
+                                                           early_stop_best_validation_loss, bad_epochs, last_metrics, epoch_reason)
 
-        validation_results_path = None
+                if is_new_best:
+                    best_checkpoint_path = self.save_checkpoint(model, optimiser, scheduler, scaler, 'best_validation_loss',
+                                                                epoch, validation_metrics, None, resume_signature, None)
 
-        if self.train_config.save_validation_results:
-            validation_results_path = self.run_validation_inference(model=model, best_checkpoint_path=best_checkpoint_path, last_checkpoint_path=last_checkpoint_path)
+                last_checkpoint_path = self.save_checkpoint(model, optimiser, scheduler, scaler, 'last_epoch', epoch,
+                                                            validation_metrics, training_state, resume_signature,
+                                                            best_model_state_dict)
+                self.write_history_log(history)
+                self.save_history_plot(history)
 
-        self.write_checkpoint_summary(best_epoch=best_epoch, last_epoch=last_epoch, best_val_loss=best_val_loss, last_val_loss=last_val_loss,
-                                      best_checkpoint_path=best_checkpoint_path, last_checkpoint_path=last_checkpoint_path,
-                                      validation_results_path=validation_results_path)
-        plt.clf()
+                if is_new_best:
+                    print(f"\tNew best model saved from epoch {epoch} with validation_loss={validation_metrics['loss']:.6f} "
+                          f"and validation_error={validation_metrics['error_px']:.2f}px", flush=True)
+
+                if should_stop:
+                    print(f'\tEarly stop: validation loss stopped improving by at least {self.train_config.early_stop_min_delta:g}.', flush=True)
+                    break
+
+            self.termination_reason = (saved_termination_reason if saved_termination_reason in ('early_stopping', 'max_epochs_reached') else
+                                       ('early_stopping' if bad_epochs >= self.train_config.early_stop_patience
+                                        and last_epoch >= self.train_config.early_stop_warmup_epochs else 'max_epochs_reached'))
+            validation_results_path = None
+
+            if self.train_config.save_validation_results:
+                export_start = time.perf_counter()
+                validation_results_path = self.run_validation_inference(model, best_checkpoint_path, last_checkpoint_path)
+                self.validation_export_duration_seconds = time.perf_counter() - export_start
+
+            self.training_status = 'completed'
+            self.finish_workflow()
+            self.write_checkpoint_summary(best_epoch, last_epoch, best_metrics, last_metrics, best_checkpoint_path,
+                                          last_checkpoint_path, validation_results_path)
+            plt.clf()
+            return best_checkpoint_path or last_checkpoint_path
+        except BaseException as error:
+            self.training_status = 'interrupted' if isinstance(error, KeyboardInterrupt) else 'failed'
+            self.termination_reason = 'keyboard_interrupt' if isinstance(error, KeyboardInterrupt) else 'exception'
+            self.failure = {'type': type(error).__name__, 'message': str(error)}
+            self.finish_workflow()
+            plt.clf()
+            raise
 
     def run_validation_inference(self, model, best_checkpoint_path=None, last_checkpoint_path=None):
         """Run full-image inference on validation images and save overlays and Excel metrics."""
         checkpoint_path = best_checkpoint_path or last_checkpoint_path
-        checkpoint_type = 'best' if best_checkpoint_path is not None else 'last'
+        checkpoint_type = 'best_validation_loss' if best_checkpoint_path is not None else 'last_epoch'
 
         if checkpoint_path is not None:
             self.load_checkpoint_state(model=model, checkpoint_path=checkpoint_path)
 
         data_metadata = self.read_data_creation_metadata()
-        validation_output_path = self.get_validation_output_path()
+        validation_output_path = self.get_validation_staging_path()
+        self.prepare_validation_staging_path()
         config = LandmarkInferenceConfig(
+            repetition=int(self.repetition),
             fold=int(self.fold),
             task_name=str(data_metadata.get('task_name') or ''),
             data_save_path=self.train_path,
@@ -168,6 +307,7 @@ class TrainModel:
             input_channels=int(self.input_channels),
             batch_size=int(self.train_config.validation_inference_batch_size),
             smoothing_sigma=float(self.train_config.validation_vote_smoothing_sigma),
+            use_probability_weights=bool(self.train_config.validation_use_probability_weights),
             save_raw_vote_maps=bool(self.train_config.validation_save_raw_vote_maps),
             checkpoint_path=checkpoint_path,
             checkpoint_type=checkpoint_type
@@ -175,8 +315,9 @@ class TrainModel:
 
         print(f'	Running validation image inference with {checkpoint_type} checkpoint...', flush=True)
         run_validation_inference_for_trained_model(model=model, config=config, device=self.device)
-        print(f'	Validation image inference outputs saved to {validation_output_path}', flush=True)
-        return validation_output_path
+        self.commit_validation_output()
+        print(f'	Validation image inference outputs saved to {self.get_validation_output_path()}', flush=True)
+        return self.get_validation_output_path()
 
     @staticmethod
     def load_checkpoint_state(model, checkpoint_path):
@@ -216,7 +357,7 @@ class TrainModel:
 
     def validate_metadata_point_count(self):
         """Validate data-creation metadata when run_info JSON files are available."""
-        metadata_paths = sorted(self.train_path.glob(f'run_info_*_f{self.fold}.json'))
+        metadata_paths = [self.train_path / 'run_info.json'] if (self.train_path / 'run_info.json').is_file() else []
 
         if not metadata_paths:
             print(f'\tNo run_info metadata found in {self.train_path}; CSV label-count validation will be used.', flush=True)
@@ -307,11 +448,15 @@ class TrainModel:
 
         train_dataset = CustomDataset(train_csv_path, num_sub_patches=self.quadruplet_config.num_sub_patches, transform=ToTensor())
         val_dataset = CustomDataset(val_csv_path, num_sub_patches=self.quadruplet_config.num_sub_patches, transform=ToTensor())
+        self.training_generator = torch.Generator()
+        self.validation_generator = torch.Generator()
+        self.training_generator.manual_seed(int(self.train_config.random_seed))
+        self.validation_generator.manual_seed(int(self.train_config.random_seed))
 
         train_loader = DataLoader(train_dataset, batch_size=self.train_config.batch_size, shuffle=True, num_workers=self.train_config.num_workers,
-                                  pin_memory=self.device.type == 'cuda')
+                                  pin_memory=self.device.type == 'cuda', worker_init_fn=seed_worker, generator=self.training_generator)
         val_loader = DataLoader(val_dataset, batch_size=self.train_config.batch_size, shuffle=False, num_workers=self.train_config.num_workers,
-                                pin_memory=self.device.type == 'cuda')
+                                pin_memory=self.device.type == 'cuda', worker_init_fn=seed_worker, generator=self.validation_generator)
 
         return train_loader, val_loader
 
@@ -348,112 +493,145 @@ class TrainModel:
 
         return model.to(self.device)
 
-    def train_epoch(self, model, train_loader, val_loader, criterion, optimiser, log_writer, history, epoch):
-        """Train one epoch and run periodic validation."""
+    def build_optimiser(self, model):
+        """Build the configured optimiser."""
+        name = str(self.train_config.optimiser_name).lower()
+
+        if name == 'adamw':
+            return AdamW(model.parameters(), lr=self.train_config.learning_rate, weight_decay=self.train_config.weight_decay)
+        if name == 'sgd':
+            return SGD(model.parameters(), lr=self.train_config.learning_rate, momentum=self.train_config.momentum,
+                       weight_decay=self.train_config.weight_decay)
+
+        raise ValueError(f'Unknown optimiser_name: {self.train_config.optimiser_name}')
+
+    def build_scheduler(self, optimiser):
+        """Build the configured epoch-level scheduler."""
+        schedule = str(self.train_config.lr_schedule).lower()
+
+        if schedule == 'none':
+            return None
+        if schedule == 'step':
+            return StepLR(optimiser, step_size=self.train_config.lr_step_size, gamma=self.train_config.lr_gamma)
+        if schedule == 'plateau':
+            return ReduceLROnPlateau(optimiser, mode='min', factor=self.train_config.lr_gamma, patience=5)
+
+        raise ValueError(f'Unknown lr_schedule: {self.train_config.lr_schedule}')
+
+    def train_epoch(self, model, train_loader, criterion, optimiser, scaler):
+        """Train one complete epoch and return sample-weighted classification metrics."""
         model.train()
-
-        total_batches = len(train_loader)
-
         epoch_loss = 0.0
         epoch_correct = 0
         epoch_predictions = 0
 
-        window_loss = 0.0
-        window_correct = 0
-        window_predictions = 0
-        window_samples = 0
-
-        latest_val_loss = 0.0
-        latest_val_accuracy = 0.0
-        last_batch_index = 0
-        last_validation_batch = 0
-
-        for batch_index, data in enumerate(train_loader, start=1):
-            last_batch_index = batch_index
+        for data in train_loader:
             images = data['image'].to(self.device, non_blocking=True)
             labels = data['labels'].to(self.device, non_blocking=True).long()
             batch_size = labels.shape[0]
-
             optimiser.zero_grad(set_to_none=True)
-            outputs = model(images)
 
-            train_loss = self.calculate_loss(outputs, labels, criterion)
-            train_loss.backward()
-            optimiser.step()
+            with torch.amp.autocast('cuda', enabled=self.train_config.use_amp and self.device.type == 'cuda'):
+                outputs = model(images)
+                train_loss = self.calculate_loss(outputs, labels, criterion)
+
+            scaler.scale(train_loss).backward()
+            scaler.step(optimiser)
+            scaler.update()
 
             batch_correct = self.count_correct(outputs, labels)
             batch_predictions = batch_size * len(outputs)
-
             epoch_loss += train_loss.item() * batch_size
             epoch_correct += batch_correct
             epoch_predictions += batch_predictions
 
-            window_loss += train_loss.item() * batch_size
-            window_correct += batch_correct
-            window_predictions += batch_predictions
-            window_samples += batch_size
-
-            should_validate = batch_index % self.train_config.loss_print_interval == 0 or batch_index == 1
-
-            if should_validate:
-                latest_val_loss, latest_val_accuracy = self.validate(model, val_loader, criterion)
-
-                average_window_loss = window_loss / max(window_samples, 1)
-                average_window_accuracy = window_correct / max(window_predictions, 1)
-
-                self.update_history(history, epoch, batch_index, total_batches, average_window_loss, average_window_accuracy, latest_val_loss, latest_val_accuracy)
-                self.write_log(log_writer, optimiser, epoch, batch_index, average_window_loss, average_window_accuracy, latest_val_loss, latest_val_accuracy)
-
-                last_validation_batch = batch_index
-                window_loss = 0.0
-                window_correct = 0
-                window_predictions = 0
-                window_samples = 0
-
-            model.train()
-
-        average_epoch_loss = epoch_loss / max(len(train_loader.dataset), 1)
-        average_epoch_accuracy = epoch_correct / max(epoch_predictions, 1)
-
-        if last_validation_batch != last_batch_index:
-            latest_val_loss, latest_val_accuracy = self.validate(model, val_loader, criterion)
-            self.update_history(history, epoch, last_batch_index, total_batches, average_epoch_loss, average_epoch_accuracy, latest_val_loss, latest_val_accuracy)
-            self.write_log(log_writer, optimiser, epoch, last_batch_index, average_epoch_loss, average_epoch_accuracy, latest_val_loss, latest_val_accuracy)
-
-        return {
-            'train_loss': average_epoch_loss,
-            'train_accuracy': average_epoch_accuracy,
-            'val_loss': latest_val_loss,
-            'val_accuracy': latest_val_accuracy
-        }
+        return {'loss': epoch_loss / max(len(train_loader.dataset), 1),
+                'accuracy': epoch_correct / max(epoch_predictions, 1)}
 
     def validate(self, model, val_loader, criterion):
-        """Evaluate the model on the validation set."""
+        """Evaluate classification metrics and reconstruct validation endpoints by voting."""
         model.eval()
-
         total_loss = 0.0
         total_samples = 0
         total_correct = 0
         total_predictions = 0
+        vote_records = {}
 
-        with torch.no_grad():
+        with torch.inference_mode():
             for data in val_loader:
                 images = data['image'].to(self.device, non_blocking=True)
                 labels = data['labels'].to(self.device, non_blocking=True).long()
                 batch_size = labels.shape[0]
 
-                outputs = model(images)
-                loss = self.calculate_loss(outputs, labels, criterion)
+                with torch.amp.autocast('cuda', enabled=self.train_config.use_amp and self.device.type == 'cuda'):
+                    outputs = model(images)
+                    loss = self.calculate_loss(outputs, labels, criterion)
 
                 total_loss += loss.item() * batch_size
                 total_samples += batch_size
                 total_correct += self.count_correct(outputs, labels)
                 total_predictions += batch_size * len(outputs)
+                probabilities = [torch.softmax(output, dim=1) for output in outputs]
+                predictions = [torch.argmax(probability, dim=1).detach().cpu().numpy() for probability in probabilities]
+                confidences = [torch.max(probability, dim=1).values.detach().cpu().numpy() for probability in probabilities]
+                coordinates = data['coordinates'].detach().cpu().numpy()
 
-        val_loss = total_loss / max(total_samples, 1)
-        val_accuracy = total_correct / max(total_predictions, 1)
+                for batch_index, sample_name in enumerate(data['sample_name']):
+                    sample_name = str(sample_name)
+                    record = vote_records.setdefault(sample_name, {
+                        'centres': [],
+                        'vote_inputs': [{'distance_classes': [], 'angle_classes': [], 'scores': []}
+                                        for _ in range(self.num_of_points)],
+                    })
+                    record['centres'].append((int(coordinates[batch_index][0]), int(coordinates[batch_index][1])))
 
-        return val_loss, val_accuracy
+                    for point_index in range(self.num_of_points):
+                        distance_index = point_index * 2
+                        angle_index = distance_index + 1
+                        score = (float(confidences[distance_index][batch_index] * confidences[angle_index][batch_index])
+                                 if self.train_config.validation_use_probability_weights else 1.0)
+                        point_input = record['vote_inputs'][point_index]
+                        point_input['distance_classes'].append(int(predictions[distance_index][batch_index]))
+                        point_input['angle_classes'].append(int(predictions[angle_index][batch_index]))
+                        point_input['scores'].append(score)
+
+        validation_error = self.calculate_validation_endpoint_error(vote_records)
+        return {'loss': total_loss / max(total_samples, 1),
+                'accuracy': total_correct / max(total_predictions, 1),
+                'error_px': validation_error}
+
+    def calculate_validation_endpoint_error(self, vote_records):
+        """Convert one validation pass into a mean original-image endpoint error."""
+        metadata = self.read_data_creation_metadata()
+        mark_list_path = Path(self.require_metadata_value(metadata, 'mark_list_file'))
+        image_data_dir = Path(self.require_metadata_value(metadata, 'image_data_dir'))
+        mark_records = read_mark_list(mark_list_path, expected_points=self.num_of_points,
+                                      selected_sample_names=vote_records.keys())
+        errors = []
+
+        for sample_name, record in vote_records.items():
+            if sample_name not in mark_records:
+                raise ValueError(f'Validation sample {sample_name} is missing from {mark_list_path}.')
+
+            image_name, target_points = mark_records[sample_name]
+            image_path = image_data_dir / image_name
+            image = load_input_image(image_path, input_channels=self.input_channels)
+            vote_inputs = []
+
+            for point_input in record['vote_inputs']:
+                vote_inputs.append({name: np.asarray(values) for name, values in point_input.items()})
+
+            vote_maps, _, _ = accumulate_votes(centres=record['centres'], vote_inputs=vote_inputs,
+                                                image_shape=image.shape[:2], distance_intervals=self.tasks_classes[0],
+                                                angle_intervals=self.tasks_classes[1], num_points=self.num_of_points)
+            predicted_points, _, _ = detect_points(vote_maps, self.train_config.validation_vote_smoothing_sigma)
+            errors.extend(np.linalg.norm(np.asarray(predicted_points, dtype=np.float32) -
+                                         np.asarray(target_points, dtype=np.float32), axis=1).tolist())
+
+        if not errors:
+            raise ValueError('Validation endpoint voting produced no endpoint errors.')
+
+        return float(np.mean(errors))
 
     def calculate_loss(self, outputs, labels, criterion):
         """Calculate average loss across all output heads."""
@@ -474,49 +652,84 @@ class TrainModel:
 
         return correct
 
-    def write_log(self, log_writer, optimiser, epoch, batch_index, train_loss, train_accuracy, val_loss, val_accuracy):
-        """Write one training status row to CSV."""
-        step = batch_index * self.train_config.batch_size
-        lr = self.get_current_lr(optimiser)
-
-        log_writer.writerow([lr, epoch, step, train_loss, train_accuracy, val_loss, val_accuracy])
-
-    def update_history(self, history, epoch, batch_index, total_batches, train_loss, train_accuracy, val_loss, val_accuracy):
-        """Store losses and accuracies for plotting."""
-        step = (epoch - 1) + batch_index / max(total_batches, 1)
-
-        history['step'].append(step)
-        history['train_loss'].append(train_loss)
-        history['train_accuracy'].append(train_accuracy)
-        history['val_loss'].append(val_loss)
-        history['val_accuracy'].append(val_accuracy)
-
-    def save_checkpoint(self, model, checkpoint_type, epoch=None, metrics=None):
-        """Save model weights with one consolidated metadata block."""
-        checkpoint_path = self.get_checkpoint_path(checkpoint_type)
-        created_at = dt.datetime.now().isoformat()
-        checkpoint = {
-            'format_version': CHECKPOINT_FORMAT_VERSION,
-            'created_at': created_at,
-            'state_dict': model.state_dict(),
-            'metadata': self.build_checkpoint_metadata(checkpoint_type=checkpoint_type, epoch=epoch, metrics=metrics or {}, created_at=created_at)
+    @staticmethod
+    def update_history(history, epoch, epoch_started_at, epoch_completed_at, epoch_lr, training_metrics, validation_metrics,
+                       training_duration_seconds, validation_duration_seconds, epoch_duration_seconds):
+        """Append one complete epoch to the training history."""
+        values = {
+            'epoch': int(epoch), 'epoch_started_at': epoch_started_at, 'epoch_completed_at': epoch_completed_at,
+            'lr': float(epoch_lr), 'training_loss': float(training_metrics['loss']),
+            'training_accuracy': float(training_metrics['accuracy']), 'validation_loss': float(validation_metrics['loss']),
+            'validation_accuracy': float(validation_metrics['accuracy']), 'validation_error_px': float(validation_metrics['error_px']),
+            'training_duration_seconds': float(training_duration_seconds),
+            'validation_duration_seconds': float(validation_duration_seconds), 'epoch_duration_seconds': float(epoch_duration_seconds),
         }
-        torch.save(checkpoint, checkpoint_path)
+
+        for field_name in HISTORY_FIELDS:
+            history[field_name].append(values[field_name])
+
+    def write_history_log(self, history):
+        """Atomically rebuild the epoch-level CSV."""
+        log_path = self.get_log_path()
+        temporary_path = log_path.with_name(f'.{log_path.name}.tmp')
+
+        try:
+            with open(temporary_path, 'w', newline='', encoding='utf-8') as output:
+                writer = csv.DictWriter(output, fieldnames=list(HISTORY_FIELDS))
+                writer.writeheader()
+                for row_index in range(len(history['epoch'])):
+                    writer.writerow({field_name: history[field_name][row_index] for field_name in HISTORY_FIELDS})
+            os.replace(temporary_path, log_path)
+        finally:
+            if temporary_path.exists():
+                temporary_path.unlink()
+
+    def save_checkpoint(self, model, optimiser, scheduler, scaler, checkpoint_type, epoch, validation_metrics,
+                        training_state, resume_signature, best_model_state_dict):
+        """Atomically save an inference checkpoint and complete continuation state when applicable."""
+        checkpoint_path = self.get_checkpoint_path(checkpoint_type)
+        created_at = utc_now_iso()
+        checkpoint = {
+            'format_version': CHECKPOINT_FORMAT_VERSION, 'created_at': created_at,
+            'checkpoint_type': checkpoint_type, 'epoch': int(epoch), 'resume_capable': checkpoint_type == 'last_epoch',
+            'state_dict': model.state_dict(), 'optimiser_state_dict': optimiser.state_dict(),
+            'scheduler_state_dict': None if scheduler is None else scheduler.state_dict(),
+            'grad_scaler_state_dict': scaler.state_dict(), 'validation_metrics': dict(validation_metrics),
+            'metadata': self.build_checkpoint_metadata(checkpoint_type=checkpoint_type, epoch=epoch,
+                                                       metrics=validation_metrics, created_at=created_at),
+        }
+
+        if checkpoint_type == 'last_epoch':
+            checkpoint.update({'training_state': training_state, 'rng_state': self.capture_rng_state(),
+                               'data_loader_generator_states': self.capture_data_loader_generator_states(),
+                               'best_model_state_dict': best_model_state_dict, 'resume_signature': resume_signature})
+
+        self.atomic_torch_save(checkpoint, checkpoint_path)
         return checkpoint_path
 
     def save_history_plot(self, history):
-        """Save a loss and accuracy plot."""
-        plot_path = self.get_plot_path()
+        """Save epoch-level loss, accuracy, and endpoint-error traces."""
+        if not history['epoch']:
+            return
 
-        plt.clf()
-        plt.plot(history['step'], history['train_loss'], '--')
-        plt.plot(history['step'], history['train_accuracy'], '-')
-        plt.plot(history['step'], history['val_loss'], '--')
-        plt.plot(history['step'], history['val_accuracy'], '-')
-        plt.legend(['Training Loss', 'Train accuracy', 'Val Loss', 'Val accuracy'])
-        plt.xlabel('Epoch progress')
-        plt.ylabel('Loss / Accuracy')
-        plt.savefig(plot_path)
+        figure, (loss_axis, metric_axis) = plt.subplots(2, 1, figsize=(9, 8), sharex=True)
+        error_axis = metric_axis.twinx()
+        loss_axis.plot(history['epoch'], history['training_loss'], label='training_loss')
+        loss_axis.plot(history['epoch'], history['validation_loss'], label='validation_loss')
+        metric_axis.plot(history['epoch'], history['training_accuracy'], label='training_accuracy')
+        metric_axis.plot(history['epoch'], history['validation_accuracy'], label='validation_accuracy')
+        error_axis.plot(history['epoch'], history['validation_error_px'], linestyle='--', color='tab:red', label='validation_error_px')
+        loss_axis.set_ylabel('Classification loss')
+        metric_axis.set_xlabel('Epoch')
+        metric_axis.set_ylabel('Classification accuracy')
+        error_axis.set_ylabel('Mean endpoint error (px)')
+        loss_axis.legend(loc='best')
+        metric_lines, metric_labels = metric_axis.get_legend_handles_labels()
+        error_lines, error_labels = error_axis.get_legend_handles_labels()
+        metric_axis.legend(metric_lines + error_lines, metric_labels + error_labels, loc='best')
+        figure.tight_layout()
+        figure.savefig(self.get_plot_path())
+        plt.close(figure)
 
     def build_checkpoint_metadata(self, checkpoint_type=None, epoch=None, metrics=None, created_at=None):
         """Build the single metadata structure saved in every checkpoint."""
@@ -524,8 +737,8 @@ class TrainModel:
 
         return {
             'schema': 'ipv_checkpoint_metadata',
-            'schema_version': CHECKPOINT_FORMAT_VERSION,
-            'created_at': created_at or dt.datetime.now().isoformat(),
+            'schema_version': CHECKPOINT_SCHEMA_VERSION,
+            'created_at': created_at or utc_now_iso(),
             'checkpoint': {
                 'type': checkpoint_type,
                 'epoch': epoch,
@@ -536,7 +749,8 @@ class TrainModel:
             'data': self.build_data_metadata(data_metadata),
             'preprocessing': self.build_preprocessing_metadata(data_metadata),
             'inference': self.build_inference_metadata(data_metadata),
-            'training': self.build_training_metadata()
+            'training': self.build_training_metadata(),
+            'runtime_environment': self.runtime_metadata,
         }
 
     def build_task_metadata(self, data_metadata):
@@ -580,7 +794,9 @@ class TrainModel:
     def build_data_metadata(self, data_metadata):
         """Build compact data-source metadata."""
         return {
+            'repetition': int(self.repetition),
             'fold': int(self.fold),
+            'fold_collection_sha256': self.fold_collection_sha256,
             'data_save_path': str(self.train_path),
             'output_save_path': str(self.output_path),
             'mark_list_file': self.path_metadata_to_string(data_metadata.get('mark_list_file')),
@@ -628,7 +844,7 @@ class TrainModel:
             },
             'vote_accumulation': {
                 'class_prediction': 'top_1_softmax_class',
-                'use_probability_weights': True,
+                'use_probability_weights': bool(self.train_config.validation_use_probability_weights),
                 'smoothing_sigma': smoothing_sigma,
                 'batch_size': batch_size
             }
@@ -643,7 +859,7 @@ class TrainModel:
 
     def read_data_creation_metadata(self):
         """Read data-creation metadata from generated fold metadata files."""
-        data_info_path = self.train_path / f'data_info_f{self.fold}.csv'
+        data_info_path = self.train_path / 'data_info.csv'
 
         if data_info_path.is_file():
             return self.read_data_info_csv(data_info_path)
@@ -655,7 +871,7 @@ class TrainModel:
 
         raise ValueError(
             f'Cannot save inference metadata because no data metadata was found for fold {self.fold}. '
-            f'Expected {data_info_path} or run_info_*_f{self.fold}.json in {self.train_path}.'
+            f'Expected {data_info_path} or run_info.json in {self.train_path}.'
         )
 
     def read_data_info_csv(self, data_info_path):
@@ -684,7 +900,7 @@ class TrainModel:
 
     def read_run_info_metadata(self):
         """Read full run_info JSON metadata when compact data_info CSV is unavailable."""
-        metadata_paths = sorted(self.train_path.glob(f'run_info_*_f{self.fold}.json'))
+        metadata_paths = [self.train_path / 'run_info.json'] if (self.train_path / 'run_info.json').is_file() else []
 
         if not metadata_paths:
             return None
@@ -733,19 +949,19 @@ class TrainModel:
 
         return value
 
-    def write_checkpoint_summary(self, best_epoch, last_epoch, best_val_loss, last_val_loss, best_checkpoint_path, last_checkpoint_path, validation_results_path=None):
+    def write_checkpoint_summary(self, best_epoch, last_epoch, best_metrics, last_metrics, best_checkpoint_path,
+                                 last_checkpoint_path, validation_results_path=None):
         """Write a compact run-level checkpoint summary."""
         summary_path = self.get_checkpoint_summary_path()
-        metadata = self.build_checkpoint_metadata(
-            checkpoint_type='summary',
-            epoch=last_epoch,
-            metrics={'best_val_loss': best_val_loss, 'last_val_loss': last_val_loss}
-        )
+        metadata = self.build_checkpoint_metadata(checkpoint_type=None, epoch=None, metrics={})
         summary = {
             'format_version': CHECKPOINT_FORMAT_VERSION,
-            'created_at': dt.datetime.now().isoformat(),
+            'created_at': utc_now_iso(),
             'run_name': self.get_run_name(),
+            'repetition': int(self.repetition),
             'fold': int(self.fold),
+            'training_status': self.training_status,
+            'termination_reason': self.termination_reason,
             'task': metadata['task'],
             'model': metadata['model'],
             'data': metadata['data'],
@@ -753,25 +969,262 @@ class TrainModel:
             'inference': metadata['inference'],
             'training': metadata['training'],
             'checkpoints': {
-                'best': {
+                'best_validation_loss': {
                     'epoch': best_epoch,
-                    'val_loss': best_val_loss,
+                    'validation_loss': None if best_metrics is None else best_metrics.get('loss'),
+                    'validation_accuracy': None if best_metrics is None else best_metrics.get('accuracy'),
+                    'validation_error_px': None if best_metrics is None else best_metrics.get('error_px'),
                     'path': str(best_checkpoint_path) if best_checkpoint_path is not None else None
                 },
-                'last': {
+                'last_epoch': {
                     'epoch': last_epoch,
-                    'val_loss': last_val_loss,
+                    'validation_loss': None if last_metrics is None else last_metrics.get('loss'),
+                    'validation_accuracy': None if last_metrics is None else last_metrics.get('accuracy'),
+                    'validation_error_px': None if last_metrics is None else last_metrics.get('error_px'),
                     'path': str(last_checkpoint_path) if last_checkpoint_path is not None else None
                 }
             },
             'validation_inference': {
                 'enabled': bool(self.train_config.save_validation_results),
                 'path': str(validation_results_path) if validation_results_path is not None else None
-            }
+            },
+            'runtime_environment': self.runtime_metadata,
+            'timing': self.get_timing_summary(),
         }
 
         with open(summary_path, 'w', encoding='utf-8') as summary_file:
             json.dump(summary, summary_file, indent=4, default=str)
+
+    def build_resume_signature(self):
+        """Build a deterministic compatibility signature for exact continuation."""
+        payload = {
+            'repetition': self.repetition, 'fold': self.fold, 'num_of_points': self.num_of_points,
+            'fold_collection_sha256': self.fold_collection_sha256,
+            'training_csv_sha256': self.sha256_file(self.get_train_csv_path()),
+            'validation_csv_sha256': self.sha256_file(self.get_val_csv_path()),
+            'tasks_classes': self.serialise_tasks_classes(self.tasks_classes),
+            'train_config': asdict(self.train_config), 'quadruplet_config': asdict(self.quadruplet_config),
+            'ipv_source_sha256': self.sha256_python_sources(),
+            'python_version': self.runtime_metadata['python']['version'],
+            'torch_version': self.runtime_metadata['pytorch']['version'],
+            'cuda_build_version': self.runtime_metadata['cuda']['pytorch_cuda_build_version'],
+        }
+        text = json.dumps(payload, sort_keys=True, separators=(',', ':'), default=str)
+        return {'sha256': hashlib.sha256(text.encode('utf-8')).hexdigest(), 'payload': payload}
+
+    def load_training_checkpoint(self, model, optimiser, scheduler, scaler, resume_signature):
+        """Load and validate the last completed epoch checkpoint."""
+        checkpoint_path = self.get_checkpoint_path('last_epoch')
+        checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
+
+        required = {'state_dict', 'optimiser_state_dict', 'grad_scaler_state_dict', 'training_state', 'rng_state',
+                    'data_loader_generator_states', 'best_model_state_dict', 'resume_signature'}
+        missing = sorted(required - set(checkpoint))
+
+        if checkpoint.get('checkpoint_type') != 'last_epoch' or not checkpoint.get('resume_capable'):
+            raise ValueError(f'Resume requires a resume-capable last-epoch checkpoint: {checkpoint_path}')
+        if missing:
+            raise ValueError(f'Resume checkpoint is missing required fields: {missing}')
+        if checkpoint['resume_signature'].get('sha256') != resume_signature.get('sha256'):
+            raise ValueError('Resume checkpoint is incompatible with the current data, code, runtime, or configuration. '
+                             f'Saved signature={checkpoint["resume_signature"].get("sha256")}; '
+                             f'current signature={resume_signature.get("sha256")}.')
+
+        training_state = checkpoint['training_state']
+        self.validate_history(training_state['history'], training_state['completed_epoch'])
+        model.load_state_dict(checkpoint['state_dict'])
+        optimiser.load_state_dict(checkpoint['optimiser_state_dict'])
+
+        saved_scheduler = checkpoint.get('scheduler_state_dict')
+        if ((scheduler is None and saved_scheduler is not None) or
+                (scheduler is not None and saved_scheduler is None)):
+            raise ValueError('Resume scheduler state does not match the current scheduler configuration.')
+        if scheduler is not None:
+            scheduler.load_state_dict(saved_scheduler)
+        scaler.load_state_dict(checkpoint['grad_scaler_state_dict'])
+        self.restore_rng_state(checkpoint['rng_state'])
+        self.restore_data_loader_generator_states(checkpoint['data_loader_generator_states'])
+
+        return {
+            'history': training_state['history'], 'best_epoch': training_state['best_epoch'],
+            'best_metrics': training_state['best_metrics'], 'completed_epoch': training_state['completed_epoch'],
+            'last_metrics': training_state['last_metrics'], 'best_model_state_dict': checkpoint['best_model_state_dict'],
+            'early_stop_best_validation_loss': training_state['early_stop_best_validation_loss'],
+            'bad_epochs': training_state['bad_epochs'], 'termination_reason': training_state['termination_reason'],
+        }
+
+    def ensure_best_checkpoint(self, checkpoint_path, best_epoch, best_metrics, best_model_state_dict):
+        """Recover an inference-ready best checkpoint from last-checkpoint state if required."""
+        if checkpoint_path.is_file() or best_model_state_dict is None:
+            return
+
+        payload = {
+            'format_version': CHECKPOINT_FORMAT_VERSION, 'created_at': utc_now_iso(),
+            'checkpoint_type': 'best_validation_loss', 'epoch': int(best_epoch), 'resume_capable': False,
+            'state_dict': best_model_state_dict, 'validation_metrics': best_metrics,
+            'metadata': self.build_checkpoint_metadata('best_validation_loss', best_epoch, best_metrics),
+        }
+        self.atomic_torch_save(payload, checkpoint_path)
+
+    @staticmethod
+    def build_training_state(completed_epoch, history, best_epoch, best_metrics, early_stop_best_validation_loss,
+                             bad_epochs, last_metrics, termination_reason):
+        """Build the complete epoch-boundary continuation state."""
+        return {
+            'completed_epoch': int(completed_epoch), 'history': copy.deepcopy(history),
+            'best_epoch': None if best_epoch is None else int(best_epoch), 'best_metrics': best_metrics,
+            'early_stop_best_validation_loss': float(early_stop_best_validation_loss), 'bad_epochs': int(bad_epochs),
+            'last_metrics': last_metrics, 'termination_reason': termination_reason,
+        }
+
+    @staticmethod
+    def clone_state_dict_to_cpu(state_dict):
+        """Clone model weights to an independent CPU snapshot."""
+        return {name: tensor.detach().cpu().clone() for name, tensor in state_dict.items()}
+
+    @staticmethod
+    def sha256_file(path):
+        """Hash one file without loading it all into memory."""
+        digest = hashlib.sha256()
+        with open(path, 'rb') as input_file:
+            for chunk in iter(lambda: input_file.read(1024 * 1024), b''):
+                digest.update(chunk)
+        return digest.hexdigest()
+
+    @staticmethod
+    def sha256_python_sources():
+        """Hash active IPV Python source files for continuation compatibility."""
+        package_root = Path(__file__).resolve().parent
+        digest = hashlib.sha256()
+        for source_path in sorted(package_root.rglob('*.py'), key=lambda path: path.as_posix()):
+            digest.update(source_path.relative_to(package_root).as_posix().encode('utf-8'))
+            digest.update(b'\0')
+            digest.update(source_path.read_bytes())
+            digest.update(b'\0')
+        return digest.hexdigest()
+
+    @staticmethod
+    def atomic_torch_save(payload, checkpoint_path):
+        """Atomically replace a checkpoint, preserving the previous file on failure."""
+        checkpoint_path = Path(checkpoint_path)
+        temporary_path = checkpoint_path.with_name(f'.{checkpoint_path.name}.tmp')
+        try:
+            torch.save(payload, temporary_path)
+            os.replace(temporary_path, checkpoint_path)
+        finally:
+            if temporary_path.exists():
+                temporary_path.unlink()
+
+    @staticmethod
+    def capture_rng_state():
+        """Capture Python, NumPy, PyTorch, and CUDA random-number states."""
+        return {'python': random.getstate(), 'numpy': np.random.get_state(), 'torch_cpu': torch.get_rng_state(),
+                'torch_cuda': torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None}
+
+    @staticmethod
+    def restore_rng_state(state):
+        """Restore Python, NumPy, PyTorch, and CUDA random-number states."""
+        random.setstate(state['python'])
+        np.random.set_state(state['numpy'])
+        torch.set_rng_state(state['torch_cpu'])
+        if torch.cuda.is_available() and state.get('torch_cuda') is not None:
+            torch.cuda.set_rng_state_all(state['torch_cuda'])
+
+    def capture_data_loader_generator_states(self):
+        """Capture training and validation DataLoader generator states."""
+        return {'training': self.training_generator.get_state(), 'validation': self.validation_generator.get_state()}
+
+    def restore_data_loader_generator_states(self, states):
+        """Restore training and validation DataLoader generator states."""
+        self.training_generator.set_state(states['training'])
+        self.validation_generator.set_state(states['validation'])
+
+    @staticmethod
+    def validate_history(history, completed_epoch):
+        """Validate complete, finite, contiguous epoch history."""
+        if set(HISTORY_FIELDS) - set(history):
+            raise ValueError(f'Resume history is missing fields: {sorted(set(HISTORY_FIELDS) - set(history))}')
+        lengths = {field: len(history[field]) for field in HISTORY_FIELDS}
+        if len(set(lengths.values())) != 1:
+            raise ValueError(f'Resume history columns have inconsistent lengths: {lengths}')
+        if list(history['epoch']) != list(range(1, int(completed_epoch) + 1)):
+            raise ValueError('Resume history does not contain every completed epoch exactly once.')
+
+    @staticmethod
+    def validate_finite_metrics(phase, metrics):
+        """Stop training when a reported metric is NaN or infinite."""
+        invalid = {name: value for name, value in metrics.items() if not np.isfinite(value)}
+        if invalid:
+            raise FloatingPointError(f'Non-finite {phase} metric(s) detected: {invalid}')
+
+    def validate_configs(self):
+        """Validate training-control settings before any output mutation."""
+        if self.repetition < 1 or self.fold < 1:
+            raise ValueError('repetition and fold must both be at least 1.')
+        if self.train_config.random_seed < 0:
+            raise ValueError('random_seed must be at least 0.')
+        if self.train_config.batch_size < 1 or self.train_config.max_training_epochs < 1 or self.train_config.num_workers < 0:
+            raise ValueError('batch_size and max_training_epochs must be positive; num_workers must be non-negative.')
+        if self.train_config.learning_rate <= 0 or self.train_config.weight_decay < 0 or self.train_config.momentum < 0:
+            raise ValueError('learning_rate must be positive; weight_decay and momentum must be non-negative.')
+        if str(self.train_config.optimiser_name).lower() not in ('adamw', 'sgd'):
+            raise ValueError('optimiser_name must be adamw or sgd.')
+        if str(self.train_config.lr_schedule).lower() not in ('none', 'step', 'plateau'):
+            raise ValueError('lr_schedule must be none, step, or plateau.')
+        if self.train_config.lr_step_size < 1 or self.train_config.lr_gamma <= 0:
+            raise ValueError('lr_step_size must be at least 1 and lr_gamma must be positive.')
+        if self.train_config.early_stop_patience < 1 or self.train_config.early_stop_min_delta < 0 or self.train_config.early_stop_warmup_epochs < 0:
+            raise ValueError('Early-stopping patience must be positive; min_delta and warmup must be non-negative.')
+        if self.train_config.validation_inference_batch_size < 1:
+            raise ValueError('validation_inference_batch_size must be at least 1.')
+        if self.train_config.validation_vote_smoothing_sigma < 0:
+            raise ValueError('validation_vote_smoothing_sigma must be non-negative.')
+
+    @staticmethod
+    def set_random_seed(seed):
+        """Enable deterministic Python, NumPy, PyTorch, CUDA, cuDNN, and cuBLAS behaviour."""
+        seed = int(seed)
+        random.seed(seed)
+        np.random.seed(seed)
+        torch.manual_seed(seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(seed)
+        torch.backends.cudnn.benchmark = False
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.allow_tf32 = False
+        torch.backends.cuda.matmul.allow_tf32 = False
+        torch.use_deterministic_algorithms(True)
+
+    def synchronise_device(self):
+        """Synchronise queued CUDA work before timing boundaries."""
+        if self.device.type == 'cuda':
+            torch.cuda.synchronize(self.device)
+
+    def finish_workflow(self):
+        """Freeze workflow completion timestamps and duration."""
+        self.workflow_completed_at = utc_now_iso()
+        if self.workflow_start_perf is not None:
+            self.workflow_duration_seconds = float(time.perf_counter() - self.workflow_start_perf)
+
+    def get_timing_summary(self):
+        """Return phase and cumulative epoch timing."""
+        history = self.history
+        return {
+            'workflow_started_at': self.workflow_started_at, 'workflow_completed_at': self.workflow_completed_at,
+            'workflow_duration_seconds': self.workflow_duration_seconds,
+            'dataset_validation_duration_seconds': float(self.dataset_validation_duration_seconds),
+            'model_setup_and_resume_duration_seconds': float(self.model_setup_duration_seconds),
+            'validation_export_duration_seconds': float(self.validation_export_duration_seconds),
+            'cumulative_training_duration_seconds': float(sum(history.get('training_duration_seconds', []))),
+            'cumulative_validation_duration_seconds': float(sum(history.get('validation_duration_seconds', []))),
+            'cumulative_epoch_duration_seconds': float(sum(history.get('epoch_duration_seconds', []))),
+        }
+
+    def get_run_report(self):
+        """Return pipeline-level status, timing, resume, and runtime metadata."""
+        return {'training_status': self.training_status, 'termination_reason': self.termination_reason,
+                'failure': self.failure, 'resume_training': self.resume_training,
+                'runtime_environment': self.runtime_metadata, 'timing': self.get_timing_summary()}
 
     @staticmethod
     def get_current_lr(optimiser):
@@ -812,30 +1265,8 @@ class TrainModel:
         return None if value is None else str(value)
 
     def get_run_name(self):
-        """Build a consistent name for logs, checkpoints, and plots."""
-        lr_label = self.format_number(self.train_config.learning_rate)
-        stem_label = int(self.quadruplet_config.small_input_stem)
-
-        channel_label = self.input_channels if self.input_channels is not None else self.quadruplet_config.input_channels
-        channel_part = f'_ch{channel_label}' if channel_label is not None else ''
-
-        schedule_label = int(self.train_config.lr_schedule)
-        lr_gamma_label = self.format_number(self.train_config.lr_gamma)
-        early_delta_label = self.format_number(self.train_config.early_stop_min_delta)
-
-        return (f'points{self.num_of_points}_'
-                f'{self.quadruplet_config.network_name}_'
-                f'bf{self.quadruplet_config.branch_features}_'
-                f'fs{self.quadruplet_config.frozen_stages}_'
-                f'stem{stem_label}{channel_part}_'
-                f'bs{self.train_config.batch_size}_'
-                f'lr{lr_label}_sched{schedule_label}_'
-                f'lrs{self.train_config.lr_step_size}_'
-                f'lrg{lr_gamma_label}_'
-                f'ep{self.train_config.max_training_epochs}_'
-                f'esp{self.train_config.early_stop_patience}_'
-                f'esd{early_delta_label}_'
-                f'esw{self.train_config.early_stop_warmup_epochs}')
+        """Return the run-name path component."""
+        return self.output_path.parent.parent.name
 
     def get_train_csv_path(self):
         """Return the generated training CSV path."""
@@ -847,23 +1278,66 @@ class TrainModel:
 
     def get_log_path(self):
         """Return the log CSV path."""
-        return self.output_path / f'train_log_f{self.fold}.csv'
+        return self.output_path / 'training_validation_log.csv'
 
     def get_checkpoint_path(self, checkpoint_type):
-        """Return the latest or best checkpoint path."""
-        return self.output_path / f'model_f{self.fold}_{checkpoint_type}.pth'
+        """Return a best or last checkpoint path."""
+        return self.output_path / f'model_{checkpoint_type}.pth'
 
     def get_checkpoint_summary_path(self):
         """Return the checkpoint summary JSON path."""
-        return self.output_path / f'checkpoint_summary_f{self.fold}.json'
+        return self.output_path / 'validation_checkpoint_summary.json'
 
     def get_plot_path(self):
         """Return the plot path."""
-        return self.output_path / f'train_plot_f{self.fold}.png'
+        return self.output_path / 'training_validation_plot.png'
 
     def get_validation_output_path(self):
         """Return the validation-image inference output directory."""
-        return self.output_path / f'validation_inference_f{self.fold}'
+        return self.output_path / 'validation_results'
+
+    def get_validation_staging_path(self):
+        """Return the same-volume staging path for validation outputs."""
+        return self.output_path / '.validation_results.tmp'
+
+    def get_validation_backup_path(self):
+        """Return the temporary backup path used while committing validation outputs."""
+        return self.output_path / '.validation_results.backup'
+
+    def prepare_validation_staging_path(self):
+        """Recover any committed backup and clear incomplete staging data."""
+        final_path = self.get_validation_output_path()
+        staging_path = self.get_validation_staging_path()
+        backup_path = self.get_validation_backup_path()
+
+        if backup_path.exists() and not final_path.exists():
+            os.replace(backup_path, final_path)
+        elif backup_path.exists():
+            shutil.rmtree(backup_path)
+        if staging_path.exists():
+            shutil.rmtree(staging_path)
+        staging_path.mkdir(exist_ok=False, parents=True)
+
+    def commit_validation_output(self):
+        """Atomically swap a complete validation export into place."""
+        final_path = self.get_validation_output_path()
+        staging_path = self.get_validation_staging_path()
+        backup_path = self.get_validation_backup_path()
+
+        if backup_path.exists():
+            shutil.rmtree(backup_path)
+        if final_path.exists():
+            os.replace(final_path, backup_path)
+
+        try:
+            os.replace(staging_path, final_path)
+        except BaseException:
+            if backup_path.exists() and not final_path.exists():
+                os.replace(backup_path, final_path)
+            raise
+
+        if backup_path.exists():
+            shutil.rmtree(backup_path)
 
     @staticmethod
     def format_number(value):
@@ -873,21 +1347,18 @@ class TrainModel:
     @staticmethod
     def empty_history():
         """Create the training history store."""
-        return {
-            'step': [],
-            'train_loss': [],
-            'train_accuracy': [],
-            'val_loss': [],
-            'val_accuracy': []
-        }
+        return {field_name: [] for field_name in HISTORY_FIELDS}
 
 
 def load_model_from_checkpoint(checkpoint_path, device=None):
     """Load a Quadruplet model from a self-describing checkpoint."""
     from .quadruplet import Quadruplet
 
-    device = device or torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    checkpoint = torch.load(checkpoint_path, map_location=device)
+    device = torch.device(device) if device is not None else torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    try:
+        checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    except TypeError:
+        checkpoint = torch.load(checkpoint_path, map_location=device)
 
     if 'state_dict' not in checkpoint:
         raise ValueError('This checkpoint only contains a state_dict. Recreate the model manually or convert the checkpoint.')

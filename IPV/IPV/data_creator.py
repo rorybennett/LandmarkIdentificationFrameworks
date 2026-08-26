@@ -14,16 +14,15 @@ from skimage.util import img_as_float32, img_as_ubyte
 
 from .utils.patch_utils import create_patch, get_angle, get_label
 from .utils.progress_bar import ProgressBar
+from .utils.fold_utils import discover_fold_numbers as discover_repetition_folds, get_split_file_path
 
-TRAIN_LIST_PATTERN = re.compile(r'^train_f(\d+)\.txt$')
-FOLD_PHASES = ('Train', 'Val', 'Test')
+FOLD_PHASES = ('Train', 'Val')
 FOLD_LIST_FILE_PREFIXES = {
-    'Train': 'train',
-    'Val': 'val',
-    'Test': 'test'
+    'Train': 'training',
+    'Val': 'val'
 }
 
-GRID_PHASES = {'Val', 'Test'}
+GRID_PHASES = {'Val'}
 SAMPLED_PHASES = {'Train'}
 
 MIN_POINTS_PER_IMAGE = 1
@@ -63,50 +62,6 @@ def safe_file_stem(value):
         raise ValueError(f'Sample name cannot be converted to a safe filename: {value}')
 
     return safe_value
-
-
-def discover_fold_numbers(fold_lists_path):
-    """Return contiguous fold numbers and validate train/val/test files for each fold."""
-    fold_lists_path = Path(fold_lists_path)
-
-    if not fold_lists_path.is_dir():
-        raise ValueError(f'fold_lists_path does not exist or is not a directory: {fold_lists_path}')
-
-    fold_numbers = []
-
-    for file_path in fold_lists_path.iterdir():
-        if not file_path.is_file():
-            continue
-
-        match = TRAIN_LIST_PATTERN.fullmatch(file_path.name)
-
-        if match:
-            fold_numbers.append(int(match.group(1)))
-
-    fold_numbers = sorted(set(fold_numbers))
-
-    if not fold_numbers:
-        raise ValueError(f'No train_fN.txt files found in {fold_lists_path}')
-
-    expected_fold_numbers = list(range(1, fold_numbers[-1] + 1))
-
-    if fold_numbers != expected_fold_numbers:
-        raise ValueError(f'Fold files must be contiguous from train_f1.txt. Found {fold_numbers}, expected {expected_fold_numbers}')
-
-    missing_files = []
-
-    for fold_number in fold_numbers:
-        for prefix in FOLD_LIST_FILE_PREFIXES.values():
-            fold_file = fold_lists_path / f'{prefix}_f{fold_number}.txt'
-
-            if not fold_file.is_file():
-                missing_files.append(str(fold_file))
-
-    if missing_files:
-        missing_text = '\n'.join(missing_files)
-        raise ValueError(f'Every fold must have train_fN.txt, val_fN.txt, and test_fN.txt files. Missing files:\n{missing_text}')
-
-    return fold_numbers
 
 
 class PatchCreator:
@@ -345,6 +300,7 @@ class DataCreator:
                  fold_lists_path=None,
                  mark_list_path=None,
                  image_data_path=None,
+                 repetition=None,
                  sampling_variances=(500, 10000),
                  num_workers=1,
                  random_seed=42,
@@ -359,7 +315,10 @@ class DataCreator:
 
         self.distance_intervals = distance_intervals
         self.angle_intervals = angle_intervals
-        self.fold_numbers = discover_fold_numbers(fold_lists_path)
+        if repetition is None or int(repetition) < 1:
+            raise ValueError(f'repetition must be at least 1. Got: {repetition}')
+        self.repetition = int(repetition)
+        self.fold_numbers = discover_repetition_folds(fold_lists_path, self.repetition)
         self.folds = len(self.fold_numbers)
         self.sub_patch_scales = subpatch_scales
         self.data_save_path = Path(data_save_path)
@@ -475,40 +434,40 @@ class DataCreator:
         if sorted(subpatch_scales) != list(subpatch_scales):
             raise ValueError(f'subpatch_scales should be in ascending order because the first value is the output patch size. Got: {subpatch_scales}')
 
-    def create(self, val_grid_spacing, current_fold, generate_test_data=True):
-        """Create training and validation data, with optional test data, for the requested fold."""
-        self.current_fold = current_fold
+    def validate_inputs(self, current_fold):
+        """Validate split membership, annotations, images, bounds, and channels without writing outputs."""
+        self.current_fold = int(current_fold)
+
+        if self.current_fold not in self.fold_numbers:
+            raise ValueError(f'Fold {self.current_fold} is not available in repetition {self.repetition}: {self.fold_numbers}')
 
         if not self.fold_list:
             self.read_fold_lists()
 
         self.report_current_fold_input_channels()
 
-        phases_to_create = self.get_phases_to_create(generate_test_data=generate_test_data)
+        for phase in FOLD_PHASES:
+            self.read_points(phase)
 
-        for phase in phases_to_create:
+        return self.input_channels
+
+    def create(self, val_grid_spacing, current_fold):
+        """Create training and validation data for the requested repetition and fold."""
+        self.validate_inputs(current_fold)
+
+        for phase in FOLD_PHASES:
             self.create_data(grid_spacing=val_grid_spacing, phase=phase)
 
-        if not generate_test_data:
-            print(f'\tTest fold inputs checked for fold {self.current_fold}, but test patch generation was skipped.', flush=True)
-
-    @staticmethod
-    def get_phases_to_create(generate_test_data=True):
-        """Return fold phases that should have patches and CSVs generated."""
-        if generate_test_data:
-            return FOLD_PHASES
-
-        return tuple(phase for phase in FOLD_PHASES if phase != 'Test')
-
     def read_fold_lists(self):
-        """Read train, validation, and test sample names for all folds."""
+        """Read training and validation sample names for all folds in this repetition."""
         self.fold_list = []
 
         for fold_index in self.fold_numbers:
             phase_lists = {}
 
-            for phase, prefix in FOLD_LIST_FILE_PREFIXES.items():
-                phase_lists[phase] = self.read_name_list(self.fold_lists_path / f'{prefix}_f{fold_index}.txt')
+            for phase, split_name in (('Train', 'training'), ('Val', 'validation')):
+                phase_lists[phase] = self.read_name_list(get_split_file_path(self.fold_lists_path, self.repetition,
+                                                                            split_name, fold_index))
 
             self.validate_fold_split(fold_index=fold_index, phase_lists=phase_lists)
             self.fold_list.append(phase_lists)
@@ -537,7 +496,7 @@ class DataCreator:
             self.validate_mark_points(sample_name=sample_name, points=points, image_shape=image_shape)
 
             self.paths_dict[sample_name] = image_path
-            self.points_dict[sample_name] = points[:self.num_of_points]
+            self.points_dict[sample_name] = points
 
     def report_current_fold_input_channels(self):
         """Report and validate the input channel count for the current fold."""
@@ -579,18 +538,18 @@ class DataCreator:
 
     def validate_mark_points(self, sample_name, points, image_shape=None):
         """Validate landmark count and optional image bounds for one mark-list row."""
-        if len(points) < self.num_of_points:
-            raise ValueError(f'{sample_name} has {len(points)} points but {self.num_of_points} are required.')
-
-        if len(points) > MAX_POINTS_PER_IMAGE:
-            raise ValueError(f'{sample_name} has {len(points)} points; the maximum supported number is {MAX_POINTS_PER_IMAGE}.')
+        if len(points) != self.num_of_points:
+            difference = abs(len(points) - self.num_of_points)
+            difference_label = 'missing' if len(points) < self.num_of_points else 'extra'
+            raise ValueError(f'Repetition {self.repetition}, fold {self.current_fold}: {sample_name} has {len(points)} points; '
+                             f'exactly {self.num_of_points} are required ({difference} {difference_label}).')
 
         if image_shape is None:
             return
 
         height, width = image_shape[:2]
 
-        for point_index, (x, y) in enumerate(points[:self.num_of_points], start=1):
+        for point_index, (x, y) in enumerate(points, start=1):
             if not is_point_inside_image(x=x, y=y, width=width, height=height):
                 raise ValueError(f'{sample_name} point {point_index} is outside image bounds: ({x}, {y}) for width={width}, height={height}.')
 
@@ -676,7 +635,8 @@ class DataCreator:
         sample_names = sorted(self.points_dict.keys(), key=natural_key)
 
         for sample_index, sample_name in enumerate(sample_names, start=1):
-            seed = self.random_seed + self.current_fold * 100000 + sample_index if self.random_seed is not None else None
+            seed = (self.random_seed + self.repetition * 10000000 + self.current_fold * 100000 + sample_index
+                    if self.random_seed is not None else None)
 
             jobs.append(PatchJob(
                 sample_index=sample_index,
@@ -782,7 +742,7 @@ class DataCreator:
 
     @staticmethod
     def validate_fold_split(fold_index, phase_lists):
-        """Check that train, validation, and test splits do not overlap."""
+        """Check that training and validation splits do not overlap."""
         seen = {}
         overlaps = []
 

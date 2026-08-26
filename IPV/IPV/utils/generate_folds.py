@@ -1,8 +1,4 @@
-"""
-Create deterministic 5-fold train, test, and validation lists from one mark-list file.
-
-Each fold is approximately 80% training, 10% testing, and 10% validation.
-"""
+"""Create deterministic repeated k-fold lists for IPV training and validation."""
 
 import csv
 import random
@@ -10,63 +6,61 @@ import re
 import shutil
 from pathlib import Path
 
+from openpyxl import Workbook
+from openpyxl.styles import Font, PatternFill
 
-NUM_FOLDS = 5
-SEED = 42
+from .fold_utils import natural_key
 
-MARK_LIST_PATH = Path(r'D:\Datasets\IPV\OriginalData\doctors_resampled_transverseMarkList.txt')
-OUTPUT_DIR = Path(r'D:\GeneratedFiles\IPV\NetworkStudy\folds_network_study')
+
+NUM_REPETITIONS = 3
+NUM_FOLDS_PER_REPETITION = 5
+BASE_SEED = 42
+TEST_SAMPLE_IDS = ['A303', 'A275', 'A270', 'A268', 'A259', 'A258', 'A257', 'A246', 'A243', 'A237',
+                   'A235', 'A296', 'A230', 'A225', 'A222', 'A221', 'A217', 'A215', 'A242', 'A207']
+
+MARK_LIST_PATH = Path(r'C:\Storage\Datasets\IPV\OriginalData\doctors_resampled_transverseMarkList.txt')
+OUTPUT_DIR = Path(r'C:\Storage\Datasets\IPV\OriginalData\folds_network_study')
 
 CLEAN_OUTPUT_DIR = False
 SORT_OUTPUT_FILES = True
 WRITE_SUMMARY_CSV = True
 WRITE_MEMBERSHIP_CSV = True
 
-TRAIN_PREFIX = 'train'
-TEST_PREFIX = 'test'
-VAL_PREFIX = 'val'
-
-
-def natural_key(value):
-    """Create a natural sorting key, so A2 comes before A10."""
-    return [int(part) if part.isdigit() else part.lower() for part in re.split(r'(\d+)', value)]
+SUMMARY_FILE_NAME = 'repeated_kfold_summary.csv'
+MEMBERSHIP_FILE_NAME = 'repeated_kfold_membership.csv'
+TEST_CASES_WORKBOOK_NAME = 'test_cases.xlsx'
+TEST_CASES_SHEET_NAME = 'test_cases'
+REPETITION_DIR_PATTERN = re.compile(r'^repetition_(\d+)$')
+LEGACY_FOLD_FILE_PATTERN = re.compile(r'^[A-Za-z]+_f\d+\.txt$')
+LEGACY_SUMMARY_FILE_NAMES = ('fold_summary.csv', 'fold_membership.csv')
 
 
 def read_sample_ids(mark_list_path):
-    """Read sample IDs from the first column of a mark-list file."""
-    sample_ids = []
+    """Read sample stems from the first column of a mark-list file."""
+    mark_list_path = Path(mark_list_path)
 
-    with open(mark_list_path, 'r', encoding='utf-8') as mark_file:
-        for line in mark_file:
-            line = line.strip()
+    if not mark_list_path.is_file():
+        raise FileNotFoundError(f'Mark-list file not found: {mark_list_path}')
 
-            if not line:
-                continue
-
-            image_name = line.split()[0]
-            sample_ids.append(Path(image_name).stem)
-
-    return sample_ids
+    return [Path(line.split()[0]).stem for line in mark_list_path.read_text(encoding='utf-8').splitlines() if line.strip()]
 
 
 def check_duplicates(sample_ids, source_name):
-    """Stop execution if duplicated sample IDs are present."""
+    """Reject duplicate sample IDs."""
     seen = set()
     duplicates = set()
 
     for sample_id in sample_ids:
         if sample_id in seen:
             duplicates.add(sample_id)
-
         seen.add(sample_id)
 
     if duplicates:
-        duplicate_text = ', '.join(sorted(duplicates, key=natural_key))
-        raise ValueError(f'Duplicate sample IDs found in {source_name}: {duplicate_text}')
+        raise ValueError(f'Duplicate sample IDs found in {source_name}: {", ".join(sorted(duplicates, key=natural_key))}')
 
 
 def load_unique_sample_ids(mark_list_path):
-    """Load, validate, and naturally sort sample IDs before shuffling."""
+    """Load, validate, and naturally sort all sample IDs."""
     sample_ids = read_sample_ids(mark_list_path)
     check_duplicates(sample_ids, str(mark_list_path))
 
@@ -76,196 +70,236 @@ def load_unique_sample_ids(mark_list_path):
     return sorted(sample_ids, key=natural_key)
 
 
-def make_balanced_chunks(sample_ids, num_chunks):
-    """Split shuffled sample IDs into balanced chunks."""
-    if num_chunks < 1:
-        raise ValueError('num_chunks must be at least 1.')
+def normalise_test_sample_ids(test_sample_ids, all_sample_ids, mark_list_path):
+    """Validate optional fixed held-out test IDs."""
+    if test_sample_ids is None:
+        return []
 
-    if len(sample_ids) < num_chunks:
-        raise ValueError(f'Not enough samples to create {num_chunks} chunks.')
+    if isinstance(test_sample_ids, (str, Path)):
+        raise ValueError('TEST_SAMPLE_IDS must be an iterable of sample IDs, not one bare string or path.')
 
-    chunks = [[] for _ in range(num_chunks)]
+    try:
+        raw_ids = list(test_sample_ids)
+    except TypeError as error:
+        raise ValueError('TEST_SAMPLE_IDS must be None or an iterable of sample ID strings.') from error
 
-    for index, sample_id in enumerate(sample_ids):
-        chunks[index % num_chunks].append(sample_id)
+    available = set(all_sample_ids)
+    normalised = []
 
-    return chunks
+    for index, raw_id in enumerate(raw_ids, start=1):
+        if not isinstance(raw_id, (str, Path)):
+            raise ValueError(f'TEST_SAMPLE_IDS entry {index} must be a string or path. Got: {raw_id!r}')
+
+        text = str(raw_id).strip()
+
+        if not text:
+            raise ValueError(f'TEST_SAMPLE_IDS entry {index} is blank.')
+
+        normalised.append(text if text in available else Path(text).stem)
+
+    check_duplicates(normalised, 'TEST_SAMPLE_IDS')
+    unknown = sorted(set(normalised) - available, key=natural_key)
+
+    if unknown:
+        raise ValueError(f'Test sample IDs were not found in mark-list file {mark_list_path}: {", ".join(unknown)}')
+
+    return sorted(normalised, key=natural_key)
 
 
-def create_folds(sample_ids, num_folds):
-    """Create 5 folds by pairing 10 balanced chunks into test and validation sets."""
-    if num_folds != 5:
-        raise ValueError('This script is configured for 5 folds to produce an 80/10/10 split.')
+def validate_generation_args(sample_count, num_repetitions, num_folds):
+    """Validate repeated k-fold counts."""
+    if int(num_repetitions) < 1:
+        raise ValueError(f'num_repetitions must be at least 1. Got: {num_repetitions}')
+    if int(num_folds) < 2:
+        raise ValueError(f'num_folds must be at least 2 for k-fold cross-validation. Got: {num_folds}')
+    if int(sample_count) < int(num_folds):
+        raise ValueError(f'Not enough samples for {num_folds} folds. Found {sample_count}; at least {num_folds} are required.')
 
-    chunks = make_balanced_chunks(sample_ids, num_chunks=num_folds * 2)
+
+def create_kfold_splits(shuffled_ids, num_folds):
+    """Create balanced validation folds and complementary training sets."""
+    validation_chunks = [[] for _ in range(int(num_folds))]
+
+    for index, sample_id in enumerate(shuffled_ids):
+        validation_chunks[index % int(num_folds)].append(sample_id)
+
     folds = []
 
-    for fold_index in range(num_folds):
-        test_ids = chunks[fold_index * 2]
-        val_ids = chunks[(fold_index * 2) + 1]
-        holdout_ids = set(test_ids) | set(val_ids)
-        train_ids = [sample_id for sample_id in sample_ids if sample_id not in holdout_ids]
-
-        folds.append({
-            'fold': fold_index + 1,
-            'train': train_ids,
-            'test': test_ids,
-            'val': val_ids
-        })
+    for fold, validation_ids in enumerate(validation_chunks, start=1):
+        validation_set = set(validation_ids)
+        folds.append({'fold': fold,
+                      'training': [sample_id for sample_id in shuffled_ids if sample_id not in validation_set],
+                      'validation': validation_ids})
 
     return folds
 
 
-def validate_folds(folds, all_sample_ids):
-    """Check that train, test, and validation splits are valid for every fold."""
-    all_sample_set = set(all_sample_ids)
+def validate_kfold_splits(folds, all_sample_ids, repetition):
+    """Require a complete, non-overlapping k-fold repetition."""
+    all_samples = set(all_sample_ids)
+    validation_occurrences = []
 
-    for fold in folds:
-        train_set = set(fold['train'])
-        test_set = set(fold['test'])
-        val_set = set(fold['val'])
+    for fold_data in folds:
+        training = fold_data['training']
+        validation = fold_data['validation']
+        training_set = set(training)
+        validation_set = set(validation)
+        fold = fold_data['fold']
 
-        if train_set & test_set:
-            raise ValueError(f'Fold {fold["fold"]} has train/test overlap.')
+        if not training or not validation:
+            raise ValueError(f'Repetition {repetition}, fold {fold} contains an empty split.')
+        if len(training) != len(training_set) or len(validation) != len(validation_set):
+            raise ValueError(f'Repetition {repetition}, fold {fold} contains duplicate sample IDs.')
+        if training_set & validation_set:
+            raise ValueError(f'Repetition {repetition}, fold {fold} has training/validation overlap.')
+        if training_set | validation_set != all_samples or training_set != all_samples - validation_set:
+            raise ValueError(f'Repetition {repetition}, fold {fold} does not form a complete complementary split.')
 
-        if train_set & val_set:
-            raise ValueError(f'Fold {fold["fold"]} has train/val overlap.')
+        validation_occurrences.extend(validation)
 
-        if test_set & val_set:
-            raise ValueError(f'Fold {fold["fold"]} has test/val overlap.')
+    if len(validation_occurrences) != len(all_sample_ids) or set(validation_occurrences) != all_samples:
+        raise ValueError(f'Repetition {repetition} does not use every sample as validation exactly once.')
 
-        if train_set | test_set | val_set != all_sample_set:
-            raise ValueError(f'Fold {fold["fold"]} does not cover the full sample set.')
 
-    holdout_ids = []
+def create_repetitions(sample_ids, num_repetitions, num_folds, base_seed):
+    """Create deterministic split collections for every repetition."""
+    repetitions = []
 
-    for fold in folds:
-        holdout_ids.extend(fold['test'])
-        holdout_ids.extend(fold['val'])
+    for repetition in range(1, int(num_repetitions) + 1):
+        seed = int(base_seed) + repetition - 1
+        shuffled_ids = list(sample_ids)
+        random.Random(seed).shuffle(shuffled_ids)
+        folds = create_kfold_splits(shuffled_ids, num_folds)
+        validate_kfold_splits(folds, sample_ids, repetition)
+        repetitions.append({'repetition': repetition, 'seed': seed, 'folds': folds})
 
-    if set(holdout_ids) != all_sample_set:
-        raise ValueError('The combined test and validation sets do not cover all samples.')
-
-    if len(holdout_ids) != len(set(holdout_ids)):
-        raise ValueError('A sample appears in more than one held-out split across folds.')
+    return repetitions
 
 
 def prepare_output_dir(output_dir, clean_output_dir):
-    """Create the output directory and optionally remove old fold files."""
+    """Remove only artefacts managed by this generator."""
+    output_dir = Path(output_dir)
+
     if clean_output_dir and output_dir.exists():
         shutil.rmtree(output_dir)
 
     output_dir.mkdir(exist_ok=True, parents=True)
 
+    managed_files = {SUMMARY_FILE_NAME, MEMBERSHIP_FILE_NAME, TEST_CASES_WORKBOOK_NAME, *LEGACY_SUMMARY_FILE_NAMES}
+
+    for child in list(output_dir.iterdir()):
+        if child.is_dir() and REPETITION_DIR_PATTERN.fullmatch(child.name):
+            shutil.rmtree(child)
+        elif child.is_file() and (child.name in managed_files or LEGACY_FOLD_FILE_PATTERN.fullmatch(child.name)):
+            child.unlink()
+
 
 def sorted_for_output(sample_ids):
-    """Sort output files if configured to do so."""
+    """Return naturally sorted output when configured."""
     return sorted(sample_ids, key=natural_key) if SORT_OUTPUT_FILES else sample_ids
 
 
-def write_sample_list(path, sample_ids):
-    """Write one sample ID per line."""
-    with open(path, 'w', encoding='utf-8') as output_file:
-        for sample_id in sorted_for_output(sample_ids):
-            output_file.write(f'{sample_id}\n')
+def write_repetition_files(output_dir, repetitions):
+    """Write training_fN.txt and val_fN.txt beneath each repetition directory."""
+    for repetition_data in repetitions:
+        repetition_dir = Path(output_dir) / f'repetition_{repetition_data["repetition"]}'
+        repetition_dir.mkdir(exist_ok=False, parents=True)
+
+        for fold_data in repetition_data['folds']:
+            for split_name, prefix in (('training', 'training'), ('validation', 'val')):
+                values = '\n'.join(sorted_for_output(fold_data[split_name]))
+                (repetition_dir / f'{prefix}_f{fold_data["fold"]}.txt').write_text(f'{values}\n', encoding='utf-8')
 
 
-def write_fold_files(output_dir, folds):
-    """Write train, test, and validation list files for every fold."""
-    for fold in folds:
-        fold_index = fold['fold']
+def write_test_cases_workbook(output_dir, test_sample_ids):
+    """Write a manifest for the fixed external test cohort."""
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = TEST_CASES_SHEET_NAME
+    sheet.append(['sample_id', 'dataset_split', 'included_in_repeated_kfold'])
 
-        write_sample_list(output_dir / f'{TRAIN_PREFIX}_f{fold_index}.txt', fold['train'])
-        write_sample_list(output_dir / f'{TEST_PREFIX}_f{fold_index}.txt', fold['test'])
-        write_sample_list(output_dir / f'{VAL_PREFIX}_f{fold_index}.txt', fold['val'])
+    for sample_id in sorted(test_sample_ids, key=natural_key):
+        sheet.append([sample_id, 'test', False])
 
-
-def write_summary_csv(output_dir, folds, total_count):
-    """Write per-fold split counts and fractions."""
-    summary_path = output_dir / 'fold_summary.csv'
-
-    with open(summary_path, 'w', newline='', encoding='utf-8') as summary_file:
-        writer = csv.writer(summary_file)
-        writer.writerow(['fold', 'train_count', 'test_count', 'val_count', 'train_fraction', 'test_fraction', 'val_fraction'])
-
-        for fold in folds:
-            train_count = len(fold['train'])
-            test_count = len(fold['test'])
-            val_count = len(fold['val'])
-
-            writer.writerow([
-                fold['fold'],
-                train_count,
-                test_count,
-                val_count,
-                round(train_count / total_count, 4),
-                round(test_count / total_count, 4),
-                round(val_count / total_count, 4)
-            ])
+    fill = PatternFill(fill_type='solid', fgColor='1F4E78')
+    for cell in sheet[1]:
+        cell.font = Font(bold=True, color='FFFFFF')
+        cell.fill = fill
+    sheet.freeze_panes = 'A2'
+    sheet.auto_filter.ref = f'A1:C{sheet.max_row}'
+    sheet.column_dimensions['A'].width = max(12, max(len(value) for value in test_sample_ids) + 2)
+    sheet.column_dimensions['B'].width = 16
+    sheet.column_dimensions['C'].width = 29
+    sheet.sheet_view.showGridLines = False
+    workbook.save(Path(output_dir) / TEST_CASES_WORKBOOK_NAME)
 
 
-def write_membership_csv(output_dir, folds):
-    """Write a long-format file showing each sample's split assignment."""
-    membership_path = output_dir / 'fold_membership.csv'
+def write_summary_csv(output_dir, repetitions, source_count, cross_validation_count, test_count):
+    """Write repeated k-fold counts and fractions."""
+    with open(Path(output_dir) / SUMMARY_FILE_NAME, 'w', newline='', encoding='utf-8') as output:
+        writer = csv.writer(output)
+        writer.writerow(['repetition', 'repetition_seed', 'fold', 'source_count', 'held_out_test_count', 'cross_validation_count',
+                         'training_count', 'validation_count', 'training_fraction', 'validation_fraction'])
+        for repetition_data in repetitions:
+            for fold_data in repetition_data['folds']:
+                training_count = len(fold_data['training'])
+                validation_count = len(fold_data['validation'])
+                writer.writerow([repetition_data['repetition'], repetition_data['seed'], fold_data['fold'], source_count, test_count,
+                                 cross_validation_count, training_count, validation_count,
+                                 round(training_count / cross_validation_count, 4), round(validation_count / cross_validation_count, 4)])
 
-    with open(membership_path, 'w', newline='', encoding='utf-8') as membership_file:
-        writer = csv.writer(membership_file)
-        writer.writerow(['fold', 'split', 'sample_id'])
 
-        for fold in folds:
-            for split_name in ('train', 'test', 'val'):
-                for sample_id in sorted_for_output(fold[split_name]):
-                    writer.writerow([fold['fold'], split_name, sample_id])
+def write_membership_csv(output_dir, repetitions):
+    """Write every repeated k-fold assignment in long format."""
+    with open(Path(output_dir) / MEMBERSHIP_FILE_NAME, 'w', newline='', encoding='utf-8') as output:
+        writer = csv.writer(output)
+        writer.writerow(['repetition', 'repetition_seed', 'fold', 'split', 'sample_id'])
+        for repetition_data in repetitions:
+            for fold_data in repetition_data['folds']:
+                for split_name in ('training', 'validation'):
+                    for sample_id in sorted_for_output(fold_data[split_name]):
+                        writer.writerow([repetition_data['repetition'], repetition_data['seed'], fold_data['fold'], split_name, sample_id])
 
 
-def print_summary(output_dir, folds, total_count):
-    """Print split counts to the terminal."""
+def print_summary(output_dir, repetitions, source_count, cross_validation_count, test_count, base_seed):
+    """Print the resolved repeated k-fold collection."""
     print('======================================================================================')
-    print(f'Fold list output directory: {output_dir}')
-    print(f'Total samples: {total_count}')
-    print(f'Seed: {SEED}')
-    print('--------------------------------------------------------------------------------------')
-
-    for fold in folds:
-        train_count = len(fold['train'])
-        test_count = len(fold['test'])
-        val_count = len(fold['val'])
-
-        print(
-            f'Fold {fold["fold"]}: '
-            f'train={train_count} ({train_count / total_count:.2%}), '
-            f'test={test_count} ({test_count / total_count:.2%}), '
-            f'val={val_count} ({val_count / total_count:.2%})'
-        )
-
+    print(f'Repeated k-fold output directory: {output_dir}')
+    print(f'Source samples: {source_count}; held-out test: {test_count}; cross-validation: {cross_validation_count}')
+    print(f'Base seed: {base_seed}; repetitions: {len(repetitions)}; folds: {len(repetitions[0]["folds"])}')
+    for repetition_data in repetitions:
+        print(f'Repetition {repetition_data["repetition"]} (seed={repetition_data["seed"]})')
+        for fold_data in repetition_data['folds']:
+            print(f'  Fold {fold_data["fold"]}: training={len(fold_data["training"])}; validation={len(fold_data["validation"])}')
     print('======================================================================================')
 
 
-def create_fold_lists(mark_list_path, output_dir, num_folds, seed):
-    """Create deterministic fold-list files from one mark list."""
-    sample_ids = load_unique_sample_ids(mark_list_path)
+def create_repeated_kfold_lists(mark_list_path, output_dir, num_repetitions, num_folds, base_seed, test_sample_ids=None):
+    """Create repeated k-fold lists after reserving an optional fixed test cohort."""
+    all_sample_ids = load_unique_sample_ids(mark_list_path)
+    test_sample_ids = normalise_test_sample_ids(test_sample_ids, all_sample_ids, mark_list_path)
+    test_set = set(test_sample_ids)
+    cross_validation_ids = [sample_id for sample_id in all_sample_ids if sample_id not in test_set]
+    validate_generation_args(len(cross_validation_ids), num_repetitions, num_folds)
+    repetitions = create_repetitions(cross_validation_ids, num_repetitions, num_folds, base_seed)
 
-    rng = random.Random(seed)
-    rng.shuffle(sample_ids)
+    prepare_output_dir(output_dir, CLEAN_OUTPUT_DIR)
+    write_repetition_files(output_dir, repetitions)
 
-    folds = create_folds(sample_ids, num_folds=num_folds)
-    validate_folds(folds, sample_ids)
-
-    prepare_output_dir(output_dir, clean_output_dir=CLEAN_OUTPUT_DIR)
-    write_fold_files(output_dir, folds)
-
+    if test_sample_ids:
+        write_test_cases_workbook(output_dir, test_sample_ids)
     if WRITE_SUMMARY_CSV:
-        write_summary_csv(output_dir, folds, total_count=len(sample_ids))
-
+        write_summary_csv(output_dir, repetitions, len(all_sample_ids), len(cross_validation_ids), len(test_sample_ids))
     if WRITE_MEMBERSHIP_CSV:
-        write_membership_csv(output_dir, folds)
+        write_membership_csv(output_dir, repetitions)
 
-    print_summary(output_dir, folds, total_count=len(sample_ids))
+    print_summary(output_dir, repetitions, len(all_sample_ids), len(cross_validation_ids), len(test_sample_ids), base_seed)
+    return repetitions
 
 
 def main():
-    """Run fold generation using the config block."""
-    create_fold_lists(mark_list_path=MARK_LIST_PATH, output_dir=OUTPUT_DIR, num_folds=NUM_FOLDS, seed=SEED)
+    """Run repeated k-fold generation using the configuration block."""
+    create_repeated_kfold_lists(MARK_LIST_PATH, OUTPUT_DIR, NUM_REPETITIONS, NUM_FOLDS_PER_REPETITION, BASE_SEED, TEST_SAMPLE_IDS)
 
 
 if __name__ == '__main__':

@@ -13,6 +13,8 @@ authors = [
 ]
 dependencies = [
     "numpy",
+    "torch>=2.4",
+    "torchvision",
     "pandas",
     "scikit-image",
     "opencv-python",

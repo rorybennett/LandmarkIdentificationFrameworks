@@ -55,6 +55,7 @@ class LandmarkInferenceConfig:
     grid_spacing: int
     input_channels: int
     task_name: str = ''
+    repetition: int | None = None
     fold: int | None = None
     data_save_path: Path | None = None
     mark_list_file: Path | None = None
@@ -130,6 +131,8 @@ class LandmarkImageInferer:
         config.mark_list_file = None if config.mark_list_file is None else Path(config.mark_list_file)
         config.image_data_dir = None if config.image_data_dir is None else Path(config.image_data_dir)
         config.checkpoint_path = None if config.checkpoint_path is None else Path(config.checkpoint_path)
+        config.repetition = None if config.repetition is None else int(config.repetition)
+        config.fold = None if config.fold is None else int(config.fold)
         config.num_points = int(config.num_points)
         config.grid_spacing = int(config.grid_spacing)
         config.input_channels = int(config.input_channels)
@@ -163,12 +166,13 @@ class LandmarkImageInferer:
 
     def get_output_dirs(self):
         """Return per-output subdirectories."""
+        prefix = 'validation_' if self.config.run_label == 'validation' else ''
         return {
-            'heatmap_overlays': self.config.output_dir / 'heatmap_overlays',
-            'point_overlays': self.config.output_dir / 'point_overlays',
-            'vote_maps': self.config.output_dir / 'vote_maps',
-            'raw_vote_maps': self.config.output_dir / 'raw_vote_maps',
-            'logs': self.config.output_dir / 'logs'
+            'heatmap_overlays': self.config.output_dir / f'{prefix}heatmap_overlays',
+            'point_overlays': self.config.output_dir / f'{prefix}point_overlays',
+            'vote_maps': self.config.output_dir / f'{prefix}vote_maps',
+            'raw_vote_maps': self.config.output_dir / f'{prefix}raw_vote_maps',
+            'logs': self.config.output_dir / f'{prefix}logs'
         }
 
     def infer_records(self, records):
@@ -217,7 +221,11 @@ class LandmarkImageInferer:
         vote_inputs = self.finalise_vote_inputs(vote_inputs)
         vote_maps, _, _ = accumulate_votes(centres=centres, vote_inputs=vote_inputs, image_shape=image.shape[:2], distance_intervals=self.config.distance_intervals, angle_intervals=self.config.angle_intervals, num_points=self.config.num_points, parallel=self.config.parallel_vote_accumulation, workers=self.resolve_vote_workers(), multiprocess_context=self.config.multiprocess_context)
         detected_points, peak_values, smoothed_vote_maps = detect_points(vote_maps=vote_maps, smoothing_sigma=self.config.smoothing_sigma)
-        result = build_result(record=record, detected_points=detected_points, ground_truth_points=record.ground_truth_points, peak_values=peak_values, num_centres=len(centres), grid_spacing=self.config.grid_spacing, checkpoint_type=self.config.checkpoint_type)
+        result = build_result(record=record, detected_points=detected_points, ground_truth_points=record.ground_truth_points,
+                              peak_values=peak_values, num_centres=len(centres), grid_spacing=self.config.grid_spacing,
+                              checkpoint_type=self.config.checkpoint_type, image_shape=image.shape[:2],
+                              dataset_split='validation' if self.config.run_label == 'validation' else 'inference',
+                              repetition=self.config.repetition, fold=self.config.fold)
         output_stem = safe_file_stem(record.sample_name)
         self.save_visual_outputs(output_stem=output_stem, display_image=display_image, detected_points=detected_points, ground_truth_points=record.ground_truth_points, smoothed_vote_maps=smoothed_vote_maps)
 
@@ -317,12 +325,24 @@ class LandmarkImageInferer:
         """Save combined inference summaries across images."""
         endpoint_rows = [row for result in results for row in result['endpoint_rows']]
         summary_rows = [result['summary'] for result in results]
+        validation_export = self.config.run_label == 'validation'
         summary_prefix = build_summary_prefix(self.config.run_label)
-        output_path = self.config.output_dir / f'{summary_prefix}_summary.xlsx'
+        output_path = self.config.output_dir / ('validation_summary.xlsx' if validation_export else f'{summary_prefix}_summary.xlsx')
+        image_sheet_name = 'validation_image_summary' if validation_export else 'image_summary'
+        endpoint_sheet_name = 'validation_endpoints' if validation_export else 'endpoints'
 
         with pd.ExcelWriter(output_path, engine='openpyxl') as writer:
-            pd.DataFrame(summary_rows).to_excel(writer, sheet_name='image_summary', index=False)
-            pd.DataFrame(endpoint_rows).to_excel(writer, sheet_name='endpoints', index=False)
+            pd.DataFrame(summary_rows).to_excel(writer, sheet_name=image_sheet_name, index=False)
+            pd.DataFrame(endpoint_rows).to_excel(writer, sheet_name=endpoint_sheet_name, index=False)
+
+        if validation_export:
+            write_csv_rows(self.config.output_dir / 'validation_image_summary.csv', summary_rows,
+                           list(summary_rows[0].keys()) if summary_rows else [])
+            write_csv_rows(self.config.output_dir / 'validation_endpoints.csv', endpoint_rows,
+                           list(endpoint_rows[0].keys()) if endpoint_rows else [])
+            prediction_rows = build_prediction_rows(summary_rows, endpoint_rows)
+            write_csv_rows(self.config.output_dir / 'validation_predictions.csv', prediction_rows,
+                           list(prediction_rows[0].keys()) if prediction_rows else [])
 
     def save_run_metadata(self, records, results):
         """Save inference run metadata."""
@@ -334,7 +354,8 @@ class LandmarkImageInferer:
         }
         summary_prefix = build_summary_prefix(self.config.run_label)
 
-        with open(self.output_dirs['logs'] / f'{summary_prefix}_run_metadata.json', 'w', encoding='utf-8') as metadata_file:
+        metadata_name = 'validation_run_metadata.json' if self.config.run_label == 'validation' else f'{summary_prefix}_run_metadata.json'
+        with open(self.output_dirs['logs'] / metadata_name, 'w', encoding='utf-8') as metadata_file:
             json.dump(metadata, metadata_file, indent=4, default=str)
 
 
@@ -374,7 +395,8 @@ def build_validation_records(config):
         raise ValueError(f'Validation CSV does not exist: {validation_csv_path}')
 
     sample_names = read_validation_sample_names(validation_csv_path)
-    mark_records = read_mark_list(config.mark_list_file, expected_points=config.num_points)
+    mark_records = read_mark_list(config.mark_list_file, expected_points=config.num_points,
+                                  selected_sample_names=sample_names)
     records = []
 
     for sample_name in sample_names:
@@ -387,7 +409,7 @@ def build_validation_records(config):
         if not image_path.is_file():
             raise FileNotFoundError(f'Image for validation sample {sample_name} was not found: {image_path}')
 
-        records.append(LandmarkImageRecord(sample_name=sample_name, image_path=image_path, ground_truth_points=points[:config.num_points]))
+        records.append(LandmarkImageRecord(sample_name=sample_name, image_path=image_path, ground_truth_points=points))
 
     return records
 
@@ -395,7 +417,9 @@ def build_validation_records(config):
 def build_image_records(input_path, num_points, mark_list_path=None, recursive=False, supported_suffixes=SUPPORTED_IMAGE_SUFFIXES):
     """Build inference image records from one image or a directory, with optional ground truth."""
     image_paths = find_images(input_path=input_path, recursive=recursive, supported_suffixes=supported_suffixes)
-    mark_records = read_mark_list(mark_list_path, expected_points=num_points) if mark_list_path is not None else {}
+    selected_names = [Path(path).stem for path in image_paths]
+    mark_records = (read_mark_list(mark_list_path, expected_points=num_points, selected_sample_names=selected_names)
+                    if mark_list_path is not None else {})
     records = []
 
     for image_path in image_paths:
@@ -448,9 +472,10 @@ def read_validation_sample_names(validation_csv_path):
     return sample_names
 
 
-def read_mark_list(mark_list_path, expected_points):
+def read_mark_list(mark_list_path, expected_points, selected_sample_names=None):
     """Read mark-list records keyed by sample stem."""
     mark_records = {}
+    selected_sample_names = None if selected_sample_names is None else {str(name) for name in selected_sample_names}
 
     if mark_list_path is None:
         return mark_records
@@ -466,13 +491,16 @@ def read_mark_list(mark_list_path, expected_points):
             sample_name = Path(image_name).stem
             points = [(float(x), float(y)) for x, y in POINT_PATTERN.findall(line)]
 
-            if len(points) < int(expected_points):
-                raise ValueError(f'Mark-list row {line_number} for {sample_name} has {len(points)} complete point(s), expected at least {expected_points}.')
+            if (selected_sample_names is None or sample_name in selected_sample_names) and len(points) != int(expected_points):
+                difference = abs(len(points) - int(expected_points))
+                difference_label = 'missing' if len(points) < int(expected_points) else 'extra'
+                raise ValueError(f'Mark-list row {line_number} for {sample_name} has {len(points)} complete point(s); '
+                                 f'exactly {expected_points} are required ({difference} {difference_label}).')
 
             if sample_name in mark_records:
                 raise ValueError(f'Duplicate sample name in mark list: {sample_name}.')
 
-            mark_records[sample_name] = (image_name, points[:int(expected_points)])
+            mark_records[sample_name] = (image_name, points)
 
     return mark_records
 
@@ -874,34 +902,72 @@ def draw_points_with_point_colours(image, points, prefix):
         cv2.putText(image, f'{prefix}{point_index}', (centre[0] + 6, centre[1] - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.5, colour, 1, cv2.LINE_AA)
 
 
-def build_result(record, detected_points, ground_truth_points, peak_values, num_centres, grid_spacing, checkpoint_type):
+def build_result(record, detected_points, ground_truth_points, peak_values, num_centres, grid_spacing, checkpoint_type,
+                 image_shape=None, dataset_split='inference', repetition=None, fold=None):
     """Build per-image endpoint and summary metrics."""
-    endpoint_rows = build_endpoint_rows(record=record, detected_points=detected_points, ground_truth_points=ground_truth_points, peak_values=peak_values)
+    endpoint_rows = build_endpoint_rows(record=record, detected_points=detected_points, ground_truth_points=ground_truth_points,
+                                        peak_values=peak_values, dataset_split=dataset_split, repetition=repetition,
+                                        fold=fold, checkpoint_type=checkpoint_type)
     point_errors = [row['point_error_px'] for row in endpoint_rows if row['point_error_px'] is not None]
     summary = {
+        'dataset_split': dataset_split,
+        'repetition': repetition,
+        'fold': fold,
         'sample_name': record.sample_name,
         'image_path': record.image_path.as_posix(),
+        'image_height': None if image_shape is None else int(image_shape[0]),
+        'image_width': None if image_shape is None else int(image_shape[1]),
         'checkpoint_type': checkpoint_type,
         'num_points': len(detected_points),
-        'num_centres': int(num_centres),
-        'grid_spacing': int(grid_spacing),
+        'mean_error_px': float(np.mean(point_errors)) if point_errors else None,
+        'median_error_px': float(np.median(point_errors)) if point_errors else None,
+        'max_error_px': float(np.max(point_errors)) if point_errors else None,
         'mean_point_error_px': float(np.mean(point_errors)) if point_errors else None,
         'median_point_error_px': float(np.median(point_errors)) if point_errors else None,
-        'max_point_error_px': float(np.max(point_errors)) if point_errors else None
+        'max_point_error_px': float(np.max(point_errors)) if point_errors else None,
+        'num_centres': int(num_centres),
+        'grid_spacing': int(grid_spacing),
     }
 
     return {'summary': summary, 'endpoint_rows': endpoint_rows}
 
 
-def build_endpoint_rows(record, detected_points, ground_truth_points, peak_values):
+def build_endpoint_rows(record, detected_points, ground_truth_points, peak_values, dataset_split='inference',
+                        repetition=None, fold=None, checkpoint_type=None):
     """Build endpoint metric rows for one image."""
     rows = []
 
     for point_index, ((pred_x, pred_y), peak_value) in enumerate(zip(detected_points, peak_values), start=1):
         gt_x, gt_y, point_error = get_point_error(detected_points=detected_points, ground_truth_points=ground_truth_points, point_index=point_index)
-        rows.append({'sample_name': record.sample_name, 'image_path': record.image_path.as_posix(), 'point_index': point_index, 'pred_x': int(pred_x), 'pred_y': int(pred_y), 'gt_x': gt_x, 'gt_y': gt_y, 'point_error_px': point_error, 'vote_peak': peak_value})
+        rows.append({'dataset_split': dataset_split, 'repetition': repetition, 'fold': fold,
+                     'sample_name': record.sample_name, 'image_path': record.image_path.as_posix(), 'point_index': point_index,
+                     'target_x': gt_x, 'target_y': gt_y, 'pred_x': int(pred_x), 'pred_y': int(pred_y),
+                     'error_px': point_error, 'checkpoint_type': checkpoint_type,
+                     'gt_x': gt_x, 'gt_y': gt_y, 'point_error_px': point_error, 'vote_peak': peak_value})
 
     return rows
+
+
+def build_prediction_rows(summary_rows, endpoint_rows):
+    """Build one comparison-ready wide prediction row per image."""
+    endpoints_by_sample = {}
+    for row in endpoint_rows:
+        endpoints_by_sample.setdefault(row['sample_name'], []).append(row)
+
+    predictions = []
+    for summary in summary_rows:
+        row = {key: summary.get(key) for key in ('dataset_split', 'repetition', 'fold', 'sample_name')}
+        row['mean_error_px'] = summary.get('mean_error_px')
+        for endpoint in sorted(endpoints_by_sample.get(summary['sample_name'], []), key=lambda value: value['point_index']):
+            point_index = int(endpoint['point_index'])
+            row[f'target_x{point_index}'] = endpoint.get('target_x')
+            row[f'target_y{point_index}'] = endpoint.get('target_y')
+            row[f'pred_x{point_index}'] = endpoint.get('pred_x')
+            row[f'pred_y{point_index}'] = endpoint.get('pred_y')
+            row[f'error_px{point_index}'] = endpoint.get('error_px')
+        predictions.append(row)
+
+    return predictions
 
 
 def build_dimension_rows(record, detected_points, ground_truth_points, dimension_point_map=None):
