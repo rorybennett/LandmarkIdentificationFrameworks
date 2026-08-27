@@ -18,9 +18,8 @@ The package currently provides:
 - deterministic seeding for Python, NumPy, PyTorch, and DataLoader workers;
 - best checkpoints plus atomically committed last-epoch checkpoints that can continue interrupted training;
 - validation predictions, endpoint metrics, heatmap overlays, and point overlays;
+- standalone inference for one image or an image directory using any registered trained model;
 - optional copying of a completed run to a separate save directory.
-
-General-purpose inference outside the training/validation workflow is not yet included.
 
 The code targets Python 3.10 or later and PyTorch 2.4 or later. It does not contain legacy PyTorch-loading fallbacks or older command aliases.
 
@@ -37,6 +36,7 @@ Heatmaps/
     custom_dataset.py
     heatmap_training_pipeline.py
     heatmap_transforms.py
+    infer_landmarks.py
     model_registry.py
     models.py
     parameters.py
@@ -46,12 +46,14 @@ Heatmaps/
       annotation_utils.py
       calculate_image_size.py
       generate_folds.py
+      heatmap_inference_utils.py
       io_utils.py
       progress_bar.py
       verify_transforms.py
       visualisation_utils.py
   tests/
     test_annotation_utils.py
+    test_inference.py
     test_repeated_kfold.py
     test_runtime_integration.py
 ```
@@ -68,6 +70,7 @@ This installs:
 
 ```text
 heatmaps-train
+heatmaps-infer
 ```
 
 Display the complete command-line interface with:
@@ -75,6 +78,49 @@ Display the complete command-line interface with:
 ```bash
 heatmaps-train --help
 ```
+
+## Standalone inference
+
+Edit the paths and switches near the top of `Heatmaps/infer_landmarks.py`, then run either:
+
+```bash
+heatmaps-infer
+```
+
+or:
+
+```bash
+python -m Heatmaps.infer_landmarks
+```
+
+Set `MODEL_PATH` to `model_best_validation_loss.pth` (normally the checkpoint to use for prediction), `INPUT_PATH` to one supported image or a directory, and
+`OUTPUT_DIR` to the result directory. `GROUND_TRUTH_MARK_LIST_PATH` is optional; when supplied, matching image stems receive pixel-error metrics and ground-truth points
+on their overlays. Directory searches can be made recursive with `RECURSIVE_IMAGE_SEARCH`.
+
+Inference reconstructs the selected U-Net, HRNet, stacked-hourglass, or ViTPose architecture directly from checkpoint metadata. It also restores the training image size
+and channel count, applies the same image loading and resize path used during training, decodes every heatmap by argmax, and scales predictions back into original-image
+pixel coordinates. When a checkpoint expects three input channels, a single-channel greyscale inference image is replicated across all three channels automatically. Other
+channel mismatches remain errors. No architecture settings need to be copied into the script.
+
+`BATCH_SIZE` controls the number of full resized images passed through the model together. Keep it at `1` for large models or images and increase it only when device
+memory allows. `SAVE_RAW_HEATMAPS` optionally writes the model-resolution arrays as `.npy` files.
+
+The output directory contains:
+
+```text
+inference_summary.xlsx
+inference_image_summary.csv
+inference_endpoints.csv
+inference_predictions.csv
+inference_heatmap_overlays/
+inference_point_overlays/
+inference_raw_heatmaps/       # only when SAVE_RAW_HEATMAPS is true
+inference_logs/
+  inference_run_metadata.json
+```
+
+The Excel workbook uses `image_summary` and `endpoints` sheets. CSV output includes both long endpoint rows and one wide, comparison-ready prediction row per image.
+Error fields are blank when no matching ground truth is available.
 
 ## Input data
 

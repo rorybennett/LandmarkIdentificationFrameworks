@@ -20,6 +20,7 @@ dependencies = [
 
 [project.scripts]
 heatmaps-train = "Heatmaps.heatmap_training_pipeline:main"
+heatmaps-infer = "Heatmaps.infer_landmarks:main"
 
 [tool.setuptools.packages.find]
 include = ["Heatmaps*"]
