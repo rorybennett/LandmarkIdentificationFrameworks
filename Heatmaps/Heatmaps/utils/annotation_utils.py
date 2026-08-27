@@ -55,7 +55,7 @@ def validate_annotation_point_count(mark_record, expected_points, sample_name, m
         location_parts.append(f'repetition {int(repetition)}')
 
     if fold is not None:
-        location_parts.append(f'fold {int(fold)}')
+        location_parts.append(f'fold {fold}')
 
     if split_name is not None:
         location_parts.append(f'{split_name} split')

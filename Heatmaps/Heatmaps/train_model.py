@@ -30,7 +30,7 @@ from .heatmap_transforms import get_augmentation_policy
 from .model_registry import build_heatmap_model, get_model_config_fields, get_model_kwargs, get_model_registry_entry
 from .models import count_trainable_parameters, unpack_heatmap_output
 from .runtime_metadata import collect_runtime_metadata, utc_now_iso
-from .utils.io_utils import get_split_file_path, heatmaps_to_points, infer_image_channel_count, safe_file_stem, scale_points_to_original
+from .utils.io_utils import get_split_file_path, heatmaps_to_points, infer_image_channel_count, normalise_fold, safe_file_stem, scale_points_to_original
 from .utils.progress_bar import ProgressBar
 from .utils.visualisation_utils import save_validation_overlays
 
@@ -68,7 +68,7 @@ HISTORY_FIELDS = (
 @dataclass
 class HeatmapDataConfig:
     repetition: int
-    fold: int
+    fold: int | str
     task_name: str
     num_of_points: int
     fold_lists_path: Path
@@ -732,7 +732,7 @@ class TrainModel:
         validation_predictions_path = None if validation_output_paths is None else validation_output_paths.get('validation_predictions_csv')
         summary = {'format_version': CHECKPOINT_FORMAT_VERSION, 'schema': 'heatmap_validation_checkpoint_summary',
                    'schema_version': CHECKPOINT_SCHEMA_VERSION, 'created_at': utc_now_iso(),
-                   'repetition': int(self.data_config.repetition), 'fold': int(self.data_config.fold), 'task_name': self.data_config.task_name,
+                   'repetition': int(self.data_config.repetition), 'fold': normalise_fold(self.data_config.fold), 'task_name': self.data_config.task_name,
                    'num_of_points': int(self.data_config.num_of_points), 'checkpoints': {
                 'best_validation_loss': self.build_checkpoint_descriptor(path=best_checkpoint_path, checkpoint_type='best_validation_loss',
                                                                          epoch=best_epoch, validation_metrics=best_validation_metrics),
@@ -767,12 +767,12 @@ class TrainModel:
             'schema': CHECKPOINT_SCHEMA_NAME,
             'schema_version': CHECKPOINT_SCHEMA_VERSION,
             'created_at': utc_now_iso(),
-            'task': {'name': self.data_config.task_name, 'repetition': int(self.data_config.repetition), 'fold': int(self.data_config.fold),
+            'task': {'name': self.data_config.task_name, 'repetition': int(self.data_config.repetition), 'fold': normalise_fold(self.data_config.fold),
                      'num_points': int(self.data_config.num_of_points),
                      'output_heads': int(self.data_config.num_of_points), 'prediction_type': 'landmark_heatmap_regression'},
             'model': {'registry_name': self.model_config.network_name, 'module': registry_entry['module'], 'class_name': registry_entry['class_name'],
                       'init_args': model_init_args},
-            'data': {'repetition': int(self.data_config.repetition), 'fold': int(self.data_config.fold),
+            'data': {'repetition': int(self.data_config.repetition), 'fold': normalise_fold(self.data_config.fold),
                      'fold_lists_path': str(self.data_config.fold_lists_path),
                      'mark_list_file': str(self.data_config.mark_list_file), 'image_data_dir': str(self.data_config.image_data_dir),
                      'recursive_image_search': bool(self.data_config.recursive_image_search), 'input_channels': input_channels},
@@ -1031,7 +1031,7 @@ class TrainModel:
             'task': {
                 'name': self.data_config.task_name,
                 'repetition': int(self.data_config.repetition),
-                'fold': int(self.data_config.fold),
+                'fold': normalise_fold(self.data_config.fold),
                 'num_points': int(self.data_config.num_of_points),
             },
             'data': {
@@ -1364,8 +1364,7 @@ class TrainModel:
         if int(self.data_config.repetition) < 1:
             raise ValueError(f'repetition must be at least 1. Got: {self.data_config.repetition}')
 
-        if int(self.data_config.fold) < 1:
-            raise ValueError(f'fold must be at least 1. Got: {self.data_config.fold}')
+        self.data_config.fold = normalise_fold(self.data_config.fold)
 
         if int(self.data_config.num_of_points) < MIN_POINTS_PER_IMAGE or int(self.data_config.num_of_points) > MAX_POINTS_PER_IMAGE:
             raise ValueError(f'num_of_points must be between {MIN_POINTS_PER_IMAGE} and {MAX_POINTS_PER_IMAGE}. Got: {self.data_config.num_of_points}')
@@ -1711,7 +1710,7 @@ class TrainModel:
     def create_image_summary_row(self, sample_name, image_path, image_height, image_width, point_errors, checkpoint_type=None):
         """Create one image-level validation summary row."""
         point_errors = np.asarray(point_errors, dtype=np.float32)
-        return {'dataset_split': 'validation', 'repetition': int(self.data_config.repetition), 'fold': int(self.data_config.fold),
+        return {'dataset_split': 'validation', 'repetition': int(self.data_config.repetition), 'fold': normalise_fold(self.data_config.fold),
                 'sample_name': sample_name, 'image_path': image_path, 'image_height': int(image_height), 'image_width': int(image_width),
                 'num_points': int(point_errors.size), 'mean_error_px': float(np.mean(point_errors)), 'median_error_px': float(np.median(point_errors)),
                 'max_error_px': float(np.max(point_errors)), 'checkpoint_type': checkpoint_type}
@@ -1721,7 +1720,7 @@ class TrainModel:
         rows = []
 
         for point_index, (target, predicted, error) in enumerate(zip(target_points, predicted_points, point_errors), start=1):
-            rows.append({'dataset_split': 'validation', 'repetition': int(self.data_config.repetition), 'fold': int(self.data_config.fold),
+            rows.append({'dataset_split': 'validation', 'repetition': int(self.data_config.repetition), 'fold': normalise_fold(self.data_config.fold),
                          'sample_name': sample_name, 'image_path': image_path, 'point_index': point_index, 'target_x': float(target[0]),
                          'target_y': float(target[1]), 'pred_x': float(predicted[0]), 'pred_y': float(predicted[1]),
                          'error_px': float(error), 'checkpoint_type': checkpoint_type})
@@ -1786,7 +1785,7 @@ class TrainModel:
         checkpoint_metrics = None if checkpoint_payload is None else checkpoint_payload.get('validation_metrics')
         raw_checkpoint_metrics = None if checkpoint_metrics is None else self.unlabel_validation_metrics(checkpoint_metrics)
         metadata = {'schema': 'heatmap_validation_run_metadata', 'schema_version': CHECKPOINT_SCHEMA_VERSION, 'created_at': utc_now_iso(),
-                    'dataset_split': 'validation', 'repetition': int(self.data_config.repetition), 'fold': int(self.data_config.fold),
+                    'dataset_split': 'validation', 'repetition': int(self.data_config.repetition), 'fold': normalise_fold(self.data_config.fold),
                     'task_name': self.data_config.task_name, 'num_points': int(self.data_config.num_of_points),
                     'image_count': len(image_summary_rows), 'endpoint_count': len(endpoint_rows),
                     'training_status': self.training_status, 'termination_reason': self.termination_reason,
@@ -1803,7 +1802,7 @@ class TrainModel:
 
     def create_prediction_row(self, sample_name, target_points, predicted_points, point_errors):
         """Create one prediction CSV row."""
-        row = {'dataset_split': 'validation', 'repetition': int(self.data_config.repetition), 'fold': int(self.data_config.fold),
+        row = {'dataset_split': 'validation', 'repetition': int(self.data_config.repetition), 'fold': normalise_fold(self.data_config.fold),
                'sample_name': sample_name, 'mean_error_px': float(np.mean(point_errors))}
 
         for point_index, (target, predicted, error) in enumerate(zip(target_points, predicted_points, point_errors), start=1):

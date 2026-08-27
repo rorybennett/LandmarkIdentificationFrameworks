@@ -41,7 +41,10 @@ class RepeatedKFoldTests(unittest.TestCase):
             for repetition in range(1, 4):
                 repetition_dir = output_dir / f'repetition_{repetition}'
                 expected_files = {f'{prefix}_f{fold}.txt' for fold in range(1, 5) for prefix in ('training', 'val')}
+                expected_files.update({'training_fall.txt', 'val_fall.txt'})
                 self.assertEqual({path.name for path in repetition_dir.iterdir()}, expected_files)
+                self.assertEqual(self.read_ids(repetition_dir / 'training_fall.txt'), expected_samples)
+                self.assertEqual(self.read_ids(repetition_dir / 'val_fall.txt'), expected_samples)
                 validation_occurrences = []
 
                 for fold in range(1, 5):
@@ -69,9 +72,11 @@ class RepeatedKFoldTests(unittest.TestCase):
 
             for repetition in range(1, 4):
                 validation_occurrences = []
+                repetition_dir = output_dir / f'repetition_{repetition}'
+                self.assertEqual(self.read_ids(repetition_dir / 'training_fall.txt'), expected_cross_validation_samples)
+                self.assertEqual(self.read_ids(repetition_dir / 'val_fall.txt'), expected_cross_validation_samples)
 
                 for fold in range(1, 6):
-                    repetition_dir = output_dir / f'repetition_{repetition}'
                     training_ids = self.read_ids(repetition_dir / f'training_f{fold}.txt')
                     validation_ids = self.read_ids(repetition_dir / f'val_f{fold}.txt')
                     self.assertFalse((training_ids | validation_ids) & expected_test_samples)
@@ -86,12 +91,17 @@ class RepeatedKFoldTests(unittest.TestCase):
                 membership_rows = list(csv.DictReader(membership_file))
             self.assertEqual({row['split'] for row in membership_rows}, {'training', 'validation'})
             self.assertFalse({row['sample_id'] for row in membership_rows} & expected_test_samples)
+            all_membership_rows = [row for row in membership_rows if row['fold'] == 'all']
+            self.assertEqual(len(all_membership_rows), 3 * 2 * len(expected_cross_validation_samples))
 
             with open(output_dir / generate_folds.SUMMARY_FILE_NAME, 'r', encoding='utf-8') as summary_file:
                 summary_rows = list(csv.DictReader(summary_file))
             self.assertEqual({int(row['source_count']) for row in summary_rows}, {50})
             self.assertEqual({int(row['held_out_test_count']) for row in summary_rows}, {3})
             self.assertEqual({int(row['cross_validation_count']) for row in summary_rows}, {47})
+            all_summary_rows = [row for row in summary_rows if row['fold'] == 'all']
+            self.assertEqual(len(all_summary_rows), 3)
+            self.assertTrue(all(row['training_count'] == '47' and row['validation_count'] == '47' for row in all_summary_rows))
 
             workbook_path = output_dir / generate_folds.TEST_CASES_WORKBOOK_NAME
             workbook = load_workbook(workbook_path)

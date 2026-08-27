@@ -95,18 +95,24 @@ folds/
   repeated_kfold_membership.csv
   test_cases.xlsx                 # only when fixed test cases are configured
   repetition_1/
+    training_fall.txt
+    val_fall.txt
     training_f1.txt
     val_f1.txt
     training_f2.txt
     val_f2.txt
     ...
   repetition_2/
+    training_fall.txt
+    val_fall.txt
     training_f1.txt
     val_f1.txt
     ...
 ```
 
-Each training and validation text file contains one sample identifier per line. Entries may be stems such as `A1` or filenames such as `A1.jpg`.
+Each training and validation text file contains one sample identifier per line. Entries may be stems such as `A1` or filenames such as `A1.jpg`. The special
+`training_fall.txt` and `val_fall.txt` files intentionally contain the same complete set of non-test samples so that `fold=all` retains the ordinary validation,
+checkpoint-selection, early-stopping, and validation-export workflow.
 
 Before training, the complete repeated k-fold collection is checked for:
 
@@ -114,7 +120,8 @@ Before training, the complete repeated k-fold collection is checked for:
 - identical contiguous fold numbers in every repetition;
 - the presence of `training_fN.txt` and `val_fN.txt` for every fold;
 - duplicate sample identifiers within a split;
-- overlap between the training and validation lists;
+- no overlap between numbered training and validation lists;
+- identical `training_fall.txt` and `val_fall.txt` membership, when fold-all files are present;
 - complete cross-validation-eligible dataset coverage in every fold;
 - use of every sample as validation exactly once per repetition;
 - use of the same cross-validation-eligible dataset in every repetition.
@@ -193,7 +200,7 @@ Use `TEST_SAMPLE_IDS = []` or `TEST_SAMPLE_IDS = None` to include every mark-lis
 duplicates, and values missing from the mark list. Invalid configuration or too few remaining samples cancels generation before existing fold outputs are removed.
 
 Each repetition starts from the remaining cross-validation-eligible dataset, uses `BASE_SEED + repetition - 1`, builds balanced validation folds, and uses all other
-eligible samples for training. Run:
+eligible samples for training. It also writes `training_fall.txt` and `val_fall.txt`; both contain every sample not reserved by `TEST_SAMPLE_IDS`. Run:
 
 ```bash
 python -m Heatmaps.utils.generate_folds
@@ -260,6 +267,9 @@ heatmaps-train REPETITION FOLD TASK_NAME TRAIN_MODEL COPY_FILES [OPTIONS]
 
 At least one of `TRAIN_MODEL` or `COPY_FILES` must be `true`.
 
+`FOLD` may be a numbered fold such as `1`, or `all`. The latter reads `training_fall.txt` and `val_fall.txt` and otherwise follows exactly the same training and
+validation process as a numbered fold.
+
 A transverse prostate example is:
 
 ```bash
@@ -295,6 +305,8 @@ validation, then validates the checkpoint schema and the complete compatibility 
 ```text
 SAVE_DIR/TASK_NAME/RUN_NAME/repetition_N/fold_N/
 ```
+
+For `FOLD=all`, the final path component is `fold_all`.
 
 When both actions are enabled, copying occurs after successful training.
 

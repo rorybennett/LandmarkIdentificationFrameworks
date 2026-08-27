@@ -16,6 +16,8 @@ REPETITION_DIR_PATTERN = re.compile(r'^repetition_(\d+)$')
 TRAINING_LIST_PATTERN = re.compile(r'^training_f(\d+)\.txt$')
 VALIDATION_LIST_PATTERN = re.compile(r'^val_f(\d+)\.txt$')
 SPLIT_FILE_PREFIXES = {'training': 'training', 'validation': 'val'}
+ALL_FOLD_NAME = 'all'
+ALL_FOLD_FILE_NAMES = {'training': 'training_fall.txt', 'validation': 'val_fall.txt'}
 SUPPORTED_IMAGE_SUFFIXES = ('.png', '.jpg', '.jpeg', '.bmp', '.tif', '.tiff')
 
 
@@ -148,6 +150,27 @@ def canonical_split_name(value):
     return Path(str(value).split()[0]).stem
 
 
+def normalise_fold(value):
+    """Return a positive fold number or the canonical ``all`` fold name."""
+    if str(value).strip().lower() == ALL_FOLD_NAME:
+        return ALL_FOLD_NAME
+
+    try:
+        fold = int(value)
+    except (TypeError, ValueError) as error:
+        raise ValueError(f'fold must be a positive integer or "{ALL_FOLD_NAME}". Got: {value}') from error
+
+    if fold < 1:
+        raise ValueError(f'fold must be a positive integer or "{ALL_FOLD_NAME}". Got: {value}')
+
+    return fold
+
+
+def is_all_fold(value):
+    """Return whether a fold value selects the all-data fold."""
+    return normalise_fold(value) == ALL_FOLD_NAME
+
+
 def get_split_file_path(fold_lists_path, repetition, split_name, fold):
     """Return one repetition/fold split-list path."""
     canonical_name = str(split_name).lower()
@@ -155,8 +178,9 @@ def get_split_file_path(fold_lists_path, repetition, split_name, fold):
     if canonical_name not in SPLIT_FILE_PREFIXES:
         raise ValueError(f'Unknown split name: {split_name}. Expected one of {tuple(SPLIT_FILE_PREFIXES)}.')
 
-    prefix = SPLIT_FILE_PREFIXES[canonical_name]
-    return get_repetition_dir(fold_lists_path=fold_lists_path, repetition=repetition) / f'{prefix}_f{int(fold)}.txt'
+    fold = normalise_fold(fold)
+    file_name = ALL_FOLD_FILE_NAMES[canonical_name] if fold == ALL_FOLD_NAME else f'{SPLIT_FILE_PREFIXES[canonical_name]}_f{fold}.txt'
+    return get_repetition_dir(fold_lists_path=fold_lists_path, repetition=repetition) / file_name
 
 
 def read_split_names(fold_lists_path, repetition, split_name, fold):
@@ -199,7 +223,8 @@ def validate_split_duplicates(split_name, names, repetition, fold):
 
 
 def validate_fold_split_overlaps(fold_lists_path, repetition, fold):
-    """Validate that one fold's training and validation lists are disjoint."""
+    """Validate one fold's split relationship, including the intentional all-fold overlap."""
+    fold = normalise_fold(fold)
     split_names = {split_name: read_split_names(fold_lists_path=fold_lists_path, repetition=repetition, split_name=split_name, fold=fold)
                    for split_name in SPLIT_FILE_PREFIXES}
     split_sets = {}
@@ -207,6 +232,16 @@ def validate_fold_split_overlaps(fold_lists_path, repetition, fold):
     for split_name, names in split_names.items():
         validate_split_duplicates(split_name=split_name, names=names, repetition=repetition, fold=fold)
         split_sets[split_name] = {canonical_split_name(name) for name in names}
+
+    if fold == ALL_FOLD_NAME:
+        if split_sets['training'] != split_sets['validation']:
+            training_only = split_sets['training'] - split_sets['validation']
+            validation_only = split_sets['validation'] - split_sets['training']
+            raise ValueError(
+                f'Repetition {repetition}, fold all requires training_fall.txt and val_fall.txt to contain the same sample IDs. '
+                f'Training-only={sorted(training_only, key=natural_key)}, validation-only={sorted(validation_only, key=natural_key)}.'
+            )
+        return split_sets
 
     overlap = split_sets['training'] & split_sets['validation']
 
@@ -254,6 +289,26 @@ def validate_repeated_kfold_lists(fold_lists_path):
             reference_sample_set = repetition_sample_set
         elif repetition_sample_set != reference_sample_set:
             raise ValueError(f'Repetition {repetition} does not contain the same full dataset as repetition {repetition_numbers[0]}.')
+
+    all_fold_presence = []
+
+    for repetition in repetition_numbers:
+        all_paths = [get_split_file_path(fold_lists_path, repetition, split_name, ALL_FOLD_NAME)
+                     for split_name in SPLIT_FILE_PREFIXES]
+        all_fold_presence.extend(path.is_file() for path in all_paths)
+
+        if any(path.is_file() for path in all_paths) and not all(path.is_file() for path in all_paths):
+            missing = [str(path) for path in all_paths if not path.is_file()]
+            raise ValueError(f'Fold all requires both training_fall.txt and val_fall.txt. Missing: {missing}')
+
+    if any(all_fold_presence):
+        if not all(all_fold_presence):
+            raise ValueError('Fold-all files must be present in every repetition or omitted from every repetition.')
+
+        for repetition in repetition_numbers:
+            split_sets = validate_fold_split_overlaps(fold_lists_path, repetition, ALL_FOLD_NAME)
+            if split_sets['training'] != reference_sample_set:
+                raise ValueError(f'Repetition {repetition}, fold all does not contain the same full dataset as the numbered folds.')
 
     return {'repetitions': repetition_numbers, 'folds': fold_numbers, 'sample_count': len(reference_sample_set)}
 

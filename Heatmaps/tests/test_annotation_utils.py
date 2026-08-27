@@ -62,6 +62,13 @@ class AnnotationValidationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, r'\(1 missing\)'):
             annotation_utils.validate_annotation_point_count(record, expected_points=2, sample_name='patient_7', mark_list_file=mark_list)
 
+    def test_fold_all_is_included_in_error_context(self):
+        mark_list, record = self.read_record('patient_7.png (1, 2)')
+
+        with self.assertRaisesRegex(ValueError, r'repetition 1, fold all, validation split'):
+            annotation_utils.validate_annotation_point_count(record, expected_points=2, sample_name='patient_7', mark_list_file=mark_list,
+                                                             repetition=1, fold='all', split_name='validation', training_context=True)
+
 
 if __name__ == '__main__':
     unittest.main()

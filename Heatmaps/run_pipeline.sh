@@ -8,7 +8,7 @@ MARK_LIST_FILE="$HOME/DATA/doctors_resampled_transverseMarkList.txt"
 IMAGE_DATA_DIR="$HOME/DATA/TRANSVERSE"
 
 REPETITION=1
-FOLD=1
+FOLD=1  # Use "all" to train with training_fall.txt and validate with val_fall.txt.
 TASK_NAME="prostate_transverse"
 NUM_POINTS=4
 

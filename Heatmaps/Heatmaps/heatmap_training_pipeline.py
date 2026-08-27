@@ -14,7 +14,7 @@ from pathlib import Path
 from . import parameters as pms
 from .model_registry import get_available_model_names, get_model_config_fields
 from .train_model import HeatmapDataConfig, HeatmapModelConfig, TrainConfig, TrainModel
-from .utils.io_utils import discover_fold_numbers, discover_repetition_numbers, get_split_file_path, str_to_bool, validate_fold_split_overlaps, validate_repeated_kfold_lists
+from .utils.io_utils import ALL_FOLD_NAME, discover_fold_numbers, discover_repetition_numbers, get_split_file_path, is_all_fold, normalise_fold, str_to_bool, validate_fold_split_overlaps, validate_repeated_kfold_lists
 
 RESULTS_DIR_NAME = 'TRAINING_RESULTS'
 MIN_POINTS_PER_IMAGE = 1
@@ -24,7 +24,7 @@ MAX_POINTS_PER_IMAGE = 30
 @dataclass
 class RunConfig:
     repetition: int
-    fold: int
+    fold: int | str
     task_name: str
     num_of_points: int
     train_model: bool
@@ -335,7 +335,7 @@ def validate_args(args, num_of_repetitions, num_of_folds):
     if args.repetition < 1 or args.repetition > num_of_repetitions:
         raise ValueError(f'repetition must be between 1 and {num_of_repetitions}. Got repetition={args.repetition}.')
 
-    if args.fold < 1 or args.fold > num_of_folds:
+    if not is_all_fold(args.fold) and (args.fold < 1 or args.fold > num_of_folds):
         raise ValueError(f'fold must be between 1 and {num_of_folds}. Got fold={args.fold}.')
 
     if args.run_dir.exists() and not args.run_dir.is_dir():
@@ -496,6 +496,14 @@ def validate_num_points(value):
     return value
 
 
+def parse_fold(value):
+    """Parse a numbered fold or the special all-data fold from the command line."""
+    try:
+        return normalise_fold(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(str(error)) from error
+
+
 def format_number(value):
     """Format numeric values safely for run folder names."""
     return f'{value:g}'.replace('-', 'm').replace('.', 'p')
@@ -507,7 +515,12 @@ def calculate_fold_collection_sha256(fold_lists_path, repetition_numbers, fold_n
     digest = hashlib.sha256()
 
     for repetition in repetition_numbers:
-        for fold in fold_numbers:
+        hash_folds = list(fold_numbers)
+        all_fold_path = get_split_file_path(fold_lists_path, repetition, 'training', ALL_FOLD_NAME)
+        if all_fold_path.is_file():
+            hash_folds.append(ALL_FOLD_NAME)
+
+        for fold in hash_folds:
             for split_name in ('training', 'validation'):
                 split_path = get_split_file_path(fold_lists_path=fold_lists_path, repetition=repetition, split_name=split_name, fold=fold)
                 relative_name = split_path.relative_to(fold_lists_path).as_posix()
@@ -586,7 +599,7 @@ def parse_args():
                                      formatter_class=argparse.ArgumentDefaultsHelpFormatter)
 
     parser.add_argument('repetition', type=int, help='Repeated k-fold repetition number to train.')
-    parser.add_argument('fold', type=int, help='Fold number within the selected repetition.')
+    parser.add_argument('fold', type=parse_fold, help='Fold number within the selected repetition, or "all".')
     parser.add_argument('task_name', type=str, help='Task/output name, for example prostate_transverse.')
     parser.add_argument('train_model', type=str_to_bool, nargs='?', default=True, help='Train the model.')
     parser.add_argument('copy_files', type=str_to_bool, nargs='?', default=False, help='Copy results to save-dir after training.')
@@ -599,7 +612,7 @@ def parse_args():
     parser.add_argument('--num-points', type=validate_num_points, required=True,
                         help=f'Number of landmarks per image, from {MIN_POINTS_PER_IMAGE} to {MAX_POINTS_PER_IMAGE}.')
     parser.add_argument('--fold-lists-path', type=Path, required=True,
-                        help='Root containing repetition_N directories with training_fN.txt and val_fN.txt files.')
+                        help='Root containing repetition_N directories with training_fN.txt and val_fN.txt files, plus optional training_fall.txt and val_fall.txt files.')
     parser.add_argument('--mark-list-file', type=Path, required=True, help='Landmark mark-list file.')
     parser.add_argument('--image-data-dir', type=Path, required=True, help='Directory containing source images.')
     parser.add_argument('--image-size', type=int, nargs=2, required=True, metavar=('HEIGHT', 'WIDTH'),
@@ -678,8 +691,14 @@ def build_configs(args):
     if args.repetition not in repetition_numbers:
         raise ValueError(f'Repetition {args.repetition} was requested, but available repetitions are {repetition_numbers}.')
 
-    if args.fold not in fold_numbers:
+    if not is_all_fold(args.fold) and args.fold not in fold_numbers:
         raise ValueError(f'Fold {args.fold} was requested, but available folds are {fold_numbers}.')
+
+    if is_all_fold(args.fold):
+        for split_name in ('training', 'validation'):
+            split_path = get_split_file_path(args.fold_lists_path, args.repetition, split_name, ALL_FOLD_NAME)
+            if not split_path.is_file():
+                raise ValueError(f'Fold all was requested, but its {split_name} list does not exist: {split_path}')
 
     validate_args(args=args, num_of_repetitions=num_of_repetitions, num_of_folds=num_of_folds)
     run_name = clean_run_name(args.run_name) if args.run_name else build_run_name(

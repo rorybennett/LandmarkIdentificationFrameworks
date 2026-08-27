@@ -24,8 +24,8 @@ BASE_SEED = 42
 TEST_SAMPLE_IDS = ['A303', 'A275', 'A270', 'A268', 'A259', 'A258', 'A257', 'A246', 'A243', 'A237', 'A235', 'A296', 'A230', 'A225', 'A222', 'A221', 'A217', 'A215', 'A242',
                    'A207']
 
-MARK_LIST_PATH = Path(r'C:\Storage\Datasets\IPV\OriginalData\doctors_resampled_transverseMarkList.txt')
-OUTPUT_DIR = Path(r'C:\Storage\Datasets\IPV\OriginalData\folds_network_study')
+MARK_LIST_PATH = Path(r'C:\Storage\Datasets\LandmarkIdentification\OriginalIPVData\doctors_resampled_transverseMarkList.txt')
+OUTPUT_DIR = Path(r'C:\Storage\Datasets\LandmarkIdentification\OriginalIPVData\folds_network_study')
 
 CLEAN_OUTPUT_DIR = False
 SORT_OUTPUT_FILES = True
@@ -35,6 +35,9 @@ WRITE_MEMBERSHIP_CSV = True
 REPETITION_DIR_PREFIX = 'repetition_'
 TRAINING_PREFIX = 'training'
 VALIDATION_PREFIX = 'val'
+ALL_FOLD_NAME = 'all'
+ALL_FOLD_TRAINING_FILE_NAME = 'training_fall.txt'
+ALL_FOLD_VALIDATION_FILE_NAME = 'val_fall.txt'
 SUMMARY_FILE_NAME = 'repeated_kfold_summary.csv'
 MEMBERSHIP_FILE_NAME = 'repeated_kfold_membership.csv'
 TEST_CASES_WORKBOOK_NAME = 'test_cases.xlsx'
@@ -289,12 +292,14 @@ def write_sample_list(path, sample_ids):
             output_file.write(f'{sample_id}\n')
 
 
-def write_repetition_files(output_dir, repetitions):
-    """Write training_fN.txt and val_fN.txt files beneath every repetition directory."""
+def write_repetition_files(output_dir, repetitions, all_sample_ids):
+    """Write numbered folds and an all-data training/validation pair beneath every repetition directory."""
     for repetition_data in repetitions:
         repetition = repetition_data['repetition']
         repetition_dir = Path(output_dir) / f'{REPETITION_DIR_PREFIX}{repetition}'
         repetition_dir.mkdir(exist_ok=False, parents=True)
+        write_sample_list(repetition_dir / ALL_FOLD_TRAINING_FILE_NAME, all_sample_ids)
+        write_sample_list(repetition_dir / ALL_FOLD_VALIDATION_FILE_NAME, all_sample_ids)
 
         for fold in repetition_data['folds']:
             fold_number = fold['fold']
@@ -337,6 +342,10 @@ def write_summary_csv(output_dir, repetitions, source_count, cross_validation_co
                          'training_count', 'validation_count', 'training_fraction', 'validation_fraction'])
 
         for repetition_data in repetitions:
+            writer.writerow([
+                repetition_data['repetition'], repetition_data['seed'], ALL_FOLD_NAME, source_count, test_count,
+                cross_validation_count, cross_validation_count, cross_validation_count, 1.0, 1.0,
+            ])
             for fold in repetition_data['folds']:
                 training_count = len(fold['training'])
                 validation_count = len(fold['validation'])
@@ -356,6 +365,9 @@ def write_membership_csv(output_dir, repetitions):
         writer.writerow(['repetition', 'repetition_seed', 'fold', 'split', 'sample_id'])
 
         for repetition_data in repetitions:
+            for split_name in ('training', 'validation'):
+                for sample_id in sorted_for_output(repetition_data['folds'][0]['training'] + repetition_data['folds'][0]['validation']):
+                    writer.writerow([repetition_data['repetition'], repetition_data['seed'], ALL_FOLD_NAME, split_name, sample_id])
             for fold in repetition_data['folds']:
                 for split_name in ('training', 'validation'):
                     for sample_id in sorted_for_output(fold[split_name]):
@@ -376,6 +388,7 @@ def print_summary(output_dir, repetitions, source_count, cross_validation_count,
 
     for repetition_data in repetitions:
         print(f'Repetition {repetition_data["repetition"]} (seed={repetition_data["seed"]})')
+        print(f'  Fold all: training={cross_validation_count} (100.00%), validation={cross_validation_count} (100.00%)')
 
         for fold in repetition_data['folds']:
             training_count = len(fold['training'])
@@ -402,7 +415,7 @@ def create_repeated_kfold_lists(mark_list_path, output_dir, num_repetitions, num
     validate_test_sample_exclusion(repetitions=repetitions, test_sample_ids=test_sample_ids)
 
     prepare_output_dir(output_dir=output_dir, clean_output_dir=CLEAN_OUTPUT_DIR)
-    write_repetition_files(output_dir=output_dir, repetitions=repetitions)
+    write_repetition_files(output_dir=output_dir, repetitions=repetitions, all_sample_ids=cross_validation_sample_ids)
 
     if test_sample_ids:
         write_test_cases_workbook(output_dir=output_dir, test_sample_ids=test_sample_ids)

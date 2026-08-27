@@ -17,7 +17,7 @@ from .utils.io_utils import create_heatmaps, get_image_size, get_split_file_path
 @dataclass
 class HeatmapDatasetConfig:
     repetition: int
-    fold: int
+    fold: int | str
     split_name: str
     num_of_points: int
     fold_lists_path: Path

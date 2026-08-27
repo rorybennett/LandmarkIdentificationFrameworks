@@ -12,14 +12,20 @@ import cv2
 import numpy as np
 import torch
 
-from Heatmaps.heatmap_training_pipeline import HeatmapTrainingPipeline, RunConfig, calculate_fold_collection_sha256
+from Heatmaps.heatmap_training_pipeline import HeatmapTrainingPipeline, RunConfig, calculate_fold_collection_sha256, parse_fold
 from Heatmaps.train_model import HeatmapDataConfig, HeatmapModelConfig, TrainConfig, TrainModel
 from Heatmaps.utils.generate_folds import create_repeated_kfold_lists
-from Heatmaps.utils.io_utils import validate_repeated_kfold_lists
+from Heatmaps.utils.io_utils import get_split_file_path, validate_fold_split_overlaps, validate_repeated_kfold_lists
 from Heatmaps.utils.verify_transforms import read_mark_rows
 
 
 class RuntimeIntegrationTests(unittest.TestCase):
+    def test_fold_parser_and_paths_accept_all(self):
+        self.assertEqual(parse_fold('ALL'), 'all')
+        self.assertEqual(parse_fold('3'), 3)
+        self.assertEqual(get_split_file_path('folds', 2, 'training', 'all').name, 'training_fall.txt')
+        self.assertEqual(get_split_file_path('folds', 2, 'validation', 'all').name, 'val_fall.txt')
+
     def test_runtime_validator_accepts_generated_repeated_kfold_lists(self):
         with tempfile.TemporaryDirectory() as temporary_dir:
             temporary_path = Path(temporary_dir)
@@ -43,6 +49,30 @@ class RuntimeIntegrationTests(unittest.TestCase):
 
             with self.assertRaisesRegex(ValueError, 'must match exactly'):
                 validate_repeated_kfold_lists(repetition_dir.parent)
+
+    def test_only_fold_all_accepts_identical_training_and_validation_samples(self):
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            repetition_dir = Path(temporary_dir) / 'repetition_1'
+            repetition_dir.mkdir()
+            identical_samples = 'patient_1\npatient_2\n'
+            (repetition_dir / 'training_fall.txt').write_text(identical_samples, encoding='utf-8')
+            (repetition_dir / 'val_fall.txt').write_text(identical_samples, encoding='utf-8')
+            split_sets = validate_fold_split_overlaps(repetition_dir.parent, 1, 'all')
+            self.assertEqual(split_sets['training'], {'patient_1', 'patient_2'})
+
+            (repetition_dir / 'training_f1.txt').write_text(identical_samples, encoding='utf-8')
+            (repetition_dir / 'val_f1.txt').write_text('patient_2\n', encoding='utf-8')
+            with self.assertRaisesRegex(ValueError, 'overlapping sample'):
+                validate_fold_split_overlaps(repetition_dir.parent, 1, 1)
+
+    def test_fold_all_requires_matching_training_and_validation_samples(self):
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            repetition_dir = Path(temporary_dir) / 'repetition_1'
+            repetition_dir.mkdir()
+            (repetition_dir / 'training_fall.txt').write_text('patient_1\npatient_2\n', encoding='utf-8')
+            (repetition_dir / 'val_fall.txt').write_text('patient_1\n', encoding='utf-8')
+            with self.assertRaisesRegex(ValueError, 'requires training_fall.txt and val_fall.txt to contain the same'):
+                validate_fold_split_overlaps(repetition_dir.parent, 1, 'all')
 
     def test_transform_verifier_rejects_missing_and_extra_landmarks(self):
         with tempfile.TemporaryDirectory() as temporary_dir:
@@ -149,6 +179,42 @@ class RuntimeIntegrationTests(unittest.TestCase):
             self.assertEqual((row['repetition'], row['fold']), (2, 3))
             self.assertEqual(trainer.get_validation_output_path(), root / 'validation_results')
             self.assertEqual(trainer.get_checkpoint_path('best_validation_loss').name, 'model_best_validation_loss.pth')
+
+    def test_fold_all_keeps_standard_validation_outputs(self):
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            fold_dir = root / 'folds' / 'repetition_1'
+            image_dir = root / 'images'
+            output_dir = root / 'outputs'
+            fold_dir.mkdir(parents=True)
+            image_dir.mkdir()
+            samples = 'patient_1\npatient_2\n'
+            (fold_dir / 'training_fall.txt').write_text(samples, encoding='utf-8')
+            (fold_dir / 'val_fall.txt').write_text(samples, encoding='utf-8')
+            mark_list = root / 'marks.txt'
+            mark_list.write_text('patient_1.png (2, 2)\npatient_2.png (5, 5)\n', encoding='utf-8')
+
+            for patient_name in ('patient_1', 'patient_2'):
+                self.assertTrue(cv2.imwrite(str(image_dir / f'{patient_name}.png'), np.zeros((8, 8), dtype=np.uint8)))
+
+            trainer = TrainModel(
+                data_config=HeatmapDataConfig(repetition=1, fold='all', task_name='task', num_of_points=1,
+                                              fold_lists_path=root / 'folds', mark_list_file=mark_list, image_data_dir=image_dir,
+                                              image_size=(8, 8), heatmap_sigma=1.0),
+                train_config=TrainConfig(batch_size=1, learning_rate=1e-3, max_training_epochs=1, num_workers=0,
+                                         save_validation_predictions=True),
+                model_config=HeatmapModelConfig(base_channels=4, depth=1, max_channels=8),
+                output_save_path=output_dir,
+                device=torch.device('cpu'),
+            )
+            trainer.train()
+
+            self.assertTrue((output_dir / 'model_best_validation_loss.pth').is_file())
+            self.assertTrue((output_dir / 'validation_results' / 'validation_predictions.csv').is_file())
+            summary = json.loads((output_dir / 'validation_checkpoint_summary.json').read_text(encoding='utf-8'))
+            self.assertEqual(summary['fold'], 'all')
+            checkpoint = torch.load(output_dir / 'model_best_validation_loss.pth', map_location='cpu', weights_only=False)
+            self.assertEqual(checkpoint['metadata']['task']['fold'], 'all')
 
     def test_one_epoch_training_writes_explicit_validation_outputs(self):
         with tempfile.TemporaryDirectory() as temporary_dir:
