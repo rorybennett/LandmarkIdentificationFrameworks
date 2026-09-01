@@ -226,7 +226,7 @@ def get_default_heatmap_transforms():
 def get_augmentation_policy():
     """Return the default augmentation policy recorded in checkpoints."""
     return {
-        'name': 'default_heatmap_oversampling_v5',
+        'name': 'default_heatmap_oversampling_0_1',
         'random_source': 'numpy.random seeded by training random_seed and DataLoader worker seeds',
         'transform_order': ['RandomAffine', 'GaussianNoise', 'GaussianBlur'],
         'transforms': [

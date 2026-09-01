@@ -10,6 +10,7 @@ import torch
 from torch.utils.data import Dataset
 
 from .heatmap_transforms import get_default_heatmap_transforms
+from .normalisation import ChannelStatistics, normalise_channel_first
 from .utils.annotation_utils import read_mark_list, resolve_mark_record, validate_annotation_point_count
 from .utils.io_utils import create_heatmaps, get_image_size, get_split_file_path, load_image_as_float, natural_key, read_split_names, resize_channel_first, resolve_image_path, scale_points, validate_points_within_image
 
@@ -28,6 +29,8 @@ class HeatmapDatasetConfig:
     input_channels: int | None = None
     recursive_image_search: bool = False
     oversampling_factor: int = 1
+    normalisation_mean: tuple[float, float, float] | None = None
+    normalisation_std: tuple[float, float, float] | None = None
 
 
 class HeatmapDataset(Dataset):
@@ -55,6 +58,11 @@ class HeatmapDataset(Dataset):
             image, original_points = self.oversampling_transform(image=image, points=original_points)
 
         image = resize_channel_first(image=image, image_size=self.config.image_size)
+
+        if self.config.normalisation_mean is not None:
+            image = normalise_channel_first(image=image, mean=self.config.normalisation_mean,
+                                            standard_deviation=self.config.normalisation_std)
+
         heatmap_points = scale_points(points=original_points, original_size=original_size, image_size=self.config.image_size)
         heatmaps = create_heatmaps(points=heatmap_points, image_size=self.config.image_size, sigma=self.config.heatmap_sigma)
 
@@ -98,6 +106,20 @@ class HeatmapDataset(Dataset):
                 raise ValueError(f'Target heatmaps for {sample_name} contain NaN or infinite values.')
 
         return len(self.records)
+
+    def calculate_normalisation_statistics(self):
+        """Calculate three-channel statistics from unaugmented resized training images only."""
+        if self.config.split_name.lower() != 'training':
+            raise ValueError('Normalisation statistics may only be calculated from the training split.')
+
+        statistics = ChannelStatistics()
+
+        for record in self.records:
+            image = load_image_as_float(record['image_path'], input_channels=self.config.input_channels)
+            image = resize_channel_first(image=image, image_size=self.config.image_size)
+            statistics.update(image)
+
+        return statistics.finalise()
 
     def build_records(self):
         """Build image and point records for this split."""

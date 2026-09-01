@@ -25,6 +25,9 @@ from torch.optim.lr_scheduler import ReduceLROnPlateau, StepLR
 from torch.utils.data import DataLoader
 
 from .custom_dataset import CustomDataset, ToTensor
+from .model_registry import is_pretrained_model
+from .normalisation import (ChannelStatistics, EXPECTED_NORMALISATION_CHANNELS, IMAGENET_RGB_MEAN,
+                            IMAGENET_RGB_STD, validate_normalisation_constants)
 from .runtime_metadata import collect_runtime_metadata, utc_now_iso
 from .utils.landmark_inference_utils import (LandmarkInferenceConfig, accumulate_votes, detect_points, load_input_image,
                                              read_mark_list, run_validation_inference_for_trained_model)
@@ -33,8 +36,8 @@ from .utils.fold_utils import get_split_file_path, normalise_fold
 MIN_POINTS_PER_IMAGE = 1
 MAX_POINTS_PER_IMAGE = 30
 CSV_METADATA_COLUMNS = 5
-CHECKPOINT_FORMAT_VERSION = 3
-CHECKPOINT_SCHEMA_VERSION = 3
+CHECKPOINT_FORMAT_VERSION = '0.1'
+CHECKPOINT_SCHEMA_VERSION = '0.1'
 CHECKPOINT_SCHEMA_NAME = 'ipv_checkpoint_metadata'
 HISTORY_FIELDS = (
     'epoch', 'epoch_started_at', 'epoch_completed_at', 'lr', 'training_loss', 'training_accuracy',
@@ -82,6 +85,7 @@ class TrainConfig:
     validation_vote_smoothing_sigma: float = 7.0
     validation_use_probability_weights: bool = True
     validation_save_raw_vote_maps: bool = False
+    normalise_inputs: bool = False
 
 
 class TrainModel:
@@ -103,6 +107,9 @@ class TrainModel:
         self.tasks_per_point = len(self.tasks_classes)
         self.expected_label_count = self.num_of_points * self.tasks_per_point
         self.input_channels = None
+        self.normalisation_mean = None
+        self.normalisation_std = None
+        self.normalisation_source = 'disabled'
         self.num_of_classes = [len(task_classes) for _ in range(self.num_of_points) for task_classes in self.tasks_classes]
         self.runtime_metadata = None
         self.training_status = 'initialising'
@@ -137,6 +144,7 @@ class TrainModel:
             self.validate_training_inputs()
             train_loader, val_loader = self.build_data_loaders()
             self.input_channels = self.resolve_input_channels(train_loader.dataset, val_loader.dataset)
+            self.configure_input_normalisation(train_loader.dataset, val_loader.dataset)
             self.dataset_validation_duration_seconds = time.perf_counter() - validation_start
             self.training_status = 'dataset_validated'
 
@@ -323,6 +331,8 @@ class TrainModel:
             checkpoint_path=checkpoint_path,
             checkpoint_type=checkpoint_type,
             network_name=self.quadruplet_config.network_name,
+            normalisation_mean=self.normalisation_mean,
+            normalisation_std=self.normalisation_std,
             checkpoint_metadata=None if loaded_checkpoint is None else loaded_checkpoint.get('metadata')
         )
 
@@ -460,8 +470,8 @@ class TrainModel:
         train_csv_path = self.get_train_csv_path()
         val_csv_path = self.get_val_csv_path()
 
-        train_dataset = CustomDataset(train_csv_path, num_sub_patches=self.quadruplet_config.num_sub_patches, transform=ToTensor())
-        val_dataset = CustomDataset(val_csv_path, num_sub_patches=self.quadruplet_config.num_sub_patches, transform=ToTensor())
+        train_dataset = CustomDataset(train_csv_path, num_sub_patches=self.quadruplet_config.num_sub_patches)
+        val_dataset = CustomDataset(val_csv_path, num_sub_patches=self.quadruplet_config.num_sub_patches)
         self.training_generator = torch.Generator()
         self.validation_generator = torch.Generator()
         self.training_generator.manual_seed(int(self.train_config.random_seed))
@@ -473,6 +483,43 @@ class TrainModel:
                                 pin_memory=self.device.type == 'cuda', worker_init_fn=seed_worker, generator=self.validation_generator)
 
         return train_loader, val_loader
+
+    def configure_input_normalisation(self, train_dataset, validation_dataset):
+        """Resolve constants from pretrained weights or the training split and attach tensor transforms."""
+        if not self.train_config.normalise_inputs:
+            train_dataset.transform = ToTensor()
+            validation_dataset.transform = ToTensor()
+            self.normalisation_mean = None
+            self.normalisation_std = None
+            self.normalisation_source = 'disabled'
+            print('\tInput normalisation disabled.', flush=True)
+            return
+
+        if int(self.input_channels) != EXPECTED_NORMALISATION_CHANNELS:
+            raise ValueError(
+                f'Input normalisation requires exactly {EXPECTED_NORMALISATION_CHANNELS} channels so each RGB channel remains distinct; '
+                f'the training data contains {self.input_channels} channel(s).'
+            )
+
+        if is_pretrained_model(self.quadruplet_config.network_name):
+            mean, standard_deviation = IMAGENET_RGB_MEAN, IMAGENET_RGB_STD
+            source = 'torchvision_imagenet_pretrained_weights'
+        else:
+            statistics = ChannelStatistics()
+
+            for sample_index in range(len(train_dataset)):
+                statistics.update(train_dataset[sample_index]['image'])
+
+            mean, standard_deviation = statistics.finalise()
+            source = 'training_split_patches'
+
+        mean, standard_deviation = validate_normalisation_constants(mean, standard_deviation)
+        self.normalisation_mean = list(mean)
+        self.normalisation_std = list(standard_deviation)
+        self.normalisation_source = source
+        train_dataset.transform = ToTensor(self.normalisation_mean, self.normalisation_std)
+        validation_dataset.transform = ToTensor(self.normalisation_mean, self.normalisation_std)
+        print(f'\tInput normalisation enabled from {source}: mean={self.normalisation_mean}, std={self.normalisation_std}.', flush=True)
 
     def resolve_input_channels(self, train_dataset, val_dataset):
         """Resolve the input channel count used by the model."""
@@ -850,12 +897,28 @@ class TrainModel:
             'input_channels': int(self.input_channels),
             'tensor_shape': '[batch, num_sub_patches, channels, patch_size, patch_size]',
             'channel_order': 'channels_first',
-            'image_value_range': 'float32_0_to_1',
+            'loaded_image_value_range': 'float32_0_to_1',
+            'model_input_values': ('three_channel_standardised' if self.train_config.normalise_inputs else 'float32_0_to_1'),
+            'normalisation': self.build_normalisation_metadata(),
             'patch_resize': {
                 'library': 'skimage.transform.resize',
                 'preserve_range': True,
                 'anti_aliasing': True
             }
+        }
+
+    def build_normalisation_metadata(self):
+        """Return the exact three-channel input normalisation contract."""
+        return {
+            'enabled': bool(self.train_config.normalise_inputs),
+            'channels': EXPECTED_NORMALISATION_CHANNELS,
+            'mean': None if self.normalisation_mean is None else list(self.normalisation_mean),
+            'standard_deviation': None if self.normalisation_std is None else list(self.normalisation_std),
+            'source': self.normalisation_source,
+            'statistic': 'population',
+            'calculated_from': ('pretrained_weight_recipe' if is_pretrained_model(self.quadruplet_config.network_name)
+                                and self.train_config.normalise_inputs else
+                                ('training_split_only' if self.train_config.normalise_inputs else None)),
         }
 
     def build_inference_metadata(self, data_metadata=None):
@@ -1063,6 +1126,7 @@ class TrainModel:
             },
             'training': self.serialise(asdict(self.train_config)),
             'model': self.serialise(asdict(self.quadruplet_config)),
+            'normalisation': self.build_normalisation_metadata(),
             'implementation': {
                 'ipv_source_sha256': self.sha256_python_sources(),
                 'python_version': self.runtime_metadata['python']['version'],
@@ -1135,7 +1199,7 @@ class TrainModel:
             raise ValueError(
                 f'Resume requires checkpoint format/schema version {CHECKPOINT_FORMAT_VERSION}. '
                 f'Checkpoint {checkpoint_path} has format={checkpoint.get("format_version")}, schema={checkpoint.get("schema_version")}. '
-                'Older checkpoints remain available for inference but cannot continue training exactly.'
+                'Only checkpoints produced by the current 0.1 contract are supported.'
             )
 
         if checkpoint.get('schema') != 'ipv_training_checkpoint' or checkpoint.get('checkpoint_type') != 'last_epoch':
@@ -1508,6 +1572,7 @@ class TrainModel:
                 'failure': self.failure, 'resume_training': self.resume_training,
                 'resume_checkpoint_path': str(self.get_checkpoint_path('last_epoch')) if self.resume_training else None,
                 'resume_state_validated': self.resume_state_validated,
+                'normalisation': self.build_normalisation_metadata(),
                 'runtime_environment': self.runtime_metadata, 'timing': self.get_timing_summary()}
 
     @staticmethod

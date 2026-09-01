@@ -19,6 +19,7 @@ $IMAGE_WIDTH = 512
 $HEATMAP_SIGMA = 8
 $OVERSAMPLING_FACTOR = 1
 $RECURSIVE_IMAGE_SEARCH = "false"
+$NORMALISE_INPUTS = "false"
 
 $BATCH_SIZE = 4
 $MAX_TRAINING_EPOCHS = 80
@@ -83,6 +84,7 @@ $Arguments = @(
     "--heatmap-sigma", $HEATMAP_SIGMA,
     "--oversampling-factor", $OVERSAMPLING_FACTOR,
     "--recursive-image-search", $RECURSIVE_IMAGE_SEARCH,
+    "--normalise-inputs", $NORMALISE_INPUTS,
     "--batch-size", $BATCH_SIZE,
     "--learning-rate", $LEARNING_RATE,
     "--max-training-epochs", $MAX_TRAINING_EPOCHS,

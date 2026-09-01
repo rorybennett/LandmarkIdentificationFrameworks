@@ -29,6 +29,7 @@ from .custom_dataset import HeatmapDataset, HeatmapDatasetConfig
 from .heatmap_transforms import get_augmentation_policy
 from .model_registry import build_heatmap_model, get_model_config_fields, get_model_kwargs, get_model_registry_entry
 from .models import count_trainable_parameters, unpack_heatmap_output
+from .normalisation import EXPECTED_NORMALISATION_CHANNELS, validate_normalisation_constants
 from .runtime_metadata import collect_runtime_metadata, utc_now_iso
 from .utils.io_utils import get_split_file_path, heatmaps_to_points, infer_image_channel_count, normalise_fold, safe_file_stem, scale_points_to_original
 from .utils.progress_bar import ProgressBar
@@ -45,8 +46,8 @@ def seed_worker(_worker_id):
     random.seed(worker_seed)
 
 
-CHECKPOINT_FORMAT_VERSION = 3
-CHECKPOINT_SCHEMA_VERSION = 3
+CHECKPOINT_FORMAT_VERSION = '0.1'
+CHECKPOINT_SCHEMA_VERSION = '0.1'
 CHECKPOINT_SCHEMA_NAME = 'heatmap_checkpoint_metadata'
 MIN_POINTS_PER_IMAGE = 1
 MAX_POINTS_PER_IMAGE = 30
@@ -80,6 +81,9 @@ class HeatmapDataConfig:
     recursive_image_search: bool = False
     oversampling_factor: int = 1
     fold_collection_sha256: str | None = None
+    normalise_inputs: bool = False
+    normalisation_mean: tuple[float, float, float] | None = None
+    normalisation_std: tuple[float, float, float] | None = None
 
 
 @dataclass
@@ -510,6 +514,7 @@ class TrainModel:
         validation_dataset = HeatmapDataset(self.build_dataset_config(split_name='validation'))
         self.validate_dataset_membership(training_dataset=training_dataset, validation_dataset=validation_dataset)
         self.resolve_input_channels(training_dataset=training_dataset, validation_dataset=validation_dataset)
+        self.configure_input_normalisation(training_dataset=training_dataset, validation_dataset=validation_dataset)
         validated_training_records = training_dataset.validate_all_records()
         validated_validation_records = validation_dataset.validate_all_records()
         self.training_generator = torch.Generator()
@@ -568,6 +573,35 @@ class TrainModel:
         print(f'\tAutomatically detected {resolved_channels} input channel(s). Source channel counts: {counts_text}.', flush=True)
         return resolved_channels
 
+    def configure_input_normalisation(self, training_dataset, validation_dataset):
+        """Calculate and attach three-channel statistics from original training images only."""
+        if not self.data_config.normalise_inputs:
+            self.data_config.normalisation_mean = None
+            self.data_config.normalisation_std = None
+            training_dataset.config.normalisation_mean = None
+            training_dataset.config.normalisation_std = None
+            validation_dataset.config.normalisation_mean = None
+            validation_dataset.config.normalisation_std = None
+            print('\tInput normalisation disabled.', flush=True)
+            return
+
+        if int(self.data_config.input_channels) != EXPECTED_NORMALISATION_CHANNELS:
+            raise ValueError(
+                f'Input normalisation requires exactly {EXPECTED_NORMALISATION_CHANNELS} channels so each RGB channel remains distinct; '
+                f'the training data contains {self.data_config.input_channels} channel(s).'
+            )
+
+        mean, standard_deviation = training_dataset.calculate_normalisation_statistics()
+        mean, standard_deviation = validate_normalisation_constants(mean, standard_deviation)
+        self.data_config.normalisation_mean = tuple(mean)
+        self.data_config.normalisation_std = tuple(standard_deviation)
+
+        for dataset in (training_dataset, validation_dataset):
+            dataset.config.normalisation_mean = self.data_config.normalisation_mean
+            dataset.config.normalisation_std = self.data_config.normalisation_std
+
+        print(f'\tInput normalisation enabled from training split: mean={list(mean)}, std={list(standard_deviation)}.', flush=True)
+
     @staticmethod
     def infer_dataset_channel_counts(dataset):
         """Return a count of source image channel counts for a dataset split."""
@@ -589,7 +623,9 @@ class TrainModel:
                                     fold_lists_path=self.data_config.fold_lists_path, mark_list_file=self.data_config.mark_list_file,
                                     image_data_dir=self.data_config.image_data_dir, image_size=self.data_config.image_size, heatmap_sigma=self.data_config.heatmap_sigma,
                                     input_channels=self.data_config.input_channels, recursive_image_search=self.data_config.recursive_image_search,
-                                    oversampling_factor=self.data_config.oversampling_factor)
+                                    oversampling_factor=self.data_config.oversampling_factor,
+                                    normalisation_mean=self.data_config.normalisation_mean,
+                                    normalisation_std=self.data_config.normalisation_std)
 
     def build_model(self):
         """Build the configured heatmap model."""
@@ -778,7 +814,9 @@ class TrainModel:
                      'recursive_image_search': bool(self.data_config.recursive_image_search), 'input_channels': input_channels},
             'preprocessing': {'image_size': {'height': image_height, 'width': image_width}, 'heatmap_sigma': float(self.data_config.heatmap_sigma),
                               'input_channels': input_channels, 'tensor_shape': ['batch', input_channels, image_height, image_width],
-                              'channel_order': 'channels_first', 'image_value_range': 'float32_0_to_1',
+                              'channel_order': 'channels_first', 'loaded_image_value_range': 'float32_0_to_1',
+                              'model_input_values': ('three_channel_standardised' if self.data_config.normalise_inputs else 'float32_0_to_1'),
+                              'normalisation': self.build_normalisation_metadata(),
                               'resize': {'library': 'cv2.resize', 'interpolation': 'INTER_AREA'},
                               'target_heatmaps': {'channels': int(self.data_config.num_of_points), 'generation': 'normalised_gaussian_per_landmark'}},
             'inference': {'heatmap_to_point': 'argmax', 'output_coordinate_space': 'original_image_pixels', 'scale_back_to_original': True,
@@ -791,6 +829,19 @@ class TrainModel:
             'runtime_environment': self.runtime_metadata,
             'timing': self.get_timing_summary(),
             'raw_configs': {'data_config': data_config, 'train_config': train_config, 'model_config': model_config}
+        }
+
+    def build_normalisation_metadata(self):
+        """Return the exact three-channel input normalisation contract."""
+        return {
+            'enabled': bool(self.data_config.normalise_inputs),
+            'channels': EXPECTED_NORMALISATION_CHANNELS,
+            'mean': None if self.data_config.normalisation_mean is None else list(self.data_config.normalisation_mean),
+            'standard_deviation': None if self.data_config.normalisation_std is None else list(self.data_config.normalisation_std),
+            'source': 'training_split_images' if self.data_config.normalise_inputs else 'disabled',
+            'statistic': 'population',
+            'calculated_from': 'training_split_only' if self.data_config.normalise_inputs else None,
+            'calculation_inputs': 'unaugmented_float32_0_to_1_training_images_after_resize',
         }
 
     def build_checkpoint_metadata(self, checkpoint_type, epoch, validation_metrics):
@@ -870,7 +921,7 @@ class TrainModel:
             raise ValueError(
                 f'Resume requires checkpoint format/schema version {CHECKPOINT_FORMAT_VERSION}. '
                 f'Checkpoint {checkpoint_path} has format={checkpoint.get("format_version")}, schema={checkpoint.get("schema_version")}. '
-                'Older checkpoints can still be used for inference but cannot continue training exactly.'
+                'Only checkpoints produced by the current 0.1 contract are supported.'
             )
 
         if checkpoint.get('schema') != 'heatmap_training_checkpoint' or checkpoint.get('checkpoint_type') != 'last_epoch':
@@ -1050,6 +1101,7 @@ class TrainModel:
                 'input_channels': int(self.data_config.input_channels),
                 'recursive_image_search': bool(self.data_config.recursive_image_search),
                 'oversampling_factor': int(self.data_config.oversampling_factor),
+                'normalisation': self.build_normalisation_metadata(),
             },
             'training': self.serialise(asdict(self.train_config)),
             'model': {

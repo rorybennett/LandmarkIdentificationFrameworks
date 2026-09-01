@@ -2,6 +2,8 @@
 
 Image-Patch Voting (IPV) landmark localisation with repeated k-fold model training, comparison-ready validation outputs, and standalone full-image inference.
 
+**Package version:** `0.1`
+
 IPV trains a multi-scale patch classifier with one distance head and one angle head per landmark. Validation grid predictions are converted into endpoint vote maps, so the reported `validation_error_px` is directly comparable with Heatmaps validation error when both methods use the same repeated-fold collection and source images. Classification losses and accuracies remain IPV-specific and must not be compared with heatmap-regression losses.
 
 ## Installation
@@ -107,6 +109,7 @@ ipv-train 1 1 prostate_transverse true true false false \
     --early-stop-min-delta 0.0001 \
     --early-stop-warmup-epochs 10 \
     --use-amp false \
+    --normalise-inputs true \
     --network-name small_cnn \
     --branch-features 128 \
     --frozen-stages 0 \
@@ -126,6 +129,17 @@ IPV performs one complete training pass and one complete validation pass per epo
 The endpoint error is the appropriate shared outcome for comparison with Heatmaps. Raw loss is internal to one model because IPV classification and heatmap regression optimise different objectives.
 
 Python, NumPy, PyTorch, CUDA and DataLoader workers are deterministically seeded. Deterministic PyTorch algorithms are enabled, cuDNN benchmarking and TF32 are disabled, and runtime versions are recorded for audit.
+
+### Input normalisation
+
+Set `--normalise-inputs true` to normalise the three model input channels independently. Normalisation deliberately retains three constants even when the current ultrasound images contain identical greyscale RGB channels; it never reduces the calculation to one channel.
+
+- `resnet18_pretrained` and `resnet34_pretrained` use the ImageNet RGB mean `(0.485, 0.456, 0.406)` and standard deviation `(0.229, 0.224, 0.225)` used by their torchvision pretrained weights.
+- Every untrained backbone, including `small_cnn`, calculates a three-value population mean and standard deviation from the generated training-split patches only. Validation patches are excluded.
+- `--normalise-inputs false` preserves the existing float32 `[0, 1]` inputs.
+- Enabling the option requires exactly three input channels. One- and four-channel data are rejected rather than silently collapsed or adapted.
+
+The enabled flag, source, three means and three standard deviations are stored under `metadata.preprocessing.normalisation` in each checkpoint. Validation and standalone inference read these values from the checkpoint and apply them after the ordinary patch resize and PNG quantisation path.
 
 ### Optimisers and schedules
 
@@ -154,7 +168,7 @@ with `CREATE_DATA=false` and `TRAIN_MODEL=true`. Resumption uses only:
 TRAINING_RESULTS/TASK_NAME/RUN_NAME/repetition_N/fold_N/model_last_epoch.pth
 ```
 
-The v3 checkpoint restores model, optimiser, scheduler, AMP scaler, history, best/early-stopping state, random-number states, DataLoader generator states and timestamped execution sessions. A compatibility signature covers the split lists, mark list, generated CSVs and patch bytes, all IPV Python sources, configuration, dependencies and compute runtime. Incomplete, corrupt or incompatible continuation is rejected before committed outputs are changed.
+The version 0.1 checkpoint restores model, optimiser, scheduler, AMP scaler, history, best/early-stopping state, random-number states, DataLoader generator states and timestamped execution sessions. A compatibility signature covers the split lists, mark list, generated CSVs and patch bytes, input-normalisation contract, all IPV Python sources, configuration, dependencies and compute runtime. Incomplete, corrupt, version-mismatched or incompatible continuation is rejected before committed outputs are changed. Older checkpoint contracts are not supported.
 
 ## Output layout
 
@@ -216,7 +230,7 @@ Edit the paths and switches in `IPV/infer_landmarks.py`, then run:
 ipv-infer
 ```
 
-Standalone inference remains independent of fold-list generation. It reconstructs the model, network name, repetition and fold from checkpoint metadata; accepts one image or an image directory; and optionally reads ground truth from a mark list. Patch resizing and quantisation reproduce the training preprocessing path.
+Standalone inference remains independent of fold-list generation. It reconstructs the model, network name, repetition, fold and normalisation constants from checkpoint metadata; accepts one image or an image directory; and optionally reads ground truth from a mark list. Patch resizing, quantisation and optional three-channel normalisation reproduce the training preprocessing path.
 
 Its shared comparison artefacts match the Heatmaps naming contract:
 
@@ -240,4 +254,4 @@ From the outer `IPV` directory:
 python -m unittest discover -s tests -v
 ```
 
-Tests cover deterministic repeated k-fold and fold-all membership, held-out test exclusion, fold-collection fingerprints, isolated output leaves, common inference/validation schemas, exact inference preprocessing, v3 checkpoint reconstruction, epoch-history fields and atomic checkpoint replacement.
+Tests cover deterministic repeated k-fold and fold-all membership, held-out test exclusion, fold-collection fingerprints, isolated output leaves, three-channel normalisation, pretrained constants, training-only statistics, common inference/validation schemas, exact inference preprocessing, version 0.1 checkpoint reconstruction, epoch-history fields and atomic checkpoint replacement.

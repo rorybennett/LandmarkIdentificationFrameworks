@@ -13,6 +13,7 @@ from openpyxl import Workbook
 
 from ..model_registry import build_heatmap_model
 from ..models import unpack_heatmap_output
+from ..normalisation import EXPECTED_NORMALISATION_CHANNELS, normalise_channel_first, validate_normalisation_constants
 from .annotation_utils import read_mark_list, validate_annotation_point_count
 from .io_utils import (heatmaps_to_points, load_image_as_float, resize_channel_first, safe_file_stem,
                        scale_points_to_original, validate_points_within_image)
@@ -20,6 +21,7 @@ from .progress_bar import ProgressBar
 from .visualisation_utils import create_combined_heatmap_overlay, create_point_overlay, load_display_image
 
 CHECKPOINT_METADATA_SCHEMA = 'heatmap_checkpoint_metadata'
+CHECKPOINT_METADATA_SCHEMA_VERSION = '0.1'
 SUPPORTED_IMAGE_SUFFIXES = ('.png', '.jpg', '.jpeg', '.bmp', '.tif', '.tiff')
 
 
@@ -42,6 +44,8 @@ class HeatmapInferenceConfig:
     clear_cuda_cache_between_batches: bool = True
     run_label: str = 'inference'
     checkpoint_metadata: dict | None = None
+    normalisation_mean: list | None = None
+    normalisation_std: list | None = None
 
 
 @dataclass
@@ -88,6 +92,14 @@ class HeatmapImageInferer:
         config.save_raw_heatmaps = bool(config.save_raw_heatmaps)
         config.clear_cuda_cache_between_batches = bool(config.clear_cuda_cache_between_batches)
         config.run_label = safe_file_stem(config.run_label)
+        if (config.normalisation_mean is None) != (config.normalisation_std is None):
+            raise ValueError('Normalisation mean and standard deviation must be supplied together.')
+        if config.normalisation_mean is not None:
+            if config.input_channels != EXPECTED_NORMALISATION_CHANNELS:
+                raise ValueError(f'Input normalisation requires exactly {EXPECTED_NORMALISATION_CHANNELS} channels.')
+            mean, standard_deviation = validate_normalisation_constants(config.normalisation_mean, config.normalisation_std)
+            config.normalisation_mean = list(mean)
+            config.normalisation_std = list(standard_deviation)
 
         if config.num_points < 1:
             raise ValueError('num_points must be at least 1.')
@@ -200,6 +212,11 @@ class HeatmapImageInferer:
                 )
 
         resized_image = resize_channel_first(image=image, image_size=self.config.image_size)
+
+        if self.config.normalisation_mean is not None:
+            resized_image = normalise_channel_first(resized_image, self.config.normalisation_mean,
+                                                    self.config.normalisation_std)
+
         return {
             'record': record,
             'image': torch.from_numpy(resized_image).float(),
@@ -394,6 +411,9 @@ def extract_inference_metadata_from_checkpoint(checkpoint):
     if metadata.get('schema') != CHECKPOINT_METADATA_SCHEMA:
         raise ValueError(f"Unsupported checkpoint metadata schema: {metadata.get('schema')}")
 
+    if metadata.get('schema_version') != CHECKPOINT_METADATA_SCHEMA_VERSION:
+        raise ValueError(f"Unsupported checkpoint metadata schema version: {metadata.get('schema_version')}")
+
     task = require_dict(metadata, 'task')
     model = require_dict(metadata, 'model')
     preprocessing = require_dict(metadata, 'preprocessing')
@@ -404,6 +424,18 @@ def extract_inference_metadata_from_checkpoint(checkpoint):
     num_points = int(task['num_points'])
     input_channels = int(preprocessing['input_channels'])
     network_name = str(model['registry_name'])
+    normalisation = require_dict(preprocessing, 'normalisation')
+    normalisation_enabled = bool(normalisation.get('enabled'))
+    normalisation_mean = normalisation.get('mean')
+    normalisation_std = normalisation.get('standard_deviation')
+
+    if int(normalisation.get('channels', -1)) != EXPECTED_NORMALISATION_CHANNELS:
+        raise ValueError(f'Checkpoint normalisation must declare exactly {EXPECTED_NORMALISATION_CHANNELS} channels.')
+
+    if normalisation_enabled:
+        normalisation_mean, normalisation_std = validate_normalisation_constants(normalisation_mean, normalisation_std)
+    elif normalisation_mean is not None or normalisation_std is not None:
+        raise ValueError('Disabled checkpoint normalisation must not contain mean or standard-deviation constants.')
     required_init_args = {'num_of_points', 'input_channels'}
     missing_init_args = sorted(required_init_args - set(init_args))
 
@@ -432,6 +464,8 @@ def extract_inference_metadata_from_checkpoint(checkpoint):
         'repetition': data.get('repetition', task.get('repetition')),
         'fold': data.get('fold', task.get('fold')),
         'checkpoint_type': checkpoint_info.get('type', checkpoint.get('checkpoint_type')),
+        'normalisation_mean': None if normalisation_mean is None else list(normalisation_mean),
+        'normalisation_std': None if normalisation_std is None else list(normalisation_std),
     }
 
 
@@ -454,6 +488,8 @@ def build_config_from_checkpoint_metadata(metadata, output_dir, batch_size=1, sa
         save_raw_heatmaps=bool(save_raw_heatmaps),
         clear_cuda_cache_between_batches=bool(clear_cuda_cache_between_batches),
         run_label=run_label,
+        normalisation_mean=metadata.get('normalisation_mean'),
+        normalisation_std=metadata.get('normalisation_std'),
         checkpoint_metadata=metadata.get('raw_checkpoint_metadata'),
     )
     return config

@@ -60,6 +60,14 @@ def get_available_model_names():
     return tuple(AVAILABLE_MODELS.keys())
 
 
+def is_pretrained_model(model_name):
+    """Return whether a registered model loads pretrained backbone weights."""
+    try:
+        return bool(AVAILABLE_MODELS[str(model_name).lower()]['pretrained'])
+    except KeyError as error:
+        raise ValueError(f'Unknown model name: {model_name}') from error
+
+
 def print_available_models():
     """Print available model names and descriptions."""
     for model_name, model_info in AVAILABLE_MODELS.items():

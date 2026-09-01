@@ -209,7 +209,7 @@ class HeatmapTrainingPipeline:
 
         training_report = self.active_trainer.get_run_report() if self.active_trainer is not None else None
         runtime_environment = None if training_report is None else training_report.get('runtime_environment')
-        run_info = {'schema': 'heatmap_training_run_info', 'schema_version': 4, 'created_at': created_at,
+        run_info = {'schema': 'heatmap_training_run_info', 'schema_version': '0.1', 'created_at': created_at,
                     'updated_at': dt.datetime.now(dt.timezone.utc).isoformat(),
                     'run_results_root': self.run_results_root, 'run_results_path': self.run_results_path,
                     'save_copy_path': self.get_save_copy_path(), 'run_config': asdict(self.run_config), 'data_config': asdict(self.data_config),
@@ -272,6 +272,7 @@ class HeatmapTrainingPipeline:
         print(f'\tEarly stop min delta: {self.train_config.early_stop_min_delta}', flush=True)
         print(f'\tEarly stop warmup epochs: {self.train_config.early_stop_warmup_epochs}', flush=True)
         print(f'\tUse AMP: {self.train_config.use_amp}', flush=True)
+        print(f'\tNormalise inputs: {self.data_config.normalise_inputs}', flush=True)
         print(f'\tSave validation predictions and overlays: {self.train_config.save_validation_predictions}', flush=True)
         print(f'\tNetwork: {self.model_config.network_name}', flush=True)
 
@@ -544,6 +545,7 @@ def build_run_name(args, num_of_repetitions, num_of_folds, fold_collection_sha25
         'heatmap_sigma': args.heatmap_sigma,
         'oversampling_factor': args.oversampling_factor,
         'recursive_image_search': args.recursive_image_search,
+        'normalise_inputs': args.normalise_inputs,
         'batch_size': args.batch_size,
         'learning_rate': args.learning_rate,
         'max_training_epochs': args.max_training_epochs,
@@ -621,6 +623,8 @@ def parse_args():
     parser.add_argument('--oversampling-factor', type=int, default=1,
                         help='Training-set multiplier. A value of 1 uses each image once; values above 1 add augmented copies using Heatmaps/Heatmaps/heatmap_transforms.py.')
     parser.add_argument('--recursive-image-search', type=str_to_bool, default=False, help='Search image-data-dir recursively.')
+    parser.add_argument('--normalise-inputs', type=str_to_bool, default=False,
+                        help='Calculate distinct three-channel mean and standard-deviation values from the training split and normalise model inputs.')
 
     parser.add_argument('--batch-size', type=int, default=4, help='Training batch size.')
     parser.add_argument('--learning-rate', type=float, default=1e-3, help='Initial learning rate.')
@@ -710,8 +714,9 @@ def build_configs(args):
     data_config = HeatmapDataConfig(repetition=args.repetition, fold=args.fold, task_name=task_name, num_of_points=args.num_points,
                                     fold_lists_path=args.fold_lists_path,
                                     mark_list_file=args.mark_list_file, image_data_dir=args.image_data_dir, image_size=tuple(args.image_size),
-                                    heatmap_sigma=args.heatmap_sigma, input_channels=None, recursive_image_search=args.recursive_image_search,
-                                    oversampling_factor=args.oversampling_factor, fold_collection_sha256=fold_collection_sha256)
+                                     heatmap_sigma=args.heatmap_sigma, input_channels=None, recursive_image_search=args.recursive_image_search,
+                                     oversampling_factor=args.oversampling_factor, fold_collection_sha256=fold_collection_sha256,
+                                     normalise_inputs=args.normalise_inputs)
     train_config = TrainConfig(batch_size=args.batch_size, learning_rate=args.learning_rate, max_training_epochs=args.max_training_epochs, num_workers=args.train_workers,
                                random_seed=args.random_seed, optimiser_name=args.optimiser_name, loss_name=args.loss_name, positive_weight=args.positive_weight,
                                weight_decay=args.weight_decay,

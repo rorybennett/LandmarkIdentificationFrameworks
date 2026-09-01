@@ -5,7 +5,7 @@ Full-image heatmap-regression landmark localisation for the `LandmarkIdentificat
 The package trains a convolutional neural network to produce one heatmap per landmark. Source images are loaded directly, resized into a common training coordinate
 system, and paired with Gaussian target heatmaps generated from the supplied landmark coordinates.
 
-**Package version:** `0.1.0`
+**Package version:** `0.1`
 
 ## Current scope
 
@@ -34,6 +34,7 @@ Heatmaps/
   Heatmaps/
     __init__.py
     custom_dataset.py
+    normalisation.py
     heatmap_training_pipeline.py
     heatmap_transforms.py
     infer_landmarks.py
@@ -54,6 +55,7 @@ Heatmaps/
   tests/
     test_annotation_utils.py
     test_inference.py
+    test_normalisation.py
     test_repeated_kfold.py
     test_runtime_integration.py
 ```
@@ -97,8 +99,8 @@ Set `MODEL_PATH` to `model_best_validation_loss.pth` (normally the checkpoint to
 `OUTPUT_DIR` to the result directory. `GROUND_TRUTH_MARK_LIST_PATH` is optional; when supplied, matching image stems receive pixel-error metrics and ground-truth points
 on their overlays. Directory searches can be made recursive with `RECURSIVE_IMAGE_SEARCH`.
 
-Inference reconstructs the selected U-Net, HRNet, stacked-hourglass, or ViTPose architecture directly from checkpoint metadata. It also restores the training image size
-and channel count, applies the same image loading and resize path used during training, decodes every heatmap by argmax, and scales predictions back into original-image
+Inference reconstructs the selected U-Net, HRNet, stacked-hourglass, or ViTPose architecture directly from checkpoint metadata. It also restores the training image size,
+channel count and optional three-channel normalisation constants, applies the same image loading, resize and normalisation path used during training, decodes every heatmap by argmax, and scales predictions back into original-image
 pixel coordinates. When a checkpoint expects three input channels, a single-channel greyscale inference image is replicated across all three channels automatically. Other
 channel mismatches remain errors. No architecture settings need to be copied into the script.
 
@@ -328,6 +330,7 @@ heatmaps-train 1 1 prostate_transverse true false \
     --image-size 512 512 \
     --heatmap-sigma 8 \
     --oversampling-factor 1 \
+    --normalise-inputs true \
     --batch-size 4 \
     --learning-rate 0.001 \
     --max-training-epochs 80
@@ -416,6 +419,7 @@ The main data options are:
 --heatmap-sigma
 --oversampling-factor
 --recursive-image-search
+--normalise-inputs true|false
 ```
 
 `--heatmap-sigma` controls the Gaussian spread of each target landmark heatmap in resized-image pixels. Each target heatmap is normalised so that its maximum value is
@@ -452,6 +456,8 @@ for experiments but is not enabled by default.
 
 The complete augmentation policy is stored in checkpoint metadata.
 
+When input normalisation is enabled, statistics are calculated before training augmentation. Augmented copies are normalised only after their intensity/spatial transforms and resize have been applied.
+
 Inspect transforms interactively with:
 
 ```bash
@@ -477,6 +483,14 @@ Input channels are detected from all training and validation images in the selec
 | RGBA              |                    4 |
 
 The resolved channel count configures the first network layer and is written to run metadata and checkpoints.
+
+### Input-value normalisation
+
+`--normalise-inputs true` calculates a distinct population mean and standard deviation for each of the three channels using only the original images in the selected training split, after conversion to float32 `[0, 1]` and resize to `--image-size`. Validation images and oversampled/augmented copies do not contribute to the statistics.
+
+The current ultrasound data may be greyscale stored as RGB, but the calculation intentionally remains three-channel so future colour RGB images follow the same contract. Enabling input normalisation requires exactly three source channels; one- and four-channel training data are rejected rather than collapsed to a single statistic. This option is separate from `--normalisation`, which selects internal CNN normalisation layers such as batch or group normalisation.
+
+The enabled flag, three means and three standard deviations are stored under `metadata.preprocessing.normalisation` in each checkpoint. The same values are applied to training, validation and standalone inference inputs. `--normalise-inputs false` leaves inputs in the existing float32 `[0, 1]` range.
 
 ## Optimisation settings
 
@@ -727,10 +741,10 @@ raw_configs
 ```
 
 It records the model registry entry, implementation module and class, reconstruction arguments, repetition, fold, landmark count, input channels, image size, heatmap
-sigma, coordinate conventions, augmentation policy, training settings, and explicitly named validation checkpoint metrics. A concrete checkpoint metadata block is written
+sigma, three-channel input-normalisation constants and their training-only source, coordinate conventions, augmentation policy, training settings, and explicitly named validation checkpoint metrics. A concrete checkpoint metadata block is written
 only when a concrete checkpoint is being described; run-level summary metadata does not contain null checkpoint placeholders.
 
-Runtime metadata includes framework version `0.1.0`, Python and operating-system information, dependency versions, the resolved compute device, AMP state, CUDA availability,
+Runtime metadata includes framework version `0.1`, Python and operating-system information, dependency versions, the resolved compute device, AMP state, CUDA availability,
 PyTorch CUDA build, cuDNN version/settings, selected GPU name/index/compute capability/memory, NVIDIA driver when available, and Git commit/branch/dirty state when the source
 is inside a Git worktree.
 

@@ -276,7 +276,7 @@ class RuntimeIntegrationTests(unittest.TestCase):
             self.assertIn('validation_metrics', checkpoint)
             self.assertEqual(checkpoint['checkpoint_type'], 'best_validation_loss')
             self.assertNotIn(None, checkpoint['metadata']['checkpoint'].values())
-            self.assertEqual(checkpoint['metadata']['runtime_environment']['framework']['version'], '0.1.0')
+            self.assertEqual(checkpoint['metadata']['runtime_environment']['framework']['version'], '0.1')
             self.assertEqual(checkpoint['metadata']['runtime_environment']['compute']['device_type'], 'cpu')
 
             last_checkpoint = torch.load(output_dir / 'model_last_epoch.pth', map_location='cpu', weights_only=False)
@@ -294,7 +294,7 @@ class RuntimeIntegrationTests(unittest.TestCase):
             self.assertIn('validation_loss', summary['checkpoints']['best_validation_loss'])
             self.assertIn('validation_error_px', summary['checkpoints']['best_validation_loss'])
             self.assertNotIn('checkpoint', summary['metadata'])
-            self.assertEqual(summary['runtime_environment']['framework']['version'], '0.1.0')
+            self.assertEqual(summary['runtime_environment']['framework']['version'], '0.1')
             self.assertEqual(summary['termination_reason'], 'max_epochs_reached')
             self.assertGreaterEqual(summary['timing']['cumulative_epoch_duration_seconds'], 0)
 

@@ -36,6 +36,7 @@ $EARLY_STOP_PATIENCE = 15
 $EARLY_STOP_MIN_DELTA = 0.0001
 $EARLY_STOP_WARMUP_EPOCHS = 10
 $USE_AMP = "false"
+$NORMALISE_INPUTS = "false"
 $SAVE_VALIDATION_RESULTS = "true"
 $VALIDATION_INFERENCE_BATCH_SIZE = 2048
 $VALIDATION_VOTE_SMOOTHING_SIGMA = 7.0
@@ -79,6 +80,7 @@ ipv-train $REPETITION $FOLD $TASK_NAME $CREATE_DATA $TRAIN_MODEL $COPY_FILES $DE
     --early-stop-min-delta $EARLY_STOP_MIN_DELTA `
     --early-stop-warmup-epochs $EARLY_STOP_WARMUP_EPOCHS `
     --use-amp $USE_AMP `
+    --normalise-inputs $NORMALISE_INPUTS `
     --save-validation-results $SAVE_VALIDATION_RESULTS `
     --validation-inference-batch-size $VALIDATION_INFERENCE_BATCH_SIZE `
     --validation-vote-smoothing-sigma $VALIDATION_VOTE_SMOOTHING_SIGMA `

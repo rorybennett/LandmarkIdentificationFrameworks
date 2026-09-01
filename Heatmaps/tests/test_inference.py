@@ -43,25 +43,34 @@ class StandaloneInferenceTests(unittest.TestCase):
             vit_decoder_channels=16,
         )
 
-    def write_checkpoint(self, root, network_name):
+    def write_checkpoint(self, root, network_name, input_channels=None, normalisation=None):
+        input_channels = self.input_channels if input_channels is None else int(input_channels)
+        normalisation = normalisation or {
+            'enabled': False,
+            'channels': 3,
+            'mean': None,
+            'standard_deviation': None,
+            'source': 'disabled',
+        }
         model_config = self.model_config(network_name)
         model_kwargs = get_model_kwargs(network_name, model_config)
         model = build_heatmap_model(network_name=network_name, num_of_points=self.num_points,
-                                    input_channels=self.input_channels, image_size=self.image_size, **model_kwargs)
-        init_args = {'num_of_points': self.num_points, 'input_channels': self.input_channels, **model_kwargs}
+                                    input_channels=input_channels, image_size=self.image_size, **model_kwargs)
+        init_args = {'num_of_points': self.num_points, 'input_channels': input_channels, **model_kwargs}
 
         if network_name == 'vitpose':
             init_args['image_size'] = list(self.image_size)
 
         metadata = {
             'schema': 'heatmap_checkpoint_metadata',
-            'schema_version': 3,
+            'schema_version': '0.1',
             'task': {'name': 'inference_test', 'repetition': 2, 'fold': 3, 'num_points': self.num_points},
             'model': {'registry_name': network_name, 'init_args': init_args},
             'data': {'repetition': 2, 'fold': 3},
             'preprocessing': {
                 'image_size': {'height': self.image_size[0], 'width': self.image_size[1]},
-                'input_channels': self.input_channels,
+                'input_channels': input_channels,
+                'normalisation': normalisation,
             },
             'inference': {'heatmap_to_point': 'argmax', 'scale_back_to_original': True},
             'checkpoint': {'type': 'best_validation_loss'},
@@ -70,6 +79,23 @@ class StandaloneInferenceTests(unittest.TestCase):
         torch.save({'state_dict': model.state_dict(), 'metadata': metadata,
                     'checkpoint_type': 'best_validation_loss'}, checkpoint_path)
         return checkpoint_path
+
+    def test_loader_restores_three_channel_normalisation_contract(self):
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            normalisation = {
+                'enabled': True,
+                'channels': 3,
+                'mean': [0.1, 0.2, 0.3],
+                'standard_deviation': [0.4, 0.5, 0.6],
+                'source': 'training_split_images',
+            }
+            checkpoint_path = self.write_checkpoint(root, 'unet_basic', input_channels=3,
+                                                    normalisation=normalisation)
+            loaded = load_model_from_checkpoint(checkpoint_path, device='cpu')
+            config = build_config_from_checkpoint_metadata(loaded.metadata, output_dir=root / 'outputs')
+            self.assertEqual(config.normalisation_mean, normalisation['mean'])
+            self.assertEqual(config.normalisation_std, normalisation['standard_deviation'])
 
     def test_loader_reconstructs_every_registered_model(self):
         with tempfile.TemporaryDirectory() as temporary_dir:

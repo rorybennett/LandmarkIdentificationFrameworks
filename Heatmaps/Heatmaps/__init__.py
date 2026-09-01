@@ -8,7 +8,7 @@ from .heatmap_transforms import get_default_heatmap_transforms
 from .model_registry import build_heatmap_model, get_available_model_names
 from .models import HRNetHeatmap, StackedHourglassHeatmap, UNetHeatmap, ViTPoseHeatmap, count_trainable_parameters
 
-__version__ = "0.1.0"
+__version__ = "0.1"
 
 _TRAINING_EXPORTS = {'HeatmapDataConfig', 'HeatmapModelConfig', 'TrainConfig', 'TrainModel'}
 

@@ -14,6 +14,8 @@ from skimage import io
 from skimage.util import img_as_float32
 from torch.utils.data import Dataset
 
+from .normalisation import normalise_tensor
+
 
 class CustomDataset(Dataset):
     """Load grouped multi-scale patch samples for the Quadruplet network."""
@@ -116,9 +118,21 @@ def load_patch_image(patch_path):
 class ToTensor:
     """Convert NumPy arrays in a sample to PyTorch tensors."""
 
+    def __init__(self, normalisation_mean=None, normalisation_std=None):
+        if (normalisation_mean is None) != (normalisation_std is None):
+            raise ValueError('Normalisation mean and standard deviation must be supplied together.')
+
+        self.normalisation_mean = normalisation_mean
+        self.normalisation_std = normalisation_std
+
     def __call__(self, sample):
+        image = torch.from_numpy(sample['image']).float()
+
+        if self.normalisation_mean is not None:
+            image = normalise_tensor(image, self.normalisation_mean, self.normalisation_std)
+
         return {
-            'image': torch.from_numpy(sample['image']).float(),
+            'image': image,
             'sample_name': sample['sample_name'],
             'coordinates': torch.from_numpy(sample['coordinates']).long(),
             'labels': torch.from_numpy(sample['labels']).long()

@@ -571,7 +571,7 @@ class IPVTrainingPipeline:
 
         run_info = {
             'schema': 'ipv_training_run_info',
-            'schema_version': 4,
+            'schema_version': '0.1',
             'created_at': created_at,
             'updated_at': dt.datetime.now(dt.timezone.utc).isoformat(),
             'repetition': self.repetition,
@@ -683,6 +683,7 @@ class IPVTrainingPipeline:
         print(f'\t\tWeight decay: {self.train_config.weight_decay}', flush=True)
         print(f'\t\tLR schedule: {self.train_config.lr_schedule}', flush=True)
         print(f'\t\tUse AMP: {self.train_config.use_amp}', flush=True)
+        print(f'\t\tNormalise inputs: {self.train_config.normalise_inputs}', flush=True)
         print(f'\t\tNetwork: {self.quadruplet_config.network_name}', flush=True)
         print(f'\t\tBranch features: {self.quadruplet_config.branch_features}', flush=True)
         print(f'\t\tFrozen stages: {self.quadruplet_config.frozen_stages}', flush=True)
@@ -814,6 +815,8 @@ def parse_args():
     parser.add_argument('--early-stop-min-delta', type=float, default=1e-4, help='Minimum validation-loss improvement required to reset patience.')
     parser.add_argument('--early-stop-warmup-epochs', type=int, default=10, help='Initial epochs before early stopping is allowed.')
     parser.add_argument('--use-amp', type=str_to_bool, default=False, help='Use CUDA automatic mixed precision.')
+    parser.add_argument('--normalise-inputs', type=str_to_bool, default=False,
+                        help='Normalise each of the three input channels. Pretrained networks use ImageNet constants; other networks use training-split patch statistics.')
     parser.add_argument('--save-validation-results', type=str_to_bool, default=True,
                         help='Whether to run full validation-image inference after training and save overlays plus Excel error metrics.')
     parser.add_argument('--validation-inference-batch-size', type=int, default=2048,
@@ -1064,6 +1067,7 @@ def build_run_name(args, num_of_repetitions, num_of_folds, fold_collection_sha25
         'lr_schedule': args.lr_schedule, 'lr_step_size': args.lr_step_size, 'lr_gamma': args.lr_gamma,
         'early_stop_patience': args.early_stop_patience, 'early_stop_min_delta': args.early_stop_min_delta,
         'early_stop_warmup_epochs': args.early_stop_warmup_epochs, 'use_amp': args.use_amp,
+        'normalise_inputs': args.normalise_inputs,
         'save_validation_results': args.save_validation_results,
         'validation_inference_batch_size': args.validation_inference_batch_size,
         'validation_vote_smoothing_sigma': args.validation_vote_smoothing_sigma,
@@ -1186,7 +1190,8 @@ def build_configs(args):
         validation_inference_batch_size=args.validation_inference_batch_size,
         validation_vote_smoothing_sigma=args.validation_vote_smoothing_sigma,
         validation_use_probability_weights=args.validation_use_probability_weights,
-        validation_save_raw_vote_maps=args.validation_save_raw_vote_maps
+        validation_save_raw_vote_maps=args.validation_save_raw_vote_maps,
+        normalise_inputs=args.normalise_inputs,
     )
 
     quadruplet_config = QuadrupletConfig(

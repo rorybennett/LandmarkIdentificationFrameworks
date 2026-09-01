@@ -21,6 +21,7 @@ from skimage.util import img_as_float32, img_as_ubyte
 
 from .progress_bar import ProgressBar
 from .fold_utils import normalise_fold
+from ..normalisation import EXPECTED_NORMALISATION_CHANNELS, normalise_tensor, validate_normalisation_constants
 
 POINT_PATTERN = re.compile(r'\((-?\d+(?:\.\d+)?),\s*(-?\d+(?:\.\d+)?)\)')
 TASKS_PER_POINT = 2
@@ -38,6 +39,7 @@ OUTPUT_ARC_COLOUR = (0, 0, 255)
 OUTPUT_ARC_THICKNESS = 1
 OUTPUT_ARC_ALPHA = 0.45
 SUPPORTED_IMAGE_SUFFIXES = ('.png', '.jpg', '.jpeg', '.bmp', '.tif', '.tiff')
+CHECKPOINT_METADATA_SCHEMA_VERSION = '0.1'
 
 _PATCH_WORKER_PADDED_IMAGES = None
 _PATCH_WORKER_SUB_PATCH_SCALES = None
@@ -76,6 +78,8 @@ class LandmarkInferenceConfig:
     vote_workers: int | None = None
     multiprocess_context: str = 'spawn'
     checkpoint_metadata: dict | None = None
+    normalisation_mean: list | None = None
+    normalisation_std: list | None = None
 
 
 @dataclass
@@ -152,6 +156,14 @@ class LandmarkImageInferer:
         config.parallel_vote_accumulation = bool(config.parallel_vote_accumulation)
         config.vote_workers = None if config.vote_workers is None else int(config.vote_workers)
         config.multiprocess_context = str(config.multiprocess_context)
+        if (config.normalisation_mean is None) != (config.normalisation_std is None):
+            raise ValueError('Normalisation mean and standard deviation must be supplied together.')
+        if config.normalisation_mean is not None:
+            if config.input_channels != EXPECTED_NORMALISATION_CHANNELS:
+                raise ValueError(f'Input normalisation requires exactly {EXPECTED_NORMALISATION_CHANNELS} channels.')
+            mean, standard_deviation = validate_normalisation_constants(config.normalisation_mean, config.normalisation_std)
+            config.normalisation_mean = list(mean)
+            config.normalisation_std = list(standard_deviation)
         if config.repetition is not None and config.repetition < 1:
             raise ValueError('repetition must be at least 1.')
         if config.num_points < 1:
@@ -293,11 +305,16 @@ class LandmarkImageInferer:
     def create_batch_tensor(self, image, centres, patch_pool=None):
         """Create one model-input batch tensor using serial or multiprocessing patch generation."""
         if patch_pool is None:
-            return create_batch_tensor(image=image, centres=centres, sub_patch_scales=self.config.sub_patch_scales,
-                                       patch_size=self.config.sub_patch_scales[0], input_channels=self.config.input_channels)
+            batch = create_batch_tensor(image=image, centres=centres, sub_patch_scales=self.config.sub_patch_scales,
+                                        patch_size=self.config.sub_patch_scales[0], input_channels=self.config.input_channels)
+        else:
+            samples = list(patch_pool.map(create_sample_tensor_worker, centres, chunksize=self.config.patch_chunksize))
+            batch = torch.from_numpy(np.stack(samples, axis=0)).float()
 
-        samples = list(patch_pool.map(create_sample_tensor_worker, centres, chunksize=self.config.patch_chunksize))
-        return torch.from_numpy(np.stack(samples, axis=0)).float()
+        if self.config.normalisation_mean is not None:
+            batch = normalise_tensor(batch, self.config.normalisation_mean, self.config.normalisation_std)
+
+        return batch
 
     def create_empty_vote_inputs(self):
         """Create model-output containers for endpoint voting."""
@@ -881,7 +898,7 @@ def create_all_vote_maps_overlay(display_image, vote_maps):
 
 
 def create_combined_heatmap_overlay(display_image, smoothed_vote_maps, detected_points):
-    """Create a local-inference-style heatmap overlay kept for backwards compatibility."""
+    """Create a coloured heatmap overlay with predicted points."""
     overlay = create_all_vote_maps_overlay(display_image=display_image, vote_maps=smoothed_vote_maps)
     draw_points(image=overlay, points=detected_points, colour=PREDICTED_POINT_COLOUR, prefix='P')
     return overlay
@@ -1188,6 +1205,19 @@ def extract_inference_metadata_from_checkpoint(checkpoint):
     if missing_init_keys:
         raise ValueError(f'Checkpoint model init_args are missing required key(s): {missing_init_keys}')
 
+    normalisation = require_dict(preprocessing_metadata, 'normalisation')
+    normalisation_enabled = bool(normalisation.get('enabled'))
+    normalisation_mean = normalisation.get('mean')
+    normalisation_std = normalisation.get('standard_deviation')
+
+    if int(normalisation.get('channels', -1)) != EXPECTED_NORMALISATION_CHANNELS:
+        raise ValueError(f'Checkpoint normalisation must declare exactly {EXPECTED_NORMALISATION_CHANNELS} channels.')
+
+    if normalisation_enabled:
+        normalisation_mean, normalisation_std = validate_normalisation_constants(normalisation_mean, normalisation_std)
+    elif normalisation_mean is not None or normalisation_std is not None:
+        raise ValueError('Disabled checkpoint normalisation must not contain mean or standard-deviation constants.')
+
     return {
         'raw_checkpoint_metadata': json_safe_metadata(metadata),
         'init_args': {
@@ -1215,7 +1245,9 @@ def extract_inference_metadata_from_checkpoint(checkpoint):
         'grid_spacing': int(inference_metadata['grid_spacing']),
         'smoothing_sigma': float(smoothing_sigma) if smoothing_sigma is not None else 7.0,
         'use_probability_weights': bool(vote_accumulation.get('use_probability_weights', True)),
-        'checkpoint_type': checkpoint_info.get('type', checkpoint.get('checkpoint_type'))
+        'checkpoint_type': checkpoint_info.get('type', checkpoint.get('checkpoint_type')),
+        'normalisation_mean': None if normalisation_mean is None else list(normalisation_mean),
+        'normalisation_std': None if normalisation_std is None else list(normalisation_std),
     }
 
 
@@ -1244,6 +1276,8 @@ def build_config_from_checkpoint_metadata(metadata, output_dir, batch_size=2048,
         parallel_patch_generation=bool(parallel_patch_generation), patch_workers=patch_workers,
         patch_chunksize=int(patch_chunksize), parallel_vote_accumulation=bool(parallel_vote_accumulation),
         vote_workers=vote_workers, multiprocess_context=multiprocess_context,
+        normalisation_mean=metadata.get('normalisation_mean'),
+        normalisation_std=metadata.get('normalisation_std'),
         checkpoint_metadata=metadata.get('raw_checkpoint_metadata'))
 
 
@@ -1251,6 +1285,9 @@ def require_metadata_schema(metadata):
     """Validate that the checkpoint uses the current metadata schema."""
     if metadata.get('schema') != 'ipv_checkpoint_metadata':
         raise ValueError(f"Unsupported checkpoint metadata schema: {metadata.get('schema')}")
+
+    if metadata.get('schema_version') != CHECKPOINT_METADATA_SCHEMA_VERSION:
+        raise ValueError(f"Unsupported checkpoint metadata schema version: {metadata.get('schema_version')}")
 
     required_sections = ['task', 'model', 'preprocessing', 'inference']
     missing_sections = [section for section in required_sections if section not in metadata]
