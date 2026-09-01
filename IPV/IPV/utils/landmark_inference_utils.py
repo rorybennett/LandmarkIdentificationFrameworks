@@ -16,9 +16,11 @@ import numpy as np
 import pandas as pd
 import torch
 from skimage import io
-from skimage.util import img_as_float32
+from skimage.transform import resize
+from skimage.util import img_as_float32, img_as_ubyte
 
 from .progress_bar import ProgressBar
+from .fold_utils import normalise_fold
 
 POINT_PATTERN = re.compile(r'\((-?\d+(?:\.\d+)?),\s*(-?\d+(?:\.\d+)?)\)')
 TASKS_PER_POINT = 2
@@ -35,14 +37,12 @@ VOTE_MAP_COLOUR_WEIGHT = 0.75
 OUTPUT_ARC_COLOUR = (0, 0, 255)
 OUTPUT_ARC_THICKNESS = 1
 OUTPUT_ARC_ALPHA = 0.45
-PATCH_RESIZE_INTERPOLATION = cv2.INTER_AREA
 SUPPORTED_IMAGE_SUFFIXES = ('.png', '.jpg', '.jpeg', '.bmp', '.tif', '.tiff')
 
 _PATCH_WORKER_PADDED_IMAGES = None
 _PATCH_WORKER_SUB_PATCH_SCALES = None
 _PATCH_WORKER_PATCH_SIZE = None
 _PATCH_WORKER_INPUT_CHANNELS = None
-_PATCH_WORKER_RESIZE_INTERPOLATION = None
 
 
 @dataclass
@@ -56,7 +56,7 @@ class LandmarkInferenceConfig:
     input_channels: int
     task_name: str = ''
     repetition: int | None = None
-    fold: int | None = None
+    fold: int | str | None = None
     data_save_path: Path | None = None
     mark_list_file: Path | None = None
     image_data_dir: Path | None = None
@@ -67,6 +67,7 @@ class LandmarkInferenceConfig:
     clear_cuda_cache_between_images: bool = True
     checkpoint_path: Path | None = None
     checkpoint_type: str | None = None
+    network_name: str | None = None
     run_label: str = 'inference'
     parallel_patch_generation: bool = False
     patch_workers: int | None = None
@@ -74,7 +75,7 @@ class LandmarkInferenceConfig:
     parallel_vote_accumulation: bool = False
     vote_workers: int | None = None
     multiprocess_context: str = 'spawn'
-    patch_resize_interpolation: int = PATCH_RESIZE_INTERPOLATION
+    checkpoint_metadata: dict | None = None
 
 
 @dataclass
@@ -132,7 +133,7 @@ class LandmarkImageInferer:
         config.image_data_dir = None if config.image_data_dir is None else Path(config.image_data_dir)
         config.checkpoint_path = None if config.checkpoint_path is None else Path(config.checkpoint_path)
         config.repetition = None if config.repetition is None else int(config.repetition)
-        config.fold = None if config.fold is None else int(config.fold)
+        config.fold = None if config.fold is None else normalise_fold(config.fold)
         config.num_points = int(config.num_points)
         config.grid_spacing = int(config.grid_spacing)
         config.input_channels = int(config.input_channels)
@@ -147,11 +148,28 @@ class LandmarkImageInferer:
         config.save_raw_vote_maps = bool(config.save_raw_vote_maps)
         config.parallel_patch_generation = bool(config.parallel_patch_generation)
         config.patch_workers = None if config.patch_workers is None else int(config.patch_workers)
-        config.patch_chunksize = max(1, int(config.patch_chunksize))
+        config.patch_chunksize = int(config.patch_chunksize)
         config.parallel_vote_accumulation = bool(config.parallel_vote_accumulation)
         config.vote_workers = None if config.vote_workers is None else int(config.vote_workers)
         config.multiprocess_context = str(config.multiprocess_context)
-        config.patch_resize_interpolation = int(config.patch_resize_interpolation)
+        if config.repetition is not None and config.repetition < 1:
+            raise ValueError('repetition must be at least 1.')
+        if config.num_points < 1:
+            raise ValueError('num_points must be at least 1.')
+        if len(config.sub_patch_scales) != 4 or any(scale < 1 for scale in config.sub_patch_scales):
+            raise ValueError('sub_patch_scales must contain exactly four positive values.')
+        if config.grid_spacing < 1 or config.batch_size < 1 or config.patch_chunksize < 1:
+            raise ValueError('grid_spacing, batch_size, and patch_chunksize must be at least 1.')
+        if config.input_channels not in (1, 3, 4):
+            raise ValueError('input_channels must be 1, 3, or 4.')
+        if config.smoothing_sigma < 0:
+            raise ValueError('smoothing_sigma must be non-negative.')
+        if config.patch_workers is not None and config.patch_workers < 1:
+            raise ValueError('patch_workers must be at least 1 when supplied.')
+        if config.vote_workers is not None and config.vote_workers < 1:
+            raise ValueError('vote_workers must be at least 1 when supplied.')
+        if config.multiprocess_context not in mp.get_all_start_methods():
+            raise ValueError(f'Unsupported multiprocessing context: {config.multiprocess_context}')
         return config
 
     def prepare_output_dirs(self):
@@ -166,18 +184,20 @@ class LandmarkImageInferer:
 
     def get_output_dirs(self):
         """Return per-output subdirectories."""
-        prefix = 'validation_' if self.config.run_label == 'validation' else ''
+        prefix = build_summary_prefix(self.config.run_label)
         return {
-            'heatmap_overlays': self.config.output_dir / f'{prefix}heatmap_overlays',
-            'point_overlays': self.config.output_dir / f'{prefix}point_overlays',
-            'vote_maps': self.config.output_dir / f'{prefix}vote_maps',
-            'raw_vote_maps': self.config.output_dir / f'{prefix}raw_vote_maps',
-            'logs': self.config.output_dir / f'{prefix}logs'
+            'heatmap_overlays': self.config.output_dir / f'{prefix}_heatmap_overlays',
+            'point_overlays': self.config.output_dir / f'{prefix}_point_overlays',
+            'vote_maps': self.config.output_dir / f'{prefix}_vote_maps',
+            'raw_vote_maps': self.config.output_dir / f'{prefix}_raw_vote_maps',
+            'logs': self.config.output_dir / f'{prefix}_logs'
         }
 
     def infer_records(self, records):
         """Run inference for all image records and save combined summaries."""
         records = list(records)
+        if not records:
+            raise ValueError('Inference requires at least one image record.')
         results = []
         progress_label = f'{self.config.run_label} inference'
 
@@ -193,8 +213,8 @@ class LandmarkImageInferer:
 
                 progress_bar.update()
 
-        self.save_combined_summaries(results)
-        self.save_run_metadata(records=records, results=results)
+        output_paths = self.save_combined_summaries(results)
+        self.save_run_metadata(records=records, results=results, output_paths=output_paths)
         return results
 
     def infer_record(self, record):
@@ -225,7 +245,7 @@ class LandmarkImageInferer:
                               peak_values=peak_values, num_centres=len(centres), grid_spacing=self.config.grid_spacing,
                               checkpoint_type=self.config.checkpoint_type, image_shape=image.shape[:2],
                               dataset_split='validation' if self.config.run_label == 'validation' else 'inference',
-                              repetition=self.config.repetition, fold=self.config.fold)
+                              repetition=self.config.repetition, fold=self.config.fold, network_name=self.config.network_name)
         output_stem = safe_file_stem(record.sample_name)
         self.save_visual_outputs(output_stem=output_stem, display_image=display_image, detected_points=detected_points, ground_truth_points=record.ground_truth_points, smoothed_vote_maps=smoothed_vote_maps)
 
@@ -267,12 +287,14 @@ class LandmarkImageInferer:
             return NullContext()
 
         context = mp.get_context(self.config.multiprocess_context)
-        return ProcessPoolExecutor(max_workers=workers, mp_context=context, initializer=initialise_patch_worker, initargs=(image, self.config.sub_patch_scales, self.config.sub_patch_scales[0], self.config.input_channels, self.config.patch_resize_interpolation))
+        return ProcessPoolExecutor(max_workers=workers, mp_context=context, initializer=initialise_patch_worker,
+                                   initargs=(image, self.config.sub_patch_scales, self.config.sub_patch_scales[0], self.config.input_channels))
 
     def create_batch_tensor(self, image, centres, patch_pool=None):
         """Create one model-input batch tensor using serial or multiprocessing patch generation."""
         if patch_pool is None:
-            return create_batch_tensor(image=image, centres=centres, sub_patch_scales=self.config.sub_patch_scales, patch_size=self.config.sub_patch_scales[0], input_channels=self.config.input_channels, patch_resize_interpolation=self.config.patch_resize_interpolation)
+            return create_batch_tensor(image=image, centres=centres, sub_patch_scales=self.config.sub_patch_scales,
+                                       patch_size=self.config.sub_patch_scales[0], input_channels=self.config.input_channels)
 
         samples = list(patch_pool.map(create_sample_tensor_worker, centres, chunksize=self.config.patch_chunksize))
         return torch.from_numpy(np.stack(samples, axis=0)).float()
@@ -314,43 +336,47 @@ class LandmarkImageInferer:
         """Save heatmap and endpoint overlay images."""
         heatmap_overlay = create_combined_heatmap_overlay(display_image=display_image, smoothed_vote_maps=smoothed_vote_maps, detected_points=detected_points)
         point_overlay = create_point_overlay(display_image=display_image, detected_points=detected_points, ground_truth_points=ground_truth_points)
-        cv2.imwrite(str(self.output_dirs['heatmap_overlays'] / f'{output_stem}_{self.config.run_label}_heatmap_overlay.png'), heatmap_overlay)
-        cv2.imwrite(str(self.output_dirs['point_overlays'] / f'{output_stem}_{self.config.run_label}_points_overlay.png'), point_overlay)
+        write_image(self.output_dirs['heatmap_overlays'] / f'{output_stem}_{self.config.run_label}_heatmap_overlay.png', heatmap_overlay)
+        write_image(self.output_dirs['point_overlays'] / f'{output_stem}_{self.config.run_label}_points_overlay.png', point_overlay)
 
         for point_index, vote_map in enumerate(smoothed_vote_maps, start=1):
             vote_overlay = create_single_vote_map_overlay(display_image=display_image, vote_map=vote_map, point_index=point_index)
-            cv2.imwrite(str(self.output_dirs['vote_maps'] / f'{output_stem}_{self.config.run_label}_vote_map_p{point_index}.png'), vote_overlay)
+            write_image(self.output_dirs['vote_maps'] / f'{output_stem}_{self.config.run_label}_vote_map_p{point_index}.png', vote_overlay)
 
     def save_combined_summaries(self, results):
         """Save combined inference summaries across images."""
         endpoint_rows = [row for result in results for row in result['endpoint_rows']]
         summary_rows = [result['summary'] for result in results]
-        validation_export = self.config.run_label == 'validation'
         summary_prefix = build_summary_prefix(self.config.run_label)
-        output_path = self.config.output_dir / ('validation_summary.xlsx' if validation_export else f'{summary_prefix}_summary.xlsx')
-        image_sheet_name = 'validation_image_summary' if validation_export else 'image_summary'
-        endpoint_sheet_name = 'validation_endpoints' if validation_export else 'endpoints'
+        output_paths = {
+            'summary_xlsx': self.config.output_dir / f'{summary_prefix}_summary.xlsx',
+            'image_summary_csv': self.config.output_dir / f'{summary_prefix}_image_summary.csv',
+            'endpoints_csv': self.config.output_dir / f'{summary_prefix}_endpoints.csv',
+            'predictions_csv': self.config.output_dir / f'{summary_prefix}_predictions.csv',
+        }
 
-        with pd.ExcelWriter(output_path, engine='openpyxl') as writer:
-            pd.DataFrame(summary_rows).to_excel(writer, sheet_name=image_sheet_name, index=False)
-            pd.DataFrame(endpoint_rows).to_excel(writer, sheet_name=endpoint_sheet_name, index=False)
+        with pd.ExcelWriter(output_paths['summary_xlsx'], engine='openpyxl') as writer:
+            pd.DataFrame(summary_rows).to_excel(writer, sheet_name='image_summary', index=False)
+            pd.DataFrame(endpoint_rows).to_excel(writer, sheet_name='endpoints', index=False)
 
-        if validation_export:
-            write_csv_rows(self.config.output_dir / 'validation_image_summary.csv', summary_rows,
-                           list(summary_rows[0].keys()) if summary_rows else [])
-            write_csv_rows(self.config.output_dir / 'validation_endpoints.csv', endpoint_rows,
-                           list(endpoint_rows[0].keys()) if endpoint_rows else [])
-            prediction_rows = build_prediction_rows(summary_rows, endpoint_rows)
-            write_csv_rows(self.config.output_dir / 'validation_predictions.csv', prediction_rows,
-                           list(prediction_rows[0].keys()) if prediction_rows else [])
+        write_csv_rows(output_paths['image_summary_csv'], summary_rows, list(summary_rows[0].keys()))
+        write_csv_rows(output_paths['endpoints_csv'], endpoint_rows, list(endpoint_rows[0].keys()))
+        prediction_rows = build_prediction_rows(summary_rows, endpoint_rows)
+        write_csv_rows(output_paths['predictions_csv'], prediction_rows, list(prediction_rows[0].keys()))
+        return output_paths
 
-    def save_run_metadata(self, records, results):
+    def save_run_metadata(self, records, results, output_paths):
         """Save inference run metadata."""
+        config_metadata = asdict(self.config)
+        checkpoint_metadata = config_metadata.pop('checkpoint_metadata')
         metadata = {
+            'schema': 'ipv_inference_run_metadata',
             'image_count': len(records),
             'result_count': len(results),
-            'config': asdict(self.config),
-            'records': [{'sample_name': record.sample_name, 'image_path': Path(record.image_path).as_posix()} for record in records]
+            'config': config_metadata,
+            'output_paths': {name: str(path) for name, path in output_paths.items()},
+            'records': [{'sample_name': record.sample_name, 'image_path': str(Path(record.image_path))} for record in records],
+            'checkpoint_metadata': checkpoint_metadata,
         }
         summary_prefix = build_summary_prefix(self.config.run_label)
 
@@ -362,7 +388,16 @@ class LandmarkImageInferer:
 def build_summary_prefix(run_label):
     """Return the base filename used for combined summary outputs."""
     run_label = safe_file_stem(run_label)
-    return run_label if run_label == 'inference' else f'{run_label}_inference'
+    if run_label in ('inference', 'validation'):
+        return run_label
+    return f'{run_label}_inference'
+
+
+def write_image(output_path, image):
+    """Write an OpenCV image and fail clearly when the encoder cannot save it."""
+    output_path = Path(output_path)
+    if not cv2.imwrite(str(output_path), image):
+        raise OSError(f'Could not write inference image: {output_path}')
 
 
 def run_landmark_inference_for_records(model, config, records, device=None):
@@ -418,6 +453,11 @@ def build_image_records(input_path, num_points, mark_list_path=None, recursive=F
     """Build inference image records from one image or a directory, with optional ground truth."""
     image_paths = find_images(input_path=input_path, recursive=recursive, supported_suffixes=supported_suffixes)
     selected_names = [Path(path).stem for path in image_paths]
+    duplicate_names = sorted({name for name in selected_names if selected_names.count(name) > 1})
+
+    if duplicate_names:
+        raise ValueError(f'Inference images contain duplicate sample stems: {duplicate_names}')
+
     mark_records = (read_mark_list(mark_list_path, expected_points=num_points, selected_sample_names=selected_names)
                     if mark_list_path is not None else {})
     records = []
@@ -434,13 +474,16 @@ def find_images(input_path, recursive=False, supported_suffixes=SUPPORTED_IMAGE_
     """Return one image path or all supported image paths in a directory."""
     input_path = Path(input_path)
 
+    suffixes = tuple(str(suffix).lower() for suffix in supported_suffixes)
+
     if input_path.is_file():
+        if input_path.suffix.lower() not in suffixes:
+            raise ValueError(f'Unsupported input image suffix: {input_path.suffix}')
         return [input_path]
 
     if not input_path.is_dir():
         raise FileNotFoundError(f'Input path does not exist: {input_path}')
 
-    suffixes = tuple(suffix.lower() for suffix in supported_suffixes)
     iterator = input_path.rglob('*') if recursive else input_path.iterdir()
     return sorted([path for path in iterator if path.is_file() and path.suffix.lower() in suffixes], key=lambda path: path.as_posix().lower())
 
@@ -559,15 +602,14 @@ def load_display_image(image_path):
     return display_image
 
 
-def initialise_patch_worker(image, sub_patch_scales, patch_size, input_channels, patch_resize_interpolation):
+def initialise_patch_worker(image, sub_patch_scales, patch_size, input_channels):
     """Initialise padded image data used by patch-generation workers."""
-    global _PATCH_WORKER_PADDED_IMAGES, _PATCH_WORKER_SUB_PATCH_SCALES, _PATCH_WORKER_PATCH_SIZE, _PATCH_WORKER_INPUT_CHANNELS, _PATCH_WORKER_RESIZE_INTERPOLATION
+    global _PATCH_WORKER_PADDED_IMAGES, _PATCH_WORKER_SUB_PATCH_SCALES, _PATCH_WORKER_PATCH_SIZE, _PATCH_WORKER_INPUT_CHANNELS
     image = np.ascontiguousarray(image, dtype=np.float32)
     _PATCH_WORKER_PADDED_IMAGES = create_padded_images_by_scale(image=image, sub_patch_scales=sub_patch_scales)
     _PATCH_WORKER_SUB_PATCH_SCALES = [int(scale) for scale in sub_patch_scales]
     _PATCH_WORKER_PATCH_SIZE = int(patch_size)
     _PATCH_WORKER_INPUT_CHANNELS = int(input_channels)
-    _PATCH_WORKER_RESIZE_INTERPOLATION = int(patch_resize_interpolation)
 
 
 def create_padded_images_by_scale(image, sub_patch_scales):
@@ -587,14 +629,15 @@ def create_padded_images_by_scale(image, sub_patch_scales):
     return padded_images
 
 
-def fill_sample_tensor_from_padded_images(sample, padded_images, x, y, sub_patch_scales, patch_size, input_channels, patch_resize_interpolation=PATCH_RESIZE_INTERPOLATION):
-    """Fill one model input sample from pre-padded images using OpenCV slicing and resizing."""
+def fill_sample_tensor_from_padded_images(sample, padded_images, x, y, sub_patch_scales, patch_size, input_channels):
+    """Fill one model input sample using the exact training resize and PNG quantisation path."""
     for scale_index, (padded_image, scale) in enumerate(zip(padded_images, sub_patch_scales)):
         scale = int(scale)
         patch = padded_image[int(y):int(y) + scale, int(x):int(x) + scale]
 
-        if scale != int(patch_size):
-            patch = cv2.resize(patch, (int(patch_size), int(patch_size)), interpolation=int(patch_resize_interpolation))
+        output_shape = (int(patch_size), int(patch_size)) if patch.ndim == 2 else (int(patch_size), int(patch_size), patch.shape[2])
+        patch = resize(patch, output_shape, preserve_range=True, anti_aliasing=True)
+        patch = img_as_float32(img_as_ubyte(patch))
 
         if patch.ndim == 2:
             patch = patch[:, :, np.newaxis]
@@ -605,26 +648,33 @@ def fill_sample_tensor_from_padded_images(sample, padded_images, x, y, sub_patch
         sample[scale_index] = np.moveaxis(patch.astype(np.float32), -1, 0)
 
 
-def create_sample_tensor_from_padded_images(padded_images, x, y, sub_patch_scales, patch_size, input_channels, patch_resize_interpolation=PATCH_RESIZE_INTERPOLATION):
+def create_sample_tensor_from_padded_images(padded_images, x, y, sub_patch_scales, patch_size, input_channels):
     """Create one multi-scale sample tensor from pre-padded images."""
     sample = np.empty((len(sub_patch_scales), int(input_channels), int(patch_size), int(patch_size)), dtype=np.float32)
-    fill_sample_tensor_from_padded_images(sample=sample, padded_images=padded_images, x=x, y=y, sub_patch_scales=sub_patch_scales, patch_size=patch_size, input_channels=input_channels, patch_resize_interpolation=patch_resize_interpolation)
+    fill_sample_tensor_from_padded_images(sample=sample, padded_images=padded_images, x=x, y=y,
+                                          sub_patch_scales=sub_patch_scales, patch_size=patch_size,
+                                          input_channels=input_channels)
     return sample
 
 
 def create_sample_tensor_worker(centre):
     """Create one model input sample inside a patch-generation worker."""
     x, y = centre
-    return create_sample_tensor_from_padded_images(padded_images=_PATCH_WORKER_PADDED_IMAGES, x=int(x), y=int(y), sub_patch_scales=_PATCH_WORKER_SUB_PATCH_SCALES, patch_size=_PATCH_WORKER_PATCH_SIZE, input_channels=_PATCH_WORKER_INPUT_CHANNELS, patch_resize_interpolation=_PATCH_WORKER_RESIZE_INTERPOLATION)
+    return create_sample_tensor_from_padded_images(padded_images=_PATCH_WORKER_PADDED_IMAGES, x=int(x), y=int(y),
+                                                    sub_patch_scales=_PATCH_WORKER_SUB_PATCH_SCALES,
+                                                    patch_size=_PATCH_WORKER_PATCH_SIZE,
+                                                    input_channels=_PATCH_WORKER_INPUT_CHANNELS)
 
 
-def create_batch_tensor(image, centres, sub_patch_scales, patch_size, input_channels, patch_resize_interpolation=PATCH_RESIZE_INTERPOLATION):
+def create_batch_tensor(image, centres, sub_patch_scales, patch_size, input_channels):
     """Create one model-input batch tensor from full-image centre locations."""
     padded_images = create_padded_images_by_scale(image=image, sub_patch_scales=sub_patch_scales)
     batch = np.empty((len(centres), len(sub_patch_scales), int(input_channels), int(patch_size), int(patch_size)), dtype=np.float32)
 
     for sample_index, (x, y) in enumerate(centres):
-        fill_sample_tensor_from_padded_images(sample=batch[sample_index], padded_images=padded_images, x=int(x), y=int(y), sub_patch_scales=sub_patch_scales, patch_size=patch_size, input_channels=input_channels, patch_resize_interpolation=patch_resize_interpolation)
+        fill_sample_tensor_from_padded_images(sample=batch[sample_index], padded_images=padded_images, x=int(x), y=int(y),
+                                              sub_patch_scales=sub_patch_scales, patch_size=patch_size,
+                                              input_channels=input_channels)
 
     return torch.from_numpy(batch).float()
 
@@ -632,7 +682,9 @@ def create_batch_tensor(image, centres, sub_patch_scales, patch_size, input_chan
 def create_sample_tensor(image, x, y, sub_patch_scales, patch_size, input_channels):
     """Create one multi-scale sample tensor for a full-image centre."""
     padded_images = create_padded_images_by_scale(image=image, sub_patch_scales=sub_patch_scales)
-    return create_sample_tensor_from_padded_images(padded_images=padded_images, x=x, y=y, sub_patch_scales=sub_patch_scales, patch_size=patch_size, input_channels=input_channels, patch_resize_interpolation=PATCH_RESIZE_INTERPOLATION)
+    return create_sample_tensor_from_padded_images(padded_images=padded_images, x=x, y=y,
+                                                    sub_patch_scales=sub_patch_scales, patch_size=patch_size,
+                                                    input_channels=input_channels)
 
 
 def create_centres(image_shape, step_size):
@@ -903,11 +955,11 @@ def draw_points_with_point_colours(image, points, prefix):
 
 
 def build_result(record, detected_points, ground_truth_points, peak_values, num_centres, grid_spacing, checkpoint_type,
-                 image_shape=None, dataset_split='inference', repetition=None, fold=None):
+                 image_shape=None, dataset_split='inference', repetition=None, fold=None, network_name=None):
     """Build per-image endpoint and summary metrics."""
     endpoint_rows = build_endpoint_rows(record=record, detected_points=detected_points, ground_truth_points=ground_truth_points,
                                         peak_values=peak_values, dataset_split=dataset_split, repetition=repetition,
-                                        fold=fold, checkpoint_type=checkpoint_type)
+                                        fold=fold, checkpoint_type=checkpoint_type, network_name=network_name)
     point_errors = [row['point_error_px'] for row in endpoint_rows if row['point_error_px'] is not None]
     summary = {
         'dataset_split': dataset_split,
@@ -918,6 +970,7 @@ def build_result(record, detected_points, ground_truth_points, peak_values, num_
         'image_height': None if image_shape is None else int(image_shape[0]),
         'image_width': None if image_shape is None else int(image_shape[1]),
         'checkpoint_type': checkpoint_type,
+        'network_name': network_name,
         'num_points': len(detected_points),
         'mean_error_px': float(np.mean(point_errors)) if point_errors else None,
         'median_error_px': float(np.median(point_errors)) if point_errors else None,
@@ -933,7 +986,7 @@ def build_result(record, detected_points, ground_truth_points, peak_values, num_
 
 
 def build_endpoint_rows(record, detected_points, ground_truth_points, peak_values, dataset_split='inference',
-                        repetition=None, fold=None, checkpoint_type=None):
+                        repetition=None, fold=None, checkpoint_type=None, network_name=None):
     """Build endpoint metric rows for one image."""
     rows = []
 
@@ -943,6 +996,7 @@ def build_endpoint_rows(record, detected_points, ground_truth_points, peak_value
                      'sample_name': record.sample_name, 'image_path': record.image_path.as_posix(), 'point_index': point_index,
                      'target_x': gt_x, 'target_y': gt_y, 'pred_x': int(pred_x), 'pred_y': int(pred_y),
                      'error_px': point_error, 'checkpoint_type': checkpoint_type,
+                     'network_name': network_name,
                      'gt_x': gt_x, 'gt_y': gt_y, 'point_error_px': point_error, 'vote_peak': peak_value})
 
     return rows
@@ -956,7 +1010,7 @@ def build_prediction_rows(summary_rows, endpoint_rows):
 
     predictions = []
     for summary in summary_rows:
-        row = {key: summary.get(key) for key in ('dataset_split', 'repetition', 'fold', 'sample_name')}
+        row = {key: summary.get(key) for key in ('dataset_split', 'repetition', 'fold', 'sample_name', 'network_name')}
         row['mean_error_px'] = summary.get('mean_error_px')
         for endpoint in sorted(endpoints_by_sample.get(summary['sample_name'], []), key=lambda value: value['point_index']):
             point_index = int(endpoint['point_index'])
@@ -1073,6 +1127,9 @@ def clear_device_memory(device=None):
 
 def load_checkpoint(checkpoint_path):
     """Load a checkpoint on CPU before model construction."""
+    checkpoint_path = Path(checkpoint_path)
+    if not checkpoint_path.is_file():
+        raise FileNotFoundError(f'Checkpoint does not exist: {checkpoint_path}')
     try:
         return torch.load(checkpoint_path, map_location='cpu', weights_only=False)
     except TypeError:
@@ -1087,7 +1144,7 @@ def load_model_from_checkpoint(checkpoint_path, device='auto'):
     checkpoint = load_checkpoint(checkpoint_path)
     metadata = extract_inference_metadata_from_checkpoint(checkpoint)
     model = Quadruplet(**metadata['init_args'])
-    model.load_state_dict(extract_state_dict(checkpoint))
+    model.load_state_dict(extract_state_dict(checkpoint), strict=True)
     model.to(device)
     model.eval()
     return LoadedInferenceCheckpoint(model=model, checkpoint=checkpoint, metadata=metadata)
@@ -1098,7 +1155,7 @@ def extract_state_dict(checkpoint):
     if not isinstance(checkpoint, dict) or 'state_dict' not in checkpoint:
         raise ValueError('Checkpoint must be a current IPV self-describing checkpoint containing a state_dict.')
 
-    return {str(key).replace('module.', ''): value for key, value in checkpoint['state_dict'].items()}
+    return {str(key).removeprefix('module.'): value for key, value in checkpoint['state_dict'].items()}
 
 
 def extract_inference_metadata_from_checkpoint(checkpoint):
@@ -1113,6 +1170,7 @@ def extract_inference_metadata_from_checkpoint(checkpoint):
     model_metadata = require_dict(metadata, 'model')
     preprocessing_metadata = require_dict(metadata, 'preprocessing')
     inference_metadata = require_dict(metadata, 'inference')
+    data_metadata = metadata.get('data', {}) if isinstance(metadata.get('data', {}), dict) else {}
     init_args = require_dict(model_metadata, 'init_args')
     tasks_classes = normalise_tasks_classes(init_args.get('tasks_classes'))
     task_names = list(task_metadata.get('task_names', []))
@@ -1142,6 +1200,9 @@ def extract_inference_metadata_from_checkpoint(checkpoint):
             'input_channels': int(init_args['input_channels'])
         },
         'task_name': str(task_metadata.get('name') or ''),
+        'repetition': data_metadata.get('repetition'),
+        'fold': data_metadata.get('fold'),
+        'network_name': str(init_args['network_name']),
         'task_names': task_names,
         'output_heads': output_heads,
         'num_points': int(task_metadata['num_points']),
@@ -1153,13 +1214,37 @@ def extract_inference_metadata_from_checkpoint(checkpoint):
         'input_channels': int(preprocessing_metadata['input_channels']),
         'grid_spacing': int(inference_metadata['grid_spacing']),
         'smoothing_sigma': float(smoothing_sigma) if smoothing_sigma is not None else 7.0,
-        'checkpoint_type': checkpoint_info.get('type')
+        'use_probability_weights': bool(vote_accumulation.get('use_probability_weights', True)),
+        'checkpoint_type': checkpoint_info.get('type', checkpoint.get('checkpoint_type'))
     }
 
 
-def build_config_from_checkpoint_metadata(metadata, output_dir, batch_size=2048, grid_spacing=None, smoothing_sigma=None, use_probability_weights=True, save_raw_vote_maps=False, clear_cuda_cache_between_images=True, checkpoint_path=None, run_label='inference', parallel_patch_generation=False, patch_workers=None, patch_chunksize=32, parallel_vote_accumulation=False, vote_workers=None, multiprocess_context='spawn', patch_resize_interpolation=PATCH_RESIZE_INTERPOLATION):
+def build_config_from_checkpoint_metadata(metadata, output_dir, batch_size=2048, grid_spacing=None, smoothing_sigma=None,
+                                          use_probability_weights=None, save_raw_vote_maps=False,
+                                          clear_cuda_cache_between_images=True, checkpoint_path=None,
+                                          run_label='inference', parallel_patch_generation=False,
+                                          patch_workers=None, patch_chunksize=32,
+                                          parallel_vote_accumulation=False, vote_workers=None,
+                                          multiprocess_context='spawn'):
     """Create a LandmarkInferenceConfig from checkpoint metadata and runtime overrides."""
-    return LandmarkInferenceConfig(output_dir=Path(output_dir), num_points=int(metadata['num_points']), sub_patch_scales=metadata['sub_patch_scales'], distance_intervals=metadata['distance_intervals'], angle_intervals=metadata['angle_intervals'], grid_spacing=int(grid_spacing) if grid_spacing is not None else int(metadata['grid_spacing']), input_channels=int(metadata['input_channels']), task_name=str(metadata.get('task_name') or ''), batch_size=int(batch_size), smoothing_sigma=float(smoothing_sigma) if smoothing_sigma is not None else float(metadata.get('smoothing_sigma', 7.0)), use_probability_weights=bool(use_probability_weights), save_raw_vote_maps=bool(save_raw_vote_maps), clear_cuda_cache_between_images=bool(clear_cuda_cache_between_images), checkpoint_path=checkpoint_path, checkpoint_type=metadata.get('checkpoint_type'), run_label=run_label, parallel_patch_generation=bool(parallel_patch_generation), patch_workers=patch_workers, patch_chunksize=int(patch_chunksize), parallel_vote_accumulation=bool(parallel_vote_accumulation), vote_workers=vote_workers, multiprocess_context=multiprocess_context, patch_resize_interpolation=int(patch_resize_interpolation))
+    return LandmarkInferenceConfig(
+        output_dir=Path(output_dir), num_points=int(metadata['num_points']),
+        sub_patch_scales=metadata['sub_patch_scales'], distance_intervals=metadata['distance_intervals'],
+        angle_intervals=metadata['angle_intervals'],
+        grid_spacing=int(grid_spacing) if grid_spacing is not None else int(metadata['grid_spacing']),
+        input_channels=int(metadata['input_channels']), task_name=str(metadata.get('task_name') or ''),
+        repetition=metadata.get('repetition'), fold=metadata.get('fold'), network_name=metadata.get('network_name'),
+        batch_size=int(batch_size),
+        smoothing_sigma=float(smoothing_sigma) if smoothing_sigma is not None else float(metadata.get('smoothing_sigma', 7.0)),
+        use_probability_weights=(bool(metadata.get('use_probability_weights', True)) if use_probability_weights is None
+                                 else bool(use_probability_weights)),
+        save_raw_vote_maps=bool(save_raw_vote_maps),
+        clear_cuda_cache_between_images=bool(clear_cuda_cache_between_images), checkpoint_path=checkpoint_path,
+        checkpoint_type=metadata.get('checkpoint_type'), run_label=run_label,
+        parallel_patch_generation=bool(parallel_patch_generation), patch_workers=patch_workers,
+        patch_chunksize=int(patch_chunksize), parallel_vote_accumulation=bool(parallel_vote_accumulation),
+        vote_workers=vote_workers, multiprocess_context=multiprocess_context,
+        checkpoint_metadata=metadata.get('raw_checkpoint_metadata'))
 
 
 def require_metadata_schema(metadata):

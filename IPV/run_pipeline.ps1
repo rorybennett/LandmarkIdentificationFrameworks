@@ -6,7 +6,7 @@ $MARK_LIST_FILE = "D:\DATA\transverse_points_list.txt"
 $IMAGE_DATA_DIR = "D:\DATA\transverse"
 
 $REPETITION = 1
-$FOLD = 1
+$FOLD = 1  # Use "all" to train on the complete non-test cohort.
 $TASK_NAME = "prostate_transverse"
 $NUM_POINTS = 4
 
