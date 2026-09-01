@@ -9,11 +9,15 @@ from unittest.mock import patch
 
 import cv2
 import numpy as np
+import torch
+from skimage.util import img_as_float32, img_as_ubyte
 
+from IPV.data_creator import PatchCreator
 from IPV.ipv_training_pipeline import DataCreationConfig, IPVTrainingPipeline, RunConfig
 from IPV.train_model import HISTORY_FIELDS, QuadrupletConfig, TrainConfig, TrainModel
-from IPV.utils.landmark_inference_utils import (LandmarkImageRecord, build_prediction_rows, build_result,
-                                                load_model_from_checkpoint)
+from IPV.utils.landmark_inference_utils import (LandmarkImageRecord, LandmarkInferenceConfig, build_prediction_rows,
+                                                build_result, create_sample_tensor, load_model_from_checkpoint,
+                                                run_landmark_inference_for_records)
 
 
 class RuntimeIntegrationTests(unittest.TestCase):
@@ -42,6 +46,9 @@ class RuntimeIntegrationTests(unittest.TestCase):
 
             self.assertEqual(paths[0], root / 'TRAINING_RESULTS' / 'task' / 'run' / 'repetition_1' / 'fold_1')
             self.assertEqual(len(set(paths)), 3)
+
+            all_path = IPVTrainingPipeline(*self.make_configs(root, repetition=1, fold='all')).run_results_path
+            self.assertEqual(all_path, root / 'TRAINING_RESULTS' / 'task' / 'run' / 'repetition_1' / 'fold_all')
 
     def test_validation_rows_expose_common_and_ipv_specific_metrics(self):
         record = LandmarkImageRecord('patient', Path('patient.png'), [(2.0, 3.0)])
@@ -84,7 +91,7 @@ class RuntimeIntegrationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary_dir:
             root = Path(temporary_dir)
             data_dir = root / 'data'
-            output_dir = root / 'results' / 'task' / 'run' / 'repetition_1' / 'fold_1'
+            output_dir = root / 'results' / 'task' / 'run' / 'repetition_1' / 'fold_all'
             patch_dir = data_dir / 'patches'
             image_dir = root / 'images'
             patch_dir.mkdir(parents=True)
@@ -95,6 +102,10 @@ class RuntimeIntegrationTests(unittest.TestCase):
             self.assertTrue(cv2.imwrite(str(source_path), source_image))
             mark_list = root / 'marks.txt'
             mark_list.write_text('patient.png (4, 4)\n', encoding='utf-8')
+            fold_lists = root / 'folds' / 'repetition_1'
+            fold_lists.mkdir(parents=True)
+            (fold_lists / 'training_fall.txt').write_text('patient\n', encoding='utf-8')
+            (fold_lists / 'val_fall.txt').write_text('patient\n', encoding='utf-8')
 
             def write_split(split_name, centres):
                 rows = []
@@ -105,15 +116,16 @@ class RuntimeIntegrationTests(unittest.TestCase):
                         patch_image = np.full((8, 8), 30 * (group_index + scale_index), dtype=np.uint8)
                         self.assertTrue(cv2.imwrite(str(patch_path), patch_image))
                         rows.append([patch_id, patch_path.as_posix(), 'patient', x, y, 0, 0])
-                with open(data_dir / f'{split_name}_f1.csv', 'w', newline='', encoding='utf-8') as split_file:
+                with open(data_dir / f'{split_name}_fall.csv', 'w', newline='', encoding='utf-8') as split_file:
                     csv.writer(split_file).writerows(rows)
 
             write_split('Train', [(2, 2), (5, 5)])
             write_split('Val', [(3, 3)])
             metadata_headers = ['TASK_NAME', 'NUM_OF_POINTS', 'SUB_PATCH_SCALES', 'PATCH_SIZE',
                                 'PATCHES_PER_TRAINING_SAMPLE', 'GRID_DATA_STEP', 'SAMPLING_VARIANCES',
-                                'RANDOM_SEED', 'MARK_LIST_FILE', 'IMAGE_DATA_DIR']
-            metadata_values = ['task', 1, '[8, 10, 12, 14]', 8, 2, 4, '(1,)', 42, mark_list, image_dir]
+                                'RANDOM_SEED', 'MARK_LIST_FILE', 'IMAGE_DATA_DIR', 'FOLD_LISTS_PATH']
+            metadata_values = ['task', 1, '[8, 10, 12, 14]', 8, 2, 4, '(1,)', 42, mark_list, image_dir,
+                               fold_lists.parent]
             with open(data_dir / 'data_info.csv', 'w', newline='', encoding='utf-8') as metadata_file:
                 writer = csv.writer(metadata_file)
                 writer.writerow(metadata_headers)
@@ -121,7 +133,7 @@ class RuntimeIntegrationTests(unittest.TestCase):
 
             trainer = TrainModel(
                 repetition=1,
-                current_fold=1,
+                current_fold='all',
                 num_of_points=1,
                 data_save_path=data_dir,
                 output_save_path=output_dir,
@@ -148,13 +160,72 @@ class RuntimeIntegrationTests(unittest.TestCase):
             self.assertTrue(np.isfinite(float(log_rows[0]['validation_error_px'])))
 
             summary = json.loads((output_dir / 'validation_checkpoint_summary.json').read_text(encoding='utf-8'))
-            self.assertEqual((summary['repetition'], summary['fold']), (1, 1))
+            self.assertEqual((summary['repetition'], summary['fold']), (1, 'all'))
             self.assertEqual(summary['training_status'], 'completed')
             self.assertEqual(summary['termination_reason'], 'max_epochs_reached')
 
             loaded_checkpoint = load_model_from_checkpoint(returned_checkpoint, device='cpu')
             self.assertEqual(loaded_checkpoint.metadata['num_points'], 1)
             self.assertEqual(loaded_checkpoint.metadata['checkpoint_type'], 'best_validation_loss')
+            self.assertEqual(loaded_checkpoint.metadata['network_name'], 'small_cnn')
+            self.assertEqual((loaded_checkpoint.metadata['repetition'], loaded_checkpoint.metadata['fold']), (1, 'all'))
+
+            resumed_trainer = TrainModel(
+                repetition=1, current_fold='all', num_of_points=1, data_save_path=data_dir,
+                output_save_path=output_dir, tasks_classes=[[(0, 2)], [(0, 360)]],
+                train_config=TrainConfig(batch_size=2, learning_rate=1e-3, max_training_epochs=1,
+                                         num_workers=0, lr_schedule='none', save_validation_results=False),
+                quadruplet_config=QuadrupletConfig(network_name='small_cnn', branch_features=2,
+                                                   frozen_stages=0, small_input_stem=False),
+                device='cpu', fold_collection_sha256='test-digest', resume_training=True)
+            resumed_trainer.train()
+            self.assertTrue(resumed_trainer.resume_state_validated)
+            self.assertEqual(len(resumed_trainer.get_timing_summary()['sessions']), 2)
+
+    def test_inference_patch_preprocessing_matches_training_png_path(self):
+        image = np.linspace(0.0, 1.0, 15 * 13, dtype=np.float32).reshape(15, 13, 1)
+        scales = [4, 6, 8, 10]
+        x, y = 1, 12
+        training_patches = PatchCreator(image=image, sub_patch_scales=scales).create(x=x, y=y)
+        expected = np.stack([
+            np.moveaxis(img_as_float32(img_as_ubyte(patch)), -1, 0)
+            for patch in training_patches
+        ])
+        actual = create_sample_tensor(image=image, x=x, y=y, sub_patch_scales=scales,
+                                      patch_size=scales[0], input_channels=1)
+        np.testing.assert_array_equal(actual, expected)
+
+    def test_standalone_inference_writes_comparison_outputs(self):
+        class ConstantModel(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.anchor = torch.nn.Parameter(torch.zeros(1))
+
+            def forward(self, batch):
+                logits = torch.zeros((batch.shape[0], 1), device=batch.device) + self.anchor
+                return [logits, logits]
+
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            image_path = root / 'patient.png'
+            self.assertTrue(cv2.imwrite(str(image_path), np.full((8, 8), 127, dtype=np.uint8)))
+            config = LandmarkInferenceConfig(
+                output_dir=root / 'outputs', num_points=1, sub_patch_scales=[4, 6, 8, 10],
+                distance_intervals=[[0, 20]], angle_intervals=[[0, 360]], grid_spacing=4,
+                input_channels=1, repetition=2, fold='all', network_name='small_cnn', batch_size=2,
+                smoothing_sigma=0, checkpoint_type='best_validation_loss',
+                checkpoint_metadata={'schema': 'ipv_checkpoint_metadata'})
+            records = [LandmarkImageRecord('patient', image_path)]
+            run_landmark_inference_for_records(ConstantModel(), config, records, device='cpu')
+
+            for relative_path in ('inference_summary.xlsx', 'inference_image_summary.csv',
+                                  'inference_endpoints.csv', 'inference_predictions.csv',
+                                  'inference_logs/inference_run_metadata.json'):
+                self.assertTrue((config.output_dir / relative_path).is_file(), relative_path)
+            metadata = json.loads((config.output_dir / 'inference_logs' / 'inference_run_metadata.json').read_text(encoding='utf-8'))
+            self.assertEqual(metadata['schema'], 'ipv_inference_run_metadata')
+            self.assertEqual(metadata['config']['fold'], 'all')
+            self.assertEqual(metadata['checkpoint_metadata']['schema'], 'ipv_checkpoint_metadata')
 
 
 if __name__ == '__main__':

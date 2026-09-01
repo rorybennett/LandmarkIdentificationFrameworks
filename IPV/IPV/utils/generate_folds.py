@@ -9,7 +9,7 @@ from pathlib import Path
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill
 
-from .fold_utils import natural_key
+from .fold_utils import ALL_FOLD_NAME, natural_key
 
 
 NUM_REPETITIONS = 3
@@ -18,8 +18,8 @@ BASE_SEED = 42
 TEST_SAMPLE_IDS = ['A303', 'A275', 'A270', 'A268', 'A259', 'A258', 'A257', 'A246', 'A243', 'A237',
                    'A235', 'A296', 'A230', 'A225', 'A222', 'A221', 'A217', 'A215', 'A242', 'A207']
 
-MARK_LIST_PATH = Path(r'C:\Storage\Datasets\IPV\OriginalData\doctors_resampled_transverseMarkList.txt')
-OUTPUT_DIR = Path(r'C:\Storage\Datasets\IPV\OriginalData\folds_network_study')
+MARK_LIST_PATH = Path(r'C:\Storage\Datasets\LandmarkIdentification\OriginalIPVData\doctors_resampled_transverseMarkList.txt')
+OUTPUT_DIR = Path(r'C:\Storage\Datasets\LandmarkIdentification\OriginalIPVData\folds_network_study')
 
 CLEAN_OUTPUT_DIR = False
 SORT_OUTPUT_FILES = True
@@ -30,6 +30,8 @@ SUMMARY_FILE_NAME = 'repeated_kfold_summary.csv'
 MEMBERSHIP_FILE_NAME = 'repeated_kfold_membership.csv'
 TEST_CASES_WORKBOOK_NAME = 'test_cases.xlsx'
 TEST_CASES_SHEET_NAME = 'test_cases'
+ALL_FOLD_TRAINING_FILE_NAME = 'training_fall.txt'
+ALL_FOLD_VALIDATION_FILE_NAME = 'val_fall.txt'
 REPETITION_DIR_PATTERN = re.compile(r'^repetition_(\d+)$')
 LEGACY_FOLD_FILE_PATTERN = re.compile(r'^[A-Za-z]+_f\d+\.txt$')
 LEGACY_SUMMARY_FILE_NAMES = ('fold_summary.csv', 'fold_membership.csv')
@@ -199,11 +201,14 @@ def sorted_for_output(sample_ids):
     return sorted(sample_ids, key=natural_key) if SORT_OUTPUT_FILES else sample_ids
 
 
-def write_repetition_files(output_dir, repetitions):
-    """Write training_fN.txt and val_fN.txt beneath each repetition directory."""
+def write_repetition_files(output_dir, repetitions, all_sample_ids):
+    """Write numbered folds and the all-data pair beneath each repetition directory."""
     for repetition_data in repetitions:
         repetition_dir = Path(output_dir) / f'repetition_{repetition_data["repetition"]}'
         repetition_dir.mkdir(exist_ok=False, parents=True)
+        all_values = '\n'.join(sorted_for_output(all_sample_ids))
+        (repetition_dir / ALL_FOLD_TRAINING_FILE_NAME).write_text(f'{all_values}\n', encoding='utf-8')
+        (repetition_dir / ALL_FOLD_VALIDATION_FILE_NAME).write_text(f'{all_values}\n', encoding='utf-8')
 
         for fold_data in repetition_data['folds']:
             for split_name, prefix in (('training', 'training'), ('validation', 'val')):
@@ -241,6 +246,8 @@ def write_summary_csv(output_dir, repetitions, source_count, cross_validation_co
         writer.writerow(['repetition', 'repetition_seed', 'fold', 'source_count', 'held_out_test_count', 'cross_validation_count',
                          'training_count', 'validation_count', 'training_fraction', 'validation_fraction'])
         for repetition_data in repetitions:
+            writer.writerow([repetition_data['repetition'], repetition_data['seed'], ALL_FOLD_NAME, source_count, test_count,
+                             cross_validation_count, cross_validation_count, cross_validation_count, 1.0, 1.0])
             for fold_data in repetition_data['folds']:
                 training_count = len(fold_data['training'])
                 validation_count = len(fold_data['validation'])
@@ -249,12 +256,15 @@ def write_summary_csv(output_dir, repetitions, source_count, cross_validation_co
                                  round(training_count / cross_validation_count, 4), round(validation_count / cross_validation_count, 4)])
 
 
-def write_membership_csv(output_dir, repetitions):
+def write_membership_csv(output_dir, repetitions, all_sample_ids):
     """Write every repeated k-fold assignment in long format."""
     with open(Path(output_dir) / MEMBERSHIP_FILE_NAME, 'w', newline='', encoding='utf-8') as output:
         writer = csv.writer(output)
         writer.writerow(['repetition', 'repetition_seed', 'fold', 'split', 'sample_id'])
         for repetition_data in repetitions:
+            for split_name in ('training', 'validation'):
+                for sample_id in sorted_for_output(all_sample_ids):
+                    writer.writerow([repetition_data['repetition'], repetition_data['seed'], ALL_FOLD_NAME, split_name, sample_id])
             for fold_data in repetition_data['folds']:
                 for split_name in ('training', 'validation'):
                     for sample_id in sorted_for_output(fold_data[split_name]):
@@ -269,6 +279,7 @@ def print_summary(output_dir, repetitions, source_count, cross_validation_count,
     print(f'Base seed: {base_seed}; repetitions: {len(repetitions)}; folds: {len(repetitions[0]["folds"])}')
     for repetition_data in repetitions:
         print(f'Repetition {repetition_data["repetition"]} (seed={repetition_data["seed"]})')
+        print(f'  Fold all: training={cross_validation_count}; validation={cross_validation_count}')
         for fold_data in repetition_data['folds']:
             print(f'  Fold {fold_data["fold"]}: training={len(fold_data["training"])}; validation={len(fold_data["validation"])}')
     print('======================================================================================')
@@ -284,14 +295,14 @@ def create_repeated_kfold_lists(mark_list_path, output_dir, num_repetitions, num
     repetitions = create_repetitions(cross_validation_ids, num_repetitions, num_folds, base_seed)
 
     prepare_output_dir(output_dir, CLEAN_OUTPUT_DIR)
-    write_repetition_files(output_dir, repetitions)
+    write_repetition_files(output_dir, repetitions, cross_validation_ids)
 
     if test_sample_ids:
         write_test_cases_workbook(output_dir, test_sample_ids)
     if WRITE_SUMMARY_CSV:
         write_summary_csv(output_dir, repetitions, len(all_sample_ids), len(cross_validation_ids), len(test_sample_ids))
     if WRITE_MEMBERSHIP_CSV:
-        write_membership_csv(output_dir, repetitions)
+        write_membership_csv(output_dir, repetitions, cross_validation_ids)
 
     print_summary(output_dir, repetitions, len(all_sample_ids), len(cross_validation_ids), len(test_sample_ids), base_seed)
     return repetitions

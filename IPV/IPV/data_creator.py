@@ -14,7 +14,8 @@ from skimage.util import img_as_float32, img_as_ubyte
 
 from .utils.patch_utils import create_patch, get_angle, get_label
 from .utils.progress_bar import ProgressBar
-from .utils.fold_utils import discover_fold_numbers as discover_repetition_folds, get_split_file_path
+from .utils.fold_utils import (ALL_FOLD_NAME, discover_fold_numbers as discover_repetition_folds,
+                               get_split_file_path, is_all_fold, normalise_fold)
 
 FOLD_PHASES = ('Train', 'Val')
 FOLD_LIST_FILE_PREFIXES = {
@@ -287,7 +288,7 @@ def create_patch_job(job):
 
 
 class DataCreator:
-    """Create train, validation, and test patch data for one landmark task."""
+    """Create training and validation patch data for one landmark task."""
 
     def __init__(self,
                  distance_intervals,
@@ -333,7 +334,7 @@ class DataCreator:
 
         self.current_fold = None
         self.input_channels = None
-        self.fold_list = []
+        self.fold_list = {}
         self.points_dict = {}
         self.paths_dict = {}
 
@@ -436,9 +437,9 @@ class DataCreator:
 
     def validate_inputs(self, current_fold):
         """Validate split membership, annotations, images, bounds, and channels without writing outputs."""
-        self.current_fold = int(current_fold)
+        self.current_fold = normalise_fold(current_fold)
 
-        if self.current_fold not in self.fold_numbers:
+        if not is_all_fold(self.current_fold) and self.current_fold not in self.fold_numbers:
             raise ValueError(f'Fold {self.current_fold} is not available in repetition {self.repetition}: {self.fold_numbers}')
 
         if not self.fold_list:
@@ -460,9 +461,14 @@ class DataCreator:
 
     def read_fold_lists(self):
         """Read training and validation sample names for all folds in this repetition."""
-        self.fold_list = []
+        self.fold_list = {}
 
-        for fold_index in self.fold_numbers:
+        requested_folds = list(self.fold_numbers)
+
+        if is_all_fold(self.current_fold):
+            requested_folds.append(ALL_FOLD_NAME)
+
+        for fold_index in requested_folds:
             phase_lists = {}
 
             for phase, split_name in (('Train', 'training'), ('Val', 'validation')):
@@ -470,9 +476,9 @@ class DataCreator:
                                                                             split_name, fold_index))
 
             self.validate_fold_split(fold_index=fold_index, phase_lists=phase_lists)
-            self.fold_list.append(phase_lists)
+            self.fold_list[fold_index] = phase_lists
 
-        print(f'\tAll {self.folds} folds read...', flush=True)
+        print(f'\tFold lists read for repetition {self.repetition}: {requested_folds}', flush=True)
 
     def read_points(self, phase):
         """Read image paths and landmark coordinates for the current fold and phase."""
@@ -635,7 +641,8 @@ class DataCreator:
         sample_names = sorted(self.points_dict.keys(), key=natural_key)
 
         for sample_index, sample_name in enumerate(sample_names, start=1):
-            seed = (self.random_seed + self.repetition * 10000000 + self.current_fold * 100000 + sample_index
+            fold_seed_component = 0 if is_all_fold(self.current_fold) else self.current_fold
+            seed = (self.random_seed + self.repetition * 10000000 + fold_seed_component * 100000 + sample_index
                     if self.random_seed is not None else None)
 
             jobs.append(PatchJob(
@@ -706,7 +713,7 @@ class DataCreator:
         if phase not in FOLD_PHASES:
             raise ValueError(f'Unknown phase: {phase}')
 
-        return self.fold_list[self.current_fold - 1][phase]
+        return self.fold_list[self.current_fold][phase]
 
     def read_mark_list(self):
         """Read landmark markings from the mark list file."""
@@ -742,16 +749,29 @@ class DataCreator:
 
     @staticmethod
     def validate_fold_split(fold_index, phase_lists):
-        """Check that training and validation splits do not overlap."""
-        seen = {}
-        overlaps = []
-
+        """Validate a numbered split or the identical full-data training/validation split."""
         for phase, names in phase_lists.items():
             duplicates = sorted({name for name in names if names.count(name) > 1})
 
             if duplicates:
                 raise ValueError(f'Fold {fold_index} {phase} list contains duplicate samples: {duplicates}')
 
+        if is_all_fold(fold_index):
+            training_names = phase_lists.get('Train', [])
+            validation_names = phase_lists.get('Val', [])
+
+            if training_names != validation_names:
+                raise ValueError(f'Fold {ALL_FOLD_NAME} requires identical training and validation lists.')
+
+            if not training_names:
+                raise ValueError(f'Fold {ALL_FOLD_NAME} cannot be empty.')
+
+            return
+
+        seen = {}
+        overlaps = []
+
+        for phase, names in phase_lists.items():
             for name in names:
                 if name in seen:
                     overlaps.append((name, seen[name], phase))

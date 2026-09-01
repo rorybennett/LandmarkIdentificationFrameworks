@@ -38,8 +38,8 @@ class RepeatedKFoldTests(unittest.TestCase):
 
             for repetition in range(1, 4):
                 validation_occurrences = []
+                repetition_dir = output / f'repetition_{repetition}'
                 for fold in range(1, 5):
-                    repetition_dir = output / f'repetition_{repetition}'
                     training = self.read_ids(repetition_dir / f'training_f{fold}.txt')
                     validation = self.read_ids(repetition_dir / f'val_f{fold}.txt')
                     self.assertFalse(training & validation)
@@ -47,6 +47,8 @@ class RepeatedKFoldTests(unittest.TestCase):
                     validation_occurrences.extend(validation)
                 self.assertEqual(len(validation_occurrences), len(expected))
                 self.assertEqual(set(validation_occurrences), expected)
+                self.assertEqual(self.read_ids(repetition_dir / 'training_fall.txt'), expected)
+                self.assertEqual(self.read_ids(repetition_dir / 'val_fall.txt'), expected)
 
             workbook = load_workbook(output / TEST_CASES_WORKBOOK_NAME, read_only=True)
             self.assertEqual([row[0] for row in list(workbook.active.iter_rows(values_only=True))[1:]], ['A2', 'A12'])
@@ -66,7 +68,7 @@ class RepeatedKFoldTests(unittest.TestCase):
             self.assertEqual(first_digest, second_digest)
 
             with open(outputs[0] / SUMMARY_FILE_NAME, newline='', encoding='utf-8') as summary_file:
-                self.assertEqual(len(list(csv.DictReader(summary_file))), 6)
+                self.assertEqual(len(list(csv.DictReader(summary_file))), 8)
             with open(outputs[0] / MEMBERSHIP_FILE_NAME, newline='', encoding='utf-8') as membership_file:
                 rows = list(csv.DictReader(membership_file))
             self.assertEqual({row['split'] for row in rows}, {'training', 'validation'})

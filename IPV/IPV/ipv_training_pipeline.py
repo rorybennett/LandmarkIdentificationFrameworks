@@ -15,7 +15,8 @@ from . import parameters as pms
 from .data_creator import DataCreator
 from .model_registry import get_available_model_names
 from .train_model import TrainModel, TrainConfig, QuadrupletConfig
-from .utils.fold_utils import calculate_fold_collection_sha256, validate_repeated_kfold_lists
+from .utils.fold_utils import (ALL_FOLD_NAME, calculate_fold_collection_sha256, get_split_file_path,
+                               is_all_fold, normalise_fold, validate_repeated_kfold_lists)
 
 MIN_POINTS_PER_IMAGE = 1
 MAX_POINTS_PER_IMAGE = 30
@@ -58,7 +59,7 @@ class DataCreationConfig:
 @dataclass
 class RunConfig:
     repetition: int
-    fold: int
+    fold: int | str
     task_name: str
     num_of_points: int
     create_data: bool
@@ -254,7 +255,7 @@ class IPVTrainingPipeline:
             trainer.train(on_dataset_validated=self.prepare_validated_training_outputs,
                           on_training_state_ready=lambda: self.write_run_info(write_to_data_dir=False))
         except BaseException:
-            if self.validated_outputs_prepared or self.run_config.resume_training:
+            if self.validated_outputs_prepared or trainer.resume_state_validated:
                 self.write_run_info(write_to_data_dir=False)
             raise
 
@@ -532,6 +533,7 @@ class IPVTrainingPipeline:
                 'RANDOM_SEED',
                 'MARK_LIST_FILE',
                 'IMAGE_DATA_DIR',
+                'FOLD_LISTS_PATH',
                 'FOLD_COLLECTION_SHA256'
             ])
             writer.writerow([
@@ -550,6 +552,7 @@ class IPVTrainingPipeline:
                 self.data_config.random_seed,
                 self.data_config.mark_list_file,
                 self.data_config.image_data_dir,
+                self.data_config.fold_lists_path,
                 self.run_config.fold_collection_sha256,
             ])
 
@@ -557,11 +560,20 @@ class IPVTrainingPipeline:
         """Write full run, data, training, and model metadata."""
         run_info_path_name = 'run_info.json'
         save_copy_path = self.get_save_copy_path()
+        existing_run_info_path = self.run_results_path / run_info_path_name
+        created_at = dt.datetime.now(dt.timezone.utc).isoformat()
+
+        if existing_run_info_path.is_file():
+            try:
+                created_at = json.loads(existing_run_info_path.read_text(encoding='utf-8')).get('created_at', created_at)
+            except (OSError, ValueError, TypeError):
+                pass
 
         run_info = {
             'schema': 'ipv_training_run_info',
-            'schema_version': 2,
-            'created_at': dt.datetime.now(dt.timezone.utc).isoformat(),
+            'schema_version': 4,
+            'created_at': created_at,
+            'updated_at': dt.datetime.now(dt.timezone.utc).isoformat(),
             'repetition': self.repetition,
             'fold': self.fold,
             'task_name': self.task_name,
@@ -575,6 +587,7 @@ class IPVTrainingPipeline:
             'save_copy_path': save_copy_path,
             'mark_list_file': self.data_config.mark_list_file,
             'image_data_dir': self.data_config.image_data_dir,
+            'fold_lists_path': self.data_config.fold_lists_path,
             'run_config': asdict(self.run_config),
             'data_config': asdict(self.data_config),
             'train_config': asdict(self.train_config),
@@ -748,13 +761,21 @@ def normalise_save_dir(args):
         raise ValueError('--save-dir must be supplied when COPY_FILES is true.')
 
 
+def parse_fold(value):
+    """Parse a numbered fold or the special all-data fold from the command line."""
+    try:
+        return normalise_fold(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(str(error)) from error
+
+
 def parse_args():
     """Parse terminal arguments."""
     parser = argparse.ArgumentParser(description='Create repeated-k-fold training/validation data, train an IPV model, copy outputs, and delete generated data.',
                                      formatter_class=argparse.ArgumentDefaultsHelpFormatter)
 
     parser.add_argument('repetition', type=int, metavar='REPETITION', help='Repeated k-fold repetition number to run.')
-    parser.add_argument('fold', type=int, metavar='FOLD', help='Fold number within the selected repetition.')
+    parser.add_argument('fold', type=parse_fold, metavar='FOLD', help='Fold number within the selected repetition, or "all".')
     parser.add_argument('task_name', type=validate_task_name, metavar='TASK_NAME',
                         help='Task name used in output paths and metadata, for example transverse or sagittal for prostate imaging.')
     parser.add_argument('create_data', type=str_to_bool, metavar='CREATE_DATA',
@@ -772,7 +793,7 @@ def parse_args():
     parser.add_argument('--num-points', type=validate_num_points, required=True,
                         help=f'Number of ordered landmark points per image. Must be between {MIN_POINTS_PER_IMAGE} and {MAX_POINTS_PER_IMAGE}.')
     parser.add_argument('--fold-lists-path', type=Path, required=True,
-                        help='Root containing repetition_N directories with training_fN.txt and val_fN.txt files.')
+                        help='Root containing repetition_N directories with numbered split files and optional training_fall.txt/val_fall.txt files.')
     parser.add_argument('--mark-list-file', type=Path, required=True, help='Text file containing image filenames followed by landmark coordinate pairs.')
     parser.add_argument('--image-data-dir', type=Path, required=True, help='Directory containing the source image files referenced by the mark-list file.')
     parser.add_argument('--data-creation-workers', type=int, required=True, help='Number of worker processes used during patch/data creation.')
@@ -899,7 +920,7 @@ def validate_args(args, num_of_repetitions, num_of_folds):
     if args.repetition < 1 or args.repetition > num_of_repetitions:
         raise ValueError(f'repetition must be between 1 and {num_of_repetitions}. Got repetition={args.repetition}.')
 
-    if args.fold < 1 or args.fold > num_of_folds:
+    if not is_all_fold(args.fold) and (args.fold < 1 or args.fold > num_of_folds):
         raise ValueError(f'fold must be between 1 and {num_of_folds}. Got fold={args.fold}.')
 
     if args.run_dir.exists() and not args.run_dir.is_dir():
@@ -1097,6 +1118,12 @@ def build_configs(args):
     num_of_repetitions = len(repetition_numbers)
     num_of_folds = len(fold_numbers)
     fold_collection_sha256 = calculate_fold_collection_sha256(args.fold_lists_path, repetition_numbers, fold_numbers)
+
+    if is_all_fold(args.fold):
+        for split_name in ('training', 'validation'):
+            split_path = get_split_file_path(args.fold_lists_path, args.repetition, split_name, ALL_FOLD_NAME)
+            if not split_path.is_file():
+                raise ValueError(f'Fold all was requested, but its {split_name} list does not exist: {split_path}')
 
     validate_args(args, num_of_repetitions, num_of_folds)
     run_name = (clean_run_name(args.run_name) if args.run_name is not None else

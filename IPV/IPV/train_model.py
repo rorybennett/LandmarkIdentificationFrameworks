@@ -8,6 +8,7 @@ import os
 import random
 import shutil
 import time
+import uuid
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -27,12 +28,14 @@ from .custom_dataset import CustomDataset, ToTensor
 from .runtime_metadata import collect_runtime_metadata, utc_now_iso
 from .utils.landmark_inference_utils import (LandmarkInferenceConfig, accumulate_votes, detect_points, load_input_image,
                                              read_mark_list, run_validation_inference_for_trained_model)
+from .utils.fold_utils import get_split_file_path, normalise_fold
 
 MIN_POINTS_PER_IMAGE = 1
 MAX_POINTS_PER_IMAGE = 30
 CSV_METADATA_COLUMNS = 5
-CHECKPOINT_FORMAT_VERSION = 2
-CHECKPOINT_SCHEMA_VERSION = 2
+CHECKPOINT_FORMAT_VERSION = 3
+CHECKPOINT_SCHEMA_VERSION = 3
+CHECKPOINT_SCHEMA_NAME = 'ipv_checkpoint_metadata'
 HISTORY_FIELDS = (
     'epoch', 'epoch_started_at', 'epoch_completed_at', 'lr', 'training_loss', 'training_accuracy',
     'validation_loss', 'validation_accuracy', 'validation_error_px', 'training_duration_seconds',
@@ -85,7 +88,7 @@ class TrainModel:
     def __init__(self, repetition, current_fold, num_of_points, data_save_path, tasks_classes, train_config, quadruplet_config,
                  output_save_path=None, device=None, fold_collection_sha256=None, resume_training=False):
         self.repetition = int(repetition)
-        self.fold = int(current_fold)
+        self.fold = normalise_fold(current_fold)
         self.num_of_points = int(num_of_points)
         self.train_path = Path(data_save_path)
         self.output_path = Path(output_save_path) if output_save_path is not None else self.train_path
@@ -112,6 +115,10 @@ class TrainModel:
         self.dataset_validation_duration_seconds = 0.0
         self.model_setup_duration_seconds = 0.0
         self.validation_export_duration_seconds = 0.0
+        self.resume_state_validated = False
+        self.training_sessions = []
+        self.current_session_index = None
+        self.current_session_start_perf = None
         self.training_generator = None
         self.validation_generator = None
         self.history = self.empty_history()
@@ -142,7 +149,7 @@ class TrainModel:
             optimiser = self.build_optimiser(model)
             scheduler = self.build_scheduler(optimiser)
             scaler = torch.amp.GradScaler('cuda', enabled=self.train_config.use_amp and self.device.type == 'cuda')
-            resume_signature = self.build_resume_signature()
+            resume_signature = self.build_resume_signature(train_loader, val_loader)
             history = self.empty_history()
             best_epoch = None
             best_metrics = None
@@ -160,9 +167,9 @@ class TrainModel:
                 state = self.load_training_checkpoint(model, optimiser, scheduler, scaler, resume_signature)
                 history = state['history']
                 best_epoch = state['best_epoch']
-                best_metrics = state['best_metrics']
+                best_metrics = state['best_validation_metrics']
                 last_epoch = state['completed_epoch']
-                last_metrics = state['last_metrics']
+                last_metrics = state['last_validation_metrics']
                 best_model_state_dict = state['best_model_state_dict']
                 early_stop_best_validation_loss = state['early_stop_best_validation_loss']
                 bad_epochs = state['bad_epochs']
@@ -171,6 +178,8 @@ class TrainModel:
                 best_checkpoint_path = self.get_checkpoint_path('best_validation_loss')
                 last_checkpoint_path = self.get_checkpoint_path('last_epoch')
                 self.ensure_best_checkpoint(best_checkpoint_path, best_epoch, best_metrics, best_model_state_dict)
+
+            self.begin_training_session(resumed=self.resume_training, resumed_from_epoch=last_epoch)
 
             self.model_setup_duration_seconds = time.perf_counter() - setup_start
             self.training_status = 'running'
@@ -235,6 +244,7 @@ class TrainModel:
                 self.update_history(history, epoch, epoch_started_at, epoch_completed_at, epoch_lr, training_metrics,
                                     validation_metrics, training_duration, validation_duration, epoch_duration)
                 self.history = history
+                self.update_current_training_session(status=epoch_reason, completed_epoch=last_epoch)
                 training_state = self.build_training_state(last_epoch, history, best_epoch, best_metrics,
                                                            early_stop_best_validation_loss, bad_epochs, last_metrics, epoch_reason)
 
@@ -284,16 +294,17 @@ class TrainModel:
         """Run full-image inference on validation images and save overlays and Excel metrics."""
         checkpoint_path = best_checkpoint_path or last_checkpoint_path
         checkpoint_type = 'best_validation_loss' if best_checkpoint_path is not None else 'last_epoch'
+        loaded_checkpoint = None
 
         if checkpoint_path is not None:
-            self.load_checkpoint_state(model=model, checkpoint_path=checkpoint_path)
+            loaded_checkpoint = self.load_checkpoint_state(model=model, checkpoint_path=checkpoint_path)
 
         data_metadata = self.read_data_creation_metadata()
         validation_output_path = self.get_validation_staging_path()
         self.prepare_validation_staging_path()
         config = LandmarkInferenceConfig(
             repetition=int(self.repetition),
-            fold=int(self.fold),
+            fold=self.fold,
             task_name=str(data_metadata.get('task_name') or ''),
             data_save_path=self.train_path,
             output_dir=validation_output_path,
@@ -310,7 +321,9 @@ class TrainModel:
             use_probability_weights=bool(self.train_config.validation_use_probability_weights),
             save_raw_vote_maps=bool(self.train_config.validation_save_raw_vote_maps),
             checkpoint_path=checkpoint_path,
-            checkpoint_type=checkpoint_type
+            checkpoint_type=checkpoint_type,
+            network_name=self.quadruplet_config.network_name,
+            checkpoint_metadata=None if loaded_checkpoint is None else loaded_checkpoint.get('metadata')
         )
 
         print(f'	Running validation image inference with {checkpoint_type} checkpoint...', flush=True)
@@ -334,6 +347,7 @@ class TrainModel:
 
         model.load_state_dict(state_dict)
         model.eval()
+        return checkpoint
 
     def validate_training_inputs(self):
         """Validate generated fold data before model construction."""
@@ -689,20 +703,36 @@ class TrainModel:
         """Atomically save an inference checkpoint and complete continuation state when applicable."""
         checkpoint_path = self.get_checkpoint_path(checkpoint_type)
         created_at = utc_now_iso()
+        labelled_metrics = self.label_validation_metrics(validation_metrics)
         checkpoint = {
-            'format_version': CHECKPOINT_FORMAT_VERSION, 'created_at': created_at,
-            'checkpoint_type': checkpoint_type, 'epoch': int(epoch), 'resume_capable': checkpoint_type == 'last_epoch',
-            'state_dict': model.state_dict(), 'optimiser_state_dict': optimiser.state_dict(),
-            'scheduler_state_dict': None if scheduler is None else scheduler.state_dict(),
-            'grad_scaler_state_dict': scaler.state_dict(), 'validation_metrics': dict(validation_metrics),
+            'format_version': CHECKPOINT_FORMAT_VERSION,
+            'schema': 'ipv_training_checkpoint',
+            'schema_version': CHECKPOINT_SCHEMA_VERSION,
+            'created_at': created_at,
+            'checkpoint_type': checkpoint_type,
+            'epoch': int(epoch),
+            'next_epoch': int(epoch) + 1,
+            'resume_capable': checkpoint_type == 'last_epoch',
+            'state_dict': model.state_dict(),
+            'optimiser_state_dict': optimiser.state_dict(),
+            'validation_metrics': labelled_metrics,
             'metadata': self.build_checkpoint_metadata(checkpoint_type=checkpoint_type, epoch=epoch,
                                                        metrics=validation_metrics, created_at=created_at),
         }
 
         if checkpoint_type == 'last_epoch':
-            checkpoint.update({'training_state': training_state, 'rng_state': self.capture_rng_state(),
-                               'data_loader_generator_states': self.capture_data_loader_generator_states(),
-                               'best_model_state_dict': best_model_state_dict, 'resume_signature': resume_signature})
+            if training_state is None or best_model_state_dict is None:
+                raise ValueError('A last-epoch checkpoint requires complete training state and the best-model snapshot.')
+
+            checkpoint.update({
+                'scheduler_state_dict': None if scheduler is None else scheduler.state_dict(),
+                'grad_scaler_state_dict': scaler.state_dict(),
+                'training_state': training_state,
+                'rng_state': self.capture_rng_state(),
+                'data_loader_generator_states': self.capture_data_loader_generator_states(),
+                'best_model_state_dict': best_model_state_dict,
+                'resume_signature': resume_signature,
+            })
 
         self.atomic_torch_save(checkpoint, checkpoint_path)
         return checkpoint_path
@@ -736,13 +766,14 @@ class TrainModel:
         data_metadata = self.read_data_creation_metadata()
 
         return {
-            'schema': 'ipv_checkpoint_metadata',
+            'schema': CHECKPOINT_SCHEMA_NAME,
             'schema_version': CHECKPOINT_SCHEMA_VERSION,
             'created_at': created_at or utc_now_iso(),
             'checkpoint': {
+                'format_version': CHECKPOINT_FORMAT_VERSION,
                 'type': checkpoint_type,
                 'epoch': epoch,
-                'metrics': metrics or {}
+                'validation_metrics': self.label_validation_metrics(metrics)
             },
             'task': self.build_task_metadata(data_metadata),
             'model': self.build_model_metadata(),
@@ -795,10 +826,11 @@ class TrainModel:
         """Build compact data-source metadata."""
         return {
             'repetition': int(self.repetition),
-            'fold': int(self.fold),
+            'fold': self.fold,
             'fold_collection_sha256': self.fold_collection_sha256,
             'data_save_path': str(self.train_path),
             'output_save_path': str(self.output_path),
+            'fold_lists_path': self.path_metadata_to_string(data_metadata.get('fold_lists_path')),
             'mark_list_file': self.path_metadata_to_string(data_metadata.get('mark_list_file')),
             'image_data_dir': self.path_metadata_to_string(data_metadata.get('image_data_dir')),
             'patches_per_training_sample': self.optional_int(data_metadata.get('patches_per_training_sample')),
@@ -895,7 +927,8 @@ class TrainModel:
             'sampling_variances': self.parse_metadata_value(raw_metadata.get('SAMPLING_VARIANCES')),
             'random_seed': int(raw_metadata.get('RANDOM_SEED')),
             'mark_list_file': raw_metadata.get('MARK_LIST_FILE'),
-            'image_data_dir': raw_metadata.get('IMAGE_DATA_DIR')
+            'image_data_dir': raw_metadata.get('IMAGE_DATA_DIR'),
+            'fold_lists_path': raw_metadata.get('FOLD_LISTS_PATH')
         }
 
     def read_run_info_metadata(self):
@@ -925,7 +958,8 @@ class TrainModel:
             'sampling_variances': data_config.get('sampling_variances'),
             'random_seed': data_config.get('random_seed'),
             'mark_list_file': data_config.get('mark_list_file'),
-            'image_data_dir': data_config.get('image_data_dir')
+            'image_data_dir': data_config.get('image_data_dir'),
+            'fold_lists_path': data_config.get('fold_lists_path')
         }
 
     @staticmethod
@@ -956,10 +990,12 @@ class TrainModel:
         metadata = self.build_checkpoint_metadata(checkpoint_type=None, epoch=None, metrics={})
         summary = {
             'format_version': CHECKPOINT_FORMAT_VERSION,
+            'schema': 'ipv_validation_checkpoint_summary',
+            'schema_version': CHECKPOINT_SCHEMA_VERSION,
             'created_at': utc_now_iso(),
             'run_name': self.get_run_name(),
             'repetition': int(self.repetition),
-            'fold': int(self.fold),
+            'fold': self.fold,
             'training_status': self.training_status,
             'termination_reason': self.termination_reason,
             'task': metadata['task'],
@@ -995,44 +1031,75 @@ class TrainModel:
         with open(summary_path, 'w', encoding='utf-8') as summary_file:
             json.dump(summary, summary_file, indent=4, default=str)
 
-    def build_resume_signature(self):
-        """Build a deterministic compatibility signature for exact continuation."""
+    def build_resume_signature(self, training_loader, validation_loader):
+        """Hash every trajectory-defining configuration and selected data input."""
+        data_metadata = self.read_data_creation_metadata()
+        fold_lists_path = Path(self.require_metadata_value(data_metadata, 'fold_lists_path'))
+        training_list = get_split_file_path(fold_lists_path, self.repetition, 'training', self.fold)
+        validation_list = get_split_file_path(fold_lists_path, self.repetition, 'validation', self.fold)
         payload = {
-            'repetition': self.repetition, 'fold': self.fold, 'num_of_points': self.num_of_points,
-            'fold_collection_sha256': self.fold_collection_sha256,
-            'training_csv_sha256': self.sha256_file(self.get_train_csv_path()),
-            'validation_csv_sha256': self.sha256_file(self.get_val_csv_path()),
-            'tasks_classes': self.serialise_tasks_classes(self.tasks_classes),
-            'train_config': asdict(self.train_config), 'quadruplet_config': asdict(self.quadruplet_config),
-            'ipv_source_sha256': self.sha256_python_sources(),
-            'python_version': self.runtime_metadata['python']['version'],
-            'torch_version': self.runtime_metadata['pytorch']['version'],
-            'cuda_build_version': self.runtime_metadata['cuda']['pytorch_cuda_build_version'],
+            'task': {
+                'repetition': self.repetition,
+                'fold': self.fold,
+                'num_of_points': self.num_of_points,
+                'task_name': data_metadata.get('task_name'),
+                'tasks_classes': self.serialise_tasks_classes(self.tasks_classes),
+            },
+            'data': {
+                'fold_collection_sha256': self.fold_collection_sha256,
+                'training_list_path': str(training_list.resolve()),
+                'training_list_sha256': self.sha256_file(training_list),
+                'validation_list_path': str(validation_list.resolve()),
+                'validation_list_sha256': self.sha256_file(validation_list),
+                'mark_list_path': str(Path(self.require_metadata_value(data_metadata, 'mark_list_file')).resolve()),
+                'mark_list_sha256': self.sha256_file(self.require_metadata_value(data_metadata, 'mark_list_file')),
+                'image_data_dir': str(Path(self.require_metadata_value(data_metadata, 'image_data_dir')).resolve()),
+                'training_csv_path': str(self.get_train_csv_path().resolve()),
+                'training_csv_sha256': self.sha256_file(self.get_train_csv_path()),
+                'validation_csv_path': str(self.get_val_csv_path().resolve()),
+                'validation_csv_sha256': self.sha256_file(self.get_val_csv_path()),
+                'training_patches_sha256': self.sha256_dataset_patches(training_loader.dataset),
+                'validation_patches_sha256': self.sha256_dataset_patches(validation_loader.dataset),
+            },
+            'training': self.serialise(asdict(self.train_config)),
+            'model': self.serialise(asdict(self.quadruplet_config)),
+            'implementation': {
+                'ipv_source_sha256': self.sha256_python_sources(),
+                'python_version': self.runtime_metadata['python']['version'],
+                'torch_version': self.runtime_metadata['pytorch']['version'],
+                'dependency_versions': self.runtime_metadata['dependencies'],
+            },
+            'compute': {
+                'device_type': self.device.type,
+                'selected_device': self.runtime_metadata['cuda']['selected_device'],
+                'pytorch_cuda_build_version': self.runtime_metadata['cuda']['pytorch_cuda_build_version'],
+                'nvidia_driver_version': self.runtime_metadata['cuda']['nvidia_driver_version'],
+                'pytorch_runtime': self.runtime_metadata['pytorch'],
+                'cudnn': self.runtime_metadata['cudnn'],
+            },
         }
-        text = json.dumps(payload, sort_keys=True, separators=(',', ':'), default=str)
-        return {'sha256': hashlib.sha256(text.encode('utf-8')).hexdigest(), 'payload': payload}
+        serialised_payload = self.serialise(payload)
+        canonical_json = json.dumps(serialised_payload, sort_keys=True, separators=(',', ':'))
+        return {'algorithm': 'sha256', 'sha256': hashlib.sha256(canonical_json.encode('utf-8')).hexdigest(),
+                'payload': serialised_payload}
 
     def load_training_checkpoint(self, model, optimiser, scheduler, scaler, resume_signature):
-        """Load and validate the last completed epoch checkpoint."""
+        """Validate and restore the last completed epoch checkpoint."""
         checkpoint_path = self.get_checkpoint_path('last_epoch')
-        checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
 
-        required = {'state_dict', 'optimiser_state_dict', 'grad_scaler_state_dict', 'training_state', 'rng_state',
-                    'data_loader_generator_states', 'best_model_state_dict', 'resume_signature'}
-        missing = sorted(required - set(checkpoint))
+        if not checkpoint_path.is_file():
+            raise ValueError(f'Resume requested, but the last-epoch checkpoint does not exist: {checkpoint_path}')
 
-        if checkpoint.get('checkpoint_type') != 'last_epoch' or not checkpoint.get('resume_capable'):
-            raise ValueError(f'Resume requires a resume-capable last-epoch checkpoint: {checkpoint_path}')
-        if missing:
-            raise ValueError(f'Resume checkpoint is missing required fields: {missing}')
-        if checkpoint['resume_signature'].get('sha256') != resume_signature.get('sha256'):
-            raise ValueError('Resume checkpoint is incompatible with the current data, code, runtime, or configuration. '
-                             f'Saved signature={checkpoint["resume_signature"].get("sha256")}; '
-                             f'current signature={resume_signature.get("sha256")}.')
+        try:
+            checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
+        except Exception as error:
+            raise ValueError(f'Resume checkpoint could not be loaded and existing outputs were left untouched: {checkpoint_path}') from error
+
+        self.validate_resume_checkpoint(checkpoint, checkpoint_path, resume_signature)
+        self.remove_stale_checkpoint_temps()
 
         training_state = checkpoint['training_state']
-        self.validate_history(training_state['history'], training_state['completed_epoch'])
-        model.load_state_dict(checkpoint['state_dict'])
+        model.load_state_dict(checkpoint['state_dict'], strict=True)
         optimiser.load_state_dict(checkpoint['optimiser_state_dict'])
 
         saved_scheduler = checkpoint.get('scheduler_state_dict')
@@ -1042,45 +1109,170 @@ class TrainModel:
         if scheduler is not None:
             scheduler.load_state_dict(saved_scheduler)
         scaler.load_state_dict(checkpoint['grad_scaler_state_dict'])
-        self.restore_rng_state(checkpoint['rng_state'])
+        self.training_sessions = copy.deepcopy(training_state['training_sessions'])
         self.restore_data_loader_generator_states(checkpoint['data_loader_generator_states'])
+        self.restore_rng_state(checkpoint['rng_state'])
+        self.resume_state_validated = True
 
         return {
-            'history': training_state['history'], 'best_epoch': training_state['best_epoch'],
-            'best_metrics': training_state['best_metrics'], 'completed_epoch': training_state['completed_epoch'],
-            'last_metrics': training_state['last_metrics'], 'best_model_state_dict': checkpoint['best_model_state_dict'],
-            'early_stop_best_validation_loss': training_state['early_stop_best_validation_loss'],
-            'bad_epochs': training_state['bad_epochs'], 'termination_reason': training_state['termination_reason'],
+            'history': copy.deepcopy(training_state['history']),
+            'best_epoch': int(training_state['best_epoch']),
+            'best_validation_metrics': self.unlabel_validation_metrics(training_state['best_validation_metrics']),
+            'completed_epoch': int(training_state['completed_epoch']),
+            'last_validation_metrics': self.unlabel_validation_metrics(training_state['last_validation_metrics']),
+            'best_model_state_dict': checkpoint['best_model_state_dict'],
+            'early_stop_best_validation_loss': float(training_state['early_stop_best_validation_loss']),
+            'bad_epochs': int(training_state['bad_epochs']),
+            'termination_reason': training_state['termination_reason'],
         }
 
+    def validate_resume_checkpoint(self, checkpoint, checkpoint_path, resume_signature):
+        """Reject incomplete, completed, corrupt, or incompatible continuation state."""
+        if not isinstance(checkpoint, dict):
+            raise ValueError(f'Resume checkpoint is not a structured IPV checkpoint: {checkpoint_path}')
+
+        if checkpoint.get('format_version') != CHECKPOINT_FORMAT_VERSION or checkpoint.get('schema_version') != CHECKPOINT_SCHEMA_VERSION:
+            raise ValueError(
+                f'Resume requires checkpoint format/schema version {CHECKPOINT_FORMAT_VERSION}. '
+                f'Checkpoint {checkpoint_path} has format={checkpoint.get("format_version")}, schema={checkpoint.get("schema_version")}. '
+                'Older checkpoints remain available for inference but cannot continue training exactly.'
+            )
+
+        if checkpoint.get('schema') != 'ipv_training_checkpoint' or checkpoint.get('checkpoint_type') != 'last_epoch':
+            raise ValueError(f'Resume requires model_last_epoch.pth from this IPV run: {checkpoint_path}')
+
+        if not checkpoint.get('resume_capable'):
+            raise ValueError(f'Checkpoint is not marked as resume-capable: {checkpoint_path}')
+
+        required = {'epoch', 'next_epoch', 'validation_metrics', 'state_dict', 'optimiser_state_dict',
+                    'scheduler_state_dict', 'grad_scaler_state_dict', 'training_state', 'rng_state',
+                    'data_loader_generator_states', 'best_model_state_dict', 'resume_signature'}
+        missing = sorted(required - set(checkpoint))
+        if missing:
+            raise ValueError(f'Resume checkpoint is incomplete; missing fields: {missing}. Existing outputs were left untouched.')
+
+        saved_signature = checkpoint['resume_signature']
+        if not isinstance(saved_signature, dict) or saved_signature.get('algorithm') != 'sha256' or not isinstance(saved_signature.get('payload'), dict):
+            raise ValueError('Resume checkpoint has an invalid compatibility signature structure.')
+
+        saved_json = json.dumps(saved_signature['payload'], sort_keys=True, separators=(',', ':'))
+        if saved_signature.get('sha256') != hashlib.sha256(saved_json.encode('utf-8')).hexdigest():
+            raise ValueError('Resume checkpoint compatibility signature is internally inconsistent or corrupt.')
+
+        if saved_signature.get('sha256') != resume_signature.get('sha256'):
+            raise ValueError('Resume checkpoint is incompatible with the current task, repetition/fold, data, code, runtime, model, or training settings. '
+                             f'Saved signature={saved_signature.get("sha256")}; current signature={resume_signature.get("sha256")}. '
+                             'Existing outputs were left untouched.')
+
+        state = checkpoint['training_state']
+        required_state = {'completed_epoch', 'next_epoch', 'history', 'best_epoch', 'best_validation_metrics',
+                          'early_stop_best_validation_loss', 'bad_epochs', 'last_validation_metrics',
+                          'termination_reason', 'training_sessions'}
+        missing_state = sorted(required_state - set(state))
+        if missing_state:
+            raise ValueError(f'Resume checkpoint training state is incomplete; missing fields: {missing_state}.')
+
+        completed_epoch = int(state['completed_epoch'])
+        if int(checkpoint['epoch']) != completed_epoch or int(checkpoint['next_epoch']) != completed_epoch + 1 or int(state['next_epoch']) != completed_epoch + 1:
+            raise ValueError('Resume checkpoint epoch and next_epoch fields are inconsistent.')
+        if checkpoint['validation_metrics'] != state['last_validation_metrics']:
+            raise ValueError('Resume checkpoint top-level validation metrics do not match its last-epoch training state.')
+
+        best_epoch = int(state['best_epoch'])
+        if best_epoch < 1 or best_epoch > completed_epoch:
+            raise ValueError(f'Resume checkpoint best_epoch must be between 1 and {completed_epoch}; got {best_epoch}.')
+
+        self.validate_state_dict_snapshot(checkpoint['state_dict'], checkpoint['best_model_state_dict'])
+        allowed_reasons = {'in_progress', 'interrupted', 'exception', 'early_stopping', 'max_epochs_reached'}
+        if state['termination_reason'] not in allowed_reasons:
+            raise ValueError(f'Resume checkpoint has an unknown termination_reason: {state["termination_reason"]!r}.')
+        if state['termination_reason'] not in ('early_stopping', 'max_epochs_reached') and completed_epoch >= self.train_config.max_training_epochs:
+            raise ValueError(f'Resume checkpoint completed epoch {completed_epoch}, but max_training_epochs is {self.train_config.max_training_epochs}.')
+
+        self.validate_history(state['history'], completed_epoch)
+
     def ensure_best_checkpoint(self, checkpoint_path, best_epoch, best_metrics, best_model_state_dict):
-        """Recover an inference-ready best checkpoint from last-checkpoint state if required."""
-        if checkpoint_path.is_file() or best_model_state_dict is None:
+        """Recover the exact committed best checkpoint when its sibling is missing or stale."""
+        checkpoint_is_committed = False
+        if checkpoint_path.is_file():
+            try:
+                checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
+                checkpoint_is_committed = (
+                    checkpoint.get('checkpoint_type') == 'best_validation_loss'
+                    and int(checkpoint.get('epoch', -1)) == int(best_epoch)
+                    and checkpoint.get('validation_metrics') == self.label_validation_metrics(best_metrics)
+                    and self.state_dicts_equal(checkpoint.get('state_dict'), best_model_state_dict)
+                )
+            except Exception:
+                checkpoint_is_committed = False
+
+        if checkpoint_is_committed:
             return
 
         payload = {
-            'format_version': CHECKPOINT_FORMAT_VERSION, 'created_at': utc_now_iso(),
+            'format_version': CHECKPOINT_FORMAT_VERSION,
+            'schema': 'ipv_training_checkpoint',
+            'schema_version': CHECKPOINT_SCHEMA_VERSION,
+            'created_at': utc_now_iso(),
             'checkpoint_type': 'best_validation_loss', 'epoch': int(best_epoch), 'resume_capable': False,
-            'state_dict': best_model_state_dict, 'validation_metrics': best_metrics,
+            'next_epoch': int(best_epoch) + 1,
+            'state_dict': best_model_state_dict, 'optimiser_state_dict': None,
+            'validation_metrics': self.label_validation_metrics(best_metrics),
             'metadata': self.build_checkpoint_metadata('best_validation_loss', best_epoch, best_metrics),
+            'recovered_from_last_epoch_checkpoint': True,
         }
         self.atomic_torch_save(payload, checkpoint_path)
 
-    @staticmethod
-    def build_training_state(completed_epoch, history, best_epoch, best_metrics, early_stop_best_validation_loss,
+    def build_training_state(self, completed_epoch, history, best_epoch, best_metrics, early_stop_best_validation_loss,
                              bad_epochs, last_metrics, termination_reason):
         """Build the complete epoch-boundary continuation state."""
         return {
-            'completed_epoch': int(completed_epoch), 'history': copy.deepcopy(history),
-            'best_epoch': None if best_epoch is None else int(best_epoch), 'best_metrics': best_metrics,
+            'completed_epoch': int(completed_epoch), 'next_epoch': int(completed_epoch) + 1,
+            'history': copy.deepcopy(history),
+            'best_epoch': int(best_epoch), 'best_validation_metrics': self.label_validation_metrics(best_metrics),
             'early_stop_best_validation_loss': float(early_stop_best_validation_loss), 'bad_epochs': int(bad_epochs),
-            'last_metrics': last_metrics, 'termination_reason': termination_reason,
+            'last_validation_metrics': self.label_validation_metrics(last_metrics), 'termination_reason': termination_reason,
+            'training_sessions': self.get_training_sessions_snapshot(),
         }
 
     @staticmethod
     def clone_state_dict_to_cpu(state_dict):
         """Clone model weights to an independent CPU snapshot."""
-        return {name: tensor.detach().cpu().clone() for name, tensor in state_dict.items()}
+        return {name: value.detach().cpu().clone() if torch.is_tensor(value) else copy.deepcopy(value)
+                for name, value in state_dict.items()}
+
+    @staticmethod
+    def validate_state_dict_snapshot(current_state_dict, best_state_dict):
+        """Validate that the embedded best snapshot has the current model's tensor contract."""
+        if not isinstance(current_state_dict, dict) or not isinstance(best_state_dict, dict):
+            raise ValueError('Resume checkpoint model state and embedded best-model snapshot must be dictionaries.')
+        if set(current_state_dict) != set(best_state_dict):
+            raise ValueError('Resume checkpoint embedded best-model snapshot has different parameter keys.')
+
+        for name, current_value in current_state_dict.items():
+            best_value = best_state_dict[name]
+            if torch.is_tensor(current_value) != torch.is_tensor(best_value):
+                raise ValueError(f'Resume checkpoint best-model value type differs for {name}.')
+            if torch.is_tensor(current_value) and (current_value.shape != best_value.shape or current_value.dtype != best_value.dtype):
+                raise ValueError(f'Resume checkpoint best-model tensor contract differs for {name}.')
+
+    @staticmethod
+    def state_dicts_equal(first_state_dict, second_state_dict):
+        """Return whether two model state dictionaries are exactly equal."""
+        if not isinstance(first_state_dict, dict) or not isinstance(second_state_dict, dict) or set(first_state_dict) != set(second_state_dict):
+            return False
+
+        for name, first_value in first_state_dict.items():
+            second_value = second_state_dict[name]
+            if torch.is_tensor(first_value) != torch.is_tensor(second_value):
+                return False
+            if torch.is_tensor(first_value):
+                if first_value.shape != second_value.shape or first_value.dtype != second_value.dtype or not torch.equal(first_value.cpu(), second_value.cpu()):
+                    return False
+            elif first_value != second_value:
+                return False
+
+        return True
 
     @staticmethod
     def sha256_file(path):
@@ -1089,6 +1281,22 @@ class TrainModel:
         with open(path, 'rb') as input_file:
             for chunk in iter(lambda: input_file.read(1024 * 1024), b''):
                 digest.update(chunk)
+        return digest.hexdigest()
+
+    @staticmethod
+    def sha256_dataset_patches(dataset):
+        """Hash generated patch identities and bytes in CSV order."""
+        digest = hashlib.sha256()
+
+        for raw_path in dataset.csv_data.iloc[:, 1].tolist():
+            patch_path = Path(raw_path).resolve()
+            digest.update(str(patch_path).encode('utf-8'))
+            digest.update(b'\0')
+            with open(patch_path, 'rb') as patch_file:
+                for block in iter(lambda: patch_file.read(1024 * 1024), b''):
+                    digest.update(block)
+            digest.update(b'\0')
+
         return digest.hexdigest()
 
     @staticmethod
@@ -1115,33 +1323,57 @@ class TrainModel:
             if temporary_path.exists():
                 temporary_path.unlink()
 
-    @staticmethod
-    def capture_rng_state():
+    def remove_stale_checkpoint_temps(self):
+        """Discard uncommitted checkpoint siblings after the committed resume file validates."""
+        for checkpoint_type in ('best_validation_loss', 'last_epoch'):
+            checkpoint_path = self.get_checkpoint_path(checkpoint_type)
+            temporary_path = checkpoint_path.with_name(f'.{checkpoint_path.name}.tmp')
+            if temporary_path.exists():
+                temporary_path.unlink()
+
+    def capture_rng_state(self):
         """Capture Python, NumPy, PyTorch, and CUDA random-number states."""
         return {'python': random.getstate(), 'numpy': np.random.get_state(), 'torch_cpu': torch.get_rng_state(),
-                'torch_cuda': torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None}
+                'torch_cuda_all': torch.cuda.get_rng_state_all() if self.device.type == 'cuda' else None}
 
-    @staticmethod
-    def restore_rng_state(state):
+    def restore_rng_state(self, state):
         """Restore Python, NumPy, PyTorch, and CUDA random-number states."""
+        required = {'python', 'numpy', 'torch_cpu', 'torch_cuda_all'}
+        missing = sorted(required - set(state))
+        if missing:
+            raise ValueError(f'Resume checkpoint RNG state is incomplete; missing fields: {missing}.')
+
         random.setstate(state['python'])
         np.random.set_state(state['numpy'])
-        torch.set_rng_state(state['torch_cpu'])
-        if torch.cuda.is_available() and state.get('torch_cuda') is not None:
-            torch.cuda.set_rng_state_all(state['torch_cuda'])
+        torch.set_rng_state(state['torch_cpu'].cpu())
+        cuda_states = state['torch_cuda_all']
+        if cuda_states is not None:
+            if self.device.type != 'cuda' or not torch.cuda.is_available():
+                raise ValueError('Resume checkpoint contains CUDA RNG state, but CUDA is unavailable.')
+            if len(cuda_states) != torch.cuda.device_count():
+                raise ValueError(f'Resume checkpoint contains RNG state for {len(cuda_states)} CUDA device(s), but {torch.cuda.device_count()} are available.')
+            torch.cuda.set_rng_state_all([cuda_state.cpu() for cuda_state in cuda_states])
 
     def capture_data_loader_generator_states(self):
         """Capture training and validation DataLoader generator states."""
+        if self.training_generator is None or self.validation_generator is None:
+            raise RuntimeError('DataLoader generators have not been initialised.')
         return {'training': self.training_generator.get_state(), 'validation': self.validation_generator.get_state()}
 
     def restore_data_loader_generator_states(self, states):
         """Restore training and validation DataLoader generator states."""
-        self.training_generator.set_state(states['training'])
-        self.validation_generator.set_state(states['validation'])
+        if self.training_generator is None or self.validation_generator is None:
+            raise RuntimeError('DataLoader generators have not been initialised.')
+        if set(states) != {'training', 'validation'}:
+            raise ValueError('Resume checkpoint must contain training and validation DataLoader generator states.')
+        self.training_generator.set_state(states['training'].cpu())
+        self.validation_generator.set_state(states['validation'].cpu())
 
     @staticmethod
     def validate_history(history, completed_epoch):
         """Validate complete, finite, contiguous epoch history."""
+        if not isinstance(history, dict):
+            raise ValueError('Resume checkpoint history must be a dictionary of columns.')
         if set(HISTORY_FIELDS) - set(history):
             raise ValueError(f'Resume history is missing fields: {sorted(set(HISTORY_FIELDS) - set(history))}')
         lengths = {field: len(history[field]) for field in HISTORY_FIELDS}
@@ -1149,6 +1381,11 @@ class TrainModel:
             raise ValueError(f'Resume history columns have inconsistent lengths: {lengths}')
         if list(history['epoch']) != list(range(1, int(completed_epoch) + 1)):
             raise ValueError('Resume history does not contain every completed epoch exactly once.')
+
+        numeric_fields = set(HISTORY_FIELDS) - {'epoch_started_at', 'epoch_completed_at'}
+        for field_name in numeric_fields:
+            if not all(np.isfinite(value) for value in history[field_name]):
+                raise ValueError(f'Resume history contains a non-finite value in {field_name}.')
 
     @staticmethod
     def validate_finite_metrics(phase, metrics):
@@ -1159,8 +1396,9 @@ class TrainModel:
 
     def validate_configs(self):
         """Validate training-control settings before any output mutation."""
-        if self.repetition < 1 or self.fold < 1:
-            raise ValueError('repetition and fold must both be at least 1.')
+        if self.repetition < 1:
+            raise ValueError('repetition must be at least 1.')
+        self.fold = normalise_fold(self.fold)
         if self.train_config.random_seed < 0:
             raise ValueError('random_seed must be at least 0.')
         if self.train_config.batch_size < 1 or self.train_config.max_training_epochs < 1 or self.train_config.num_workers < 0:
@@ -1202,29 +1440,103 @@ class TrainModel:
 
     def finish_workflow(self):
         """Freeze workflow completion timestamps and duration."""
-        self.workflow_completed_at = utc_now_iso()
-        if self.workflow_start_perf is not None:
+        if self.workflow_completed_at is None:
+            self.workflow_completed_at = utc_now_iso()
+        if self.workflow_duration_seconds is None and self.workflow_start_perf is not None:
             self.workflow_duration_seconds = float(time.perf_counter() - self.workflow_start_perf)
+        self.update_current_training_session(status=self.training_status)
+        self.current_session_start_perf = None
+
+    def begin_training_session(self, resumed, resumed_from_epoch):
+        """Append a timestamped fresh or resumed execution session."""
+        if resumed and self.training_sessions and self.training_sessions[-1].get('status') == 'in_progress':
+            self.training_sessions[-1]['status'] = 'interrupted'
+
+        self.current_session_index = len(self.training_sessions)
+        self.current_session_start_perf = time.perf_counter()
+        self.training_sessions.append({
+            'session_number': self.current_session_index + 1,
+            'session_id': str(uuid.uuid4()),
+            'started_at': utc_now_iso(),
+            'last_updated_at': None,
+            'duration_seconds': 0.0,
+            'resumed': bool(resumed),
+            'resumed_from_epoch': int(resumed_from_epoch),
+            'completed_epoch': int(resumed_from_epoch),
+            'status': 'in_progress',
+            'runtime_environment': self.runtime_metadata,
+        })
+
+    def update_current_training_session(self, status=None, completed_epoch=None):
+        """Refresh the current execution-session record."""
+        if self.current_session_index is None or self.current_session_start_perf is None:
+            return
+        session = self.training_sessions[self.current_session_index]
+        session['last_updated_at'] = utc_now_iso()
+        session['duration_seconds'] = float(time.perf_counter() - self.current_session_start_perf)
+        if status is not None:
+            session['status'] = status
+        if completed_epoch is not None:
+            session['completed_epoch'] = int(completed_epoch)
+
+    def get_training_sessions_snapshot(self):
+        """Return an up-to-date copy of all execution sessions."""
+        self.update_current_training_session()
+        return copy.deepcopy(self.training_sessions)
 
     def get_timing_summary(self):
         """Return phase and cumulative epoch timing."""
         history = self.history
+        workflow_duration = self.workflow_duration_seconds
+        if workflow_duration is None and self.workflow_start_perf is not None:
+            workflow_duration = float(time.perf_counter() - self.workflow_start_perf)
         return {
             'workflow_started_at': self.workflow_started_at, 'workflow_completed_at': self.workflow_completed_at,
-            'workflow_duration_seconds': self.workflow_duration_seconds,
+            'workflow_duration_seconds': workflow_duration,
             'dataset_validation_duration_seconds': float(self.dataset_validation_duration_seconds),
             'model_setup_and_resume_duration_seconds': float(self.model_setup_duration_seconds),
             'validation_export_duration_seconds': float(self.validation_export_duration_seconds),
             'cumulative_training_duration_seconds': float(sum(history.get('training_duration_seconds', []))),
             'cumulative_validation_duration_seconds': float(sum(history.get('validation_duration_seconds', []))),
             'cumulative_epoch_duration_seconds': float(sum(history.get('epoch_duration_seconds', []))),
+            'sessions': self.get_training_sessions_snapshot(),
         }
 
     def get_run_report(self):
         """Return pipeline-level status, timing, resume, and runtime metadata."""
         return {'training_status': self.training_status, 'termination_reason': self.termination_reason,
                 'failure': self.failure, 'resume_training': self.resume_training,
+                'resume_checkpoint_path': str(self.get_checkpoint_path('last_epoch')) if self.resume_training else None,
+                'resume_state_validated': self.resume_state_validated,
                 'runtime_environment': self.runtime_metadata, 'timing': self.get_timing_summary()}
+
+    @staticmethod
+    def label_validation_metrics(validation_metrics):
+        """Return externally stored validation metrics with unambiguous names."""
+        if validation_metrics is None:
+            return None
+        if not validation_metrics:
+            return {}
+        if 'validation_loss' in validation_metrics:
+            return {
+                'validation_loss': float(validation_metrics['validation_loss']),
+                'validation_accuracy': float(validation_metrics['validation_accuracy']),
+                'validation_error_px': float(validation_metrics['validation_error_px']),
+            }
+        return {
+            'validation_loss': float(validation_metrics['loss']),
+            'validation_accuracy': float(validation_metrics['accuracy']),
+            'validation_error_px': float(validation_metrics['error_px']),
+        }
+
+    @staticmethod
+    def unlabel_validation_metrics(validation_metrics):
+        """Convert externally labelled metrics back to loop metric names."""
+        return {
+            'loss': float(validation_metrics['validation_loss']),
+            'accuracy': float(validation_metrics['validation_accuracy']),
+            'error_px': float(validation_metrics['validation_error_px']),
+        }
 
     @staticmethod
     def get_current_lr(optimiser):
@@ -1245,6 +1557,17 @@ class TrainModel:
     def serialise_intervals(intervals):
         """Convert interval pairs into plain serialisable lists."""
         return [[float(lower), float(upper)] for lower, upper in intervals]
+
+    @staticmethod
+    def serialise(value):
+        """Convert paths and nested values to stable JSON-compatible objects."""
+        if isinstance(value, Path):
+            return str(value)
+        if isinstance(value, dict):
+            return {key: TrainModel.serialise(item) for key, item in value.items()}
+        if isinstance(value, (tuple, list)):
+            return [TrainModel.serialise(item) for item in value]
+        return value
 
     @staticmethod
     def optional_int(value):

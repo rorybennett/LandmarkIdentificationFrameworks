@@ -9,7 +9,7 @@ MARK_LIST_FILE="$HOME/DATA/transverse_points_list.txt"
 IMAGE_DATA_DIR="$HOME/DATA/transverse"
 
 REPETITION=1
-FOLD=1
+FOLD=1  # Use "all" to train on the complete non-test cohort.
 TASK_NAME="prostate_transverse"
 NUM_POINTS=4
 

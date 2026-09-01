@@ -48,6 +48,8 @@ folds/
   repeated_kfold_membership.csv
   test_cases.xlsx                 # only for a configured fixed test cohort
   repetition_1/
+    training_fall.txt
+    val_fall.txt
     training_f1.txt
     val_f1.txt
     training_f2.txt
@@ -57,7 +59,7 @@ folds/
     val_f1.txt
 ```
 
-The complete collection is checked for contiguous repetition and fold numbers, paired files, duplicates, split overlap, complete dataset coverage, complementary training/validation membership, validation exactly once per sample per repetition, and the same eligible dataset in every repetition.
+The complete collection is checked for contiguous repetition and fold numbers, paired files, duplicates, split overlap, complete dataset coverage, complementary training/validation membership, validation exactly once per sample per repetition, and the same eligible dataset in every repetition. `training_fall.txt` and `val_fall.txt` contain the same complete non-test cohort and are validated in every repetition.
 
 Generate lists by editing the settings at the top of `IPV/utils/generate_folds.py` and running:
 
@@ -74,6 +76,8 @@ The command format is:
 ```text
 ipv-train REPETITION FOLD TASK_NAME CREATE_DATA TRAIN_MODEL COPY_FILES DELETE_FILES [OPTIONS]
 ```
+
+`FOLD` accepts a numbered fold or `all`. Use `all` for a final model trained on the complete non-test cohort; its output leaf is `fold_all` and its generated CSVs are `Train_fall.csv` and `Val_fall.csv`.
 
 Example:
 
@@ -150,7 +154,7 @@ with `CREATE_DATA=false` and `TRAIN_MODEL=true`. Resumption uses only:
 TRAINING_RESULTS/TASK_NAME/RUN_NAME/repetition_N/fold_N/model_last_epoch.pth
 ```
 
-The checkpoint restores model, optimiser, scheduler, AMP scaler, history, best/early-stopping state, random-number states and DataLoader generator states. A compatibility signature covers generated training/validation CSVs, fold membership, all IPV Python sources, configuration and relevant runtime versions. Incompatible continuation is rejected.
+The v3 checkpoint restores model, optimiser, scheduler, AMP scaler, history, best/early-stopping state, random-number states, DataLoader generator states and timestamped execution sessions. A compatibility signature covers the split lists, mark list, generated CSVs and patch bytes, all IPV Python sources, configuration, dependencies and compute runtime. Incomplete, corrupt or incompatible continuation is rejected before committed outputs are changed.
 
 ## Output layout
 
@@ -158,13 +162,13 @@ Generated patch data is isolated beneath:
 
 ```text
 RUN_DIR/TRAINING_DATA/TASK_NAME/REPETITIONS_Repetitions_FOLDS_Folds/
-  PATCH_CONFIGURATION/repetition_N/fold_N/
+  PATCH_CONFIGURATION/repetition_N/fold_N_OR_all/
 ```
 
 Training outputs match the Heatmaps repetition/fold hierarchy:
 
 ```text
-RUN_DIR/TRAINING_RESULTS/TASK_NAME/RUN_NAME/repetition_N/fold_N/
+RUN_DIR/TRAINING_RESULTS/TASK_NAME/RUN_NAME/repetition_N/fold_N_OR_all/
   model_best_validation_loss.pth
   model_last_epoch.pth
   validation_checkpoint_summary.json
@@ -212,7 +216,21 @@ Edit the paths and switches in `IPV/infer_landmarks.py`, then run:
 ipv-infer
 ```
 
-Standalone inference remains independent of fold-list generation. It reconstructs the model from checkpoint metadata, accepts one image or an image directory, optionally reads ground truth from a mark list, and saves vote maps, heatmap overlays, endpoint overlays, an Excel summary and run metadata.
+Standalone inference remains independent of fold-list generation. It reconstructs the model, network name, repetition and fold from checkpoint metadata; accepts one image or an image directory; and optionally reads ground truth from a mark list. Patch resizing and quantisation reproduce the training preprocessing path.
+
+Its shared comparison artefacts match the Heatmaps naming contract:
+
+```text
+inference_summary.xlsx
+inference_image_summary.csv
+inference_endpoints.csv
+inference_predictions.csv
+inference_heatmap_overlays/
+inference_point_overlays/
+inference_logs/inference_run_metadata.json
+```
+
+IPV additionally writes `inference_vote_maps/` and, when enabled, `inference_raw_vote_maps/`.
 
 ## Tests
 
@@ -222,4 +240,4 @@ From the outer `IPV` directory:
 python -m unittest discover -s tests -v
 ```
 
-Tests cover deterministic repeated k-fold membership, held-out test exclusion, fold-collection fingerprints, isolated output leaves, common validation schemas, epoch-history fields and atomic checkpoint replacement.
+Tests cover deterministic repeated k-fold and fold-all membership, held-out test exclusion, fold-collection fingerprints, isolated output leaves, common inference/validation schemas, exact inference preprocessing, v3 checkpoint reconstruction, epoch-history fields and atomic checkpoint replacement.
