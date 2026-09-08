@@ -764,3 +764,27 @@ stored in `run_info.json`.
 
 The annotation and image contents are not included in the fingerprint. Use a distinct `TASK_NAME` or explicit `--run-name` when training different datasets that use the
 same fold membership and otherwise identical settings.
+
+## Standardised result presentation (v0.1)
+
+Validation workbooks use `validation_image_summary` and `validation_endpoints`;
+standalone inference workbooks use `image_summary` and `endpoints`. All image,
+endpoint and wide prediction CSVs include `network_name`.
+
+Both frameworks cycle landmark response colours in this order: red, blue, yellow,
+green, cyan, magenta, orange and purple, repeating after eight landmarks. Each
+response is scaled by its own positive maximum, with negative values clipped to
+zero; overlapping colours are added and clipped. Heatmap endpoint labels use the
+same landmark colours. Point-only overlays retain green ground truth and red
+predictions. Colours identify landmarks, not comparable confidence scores.
+
+Training plots use a single loss panel and a second axis for mean endpoint error
+in original-image pixels. Heatmaps also plots training endpoint error; IPV retains
+classification accuracy in its CSV log. Losses remain framework-specific.
+
+From the repository root, run the cross-framework output checks with:
+`python -m unittest discover -s tests -v`.
+
+Standalone inference model, input, output and ground-truth paths are empty strings.
+Set the three required paths before running; leave the ground-truth path empty
+for inference without annotations.

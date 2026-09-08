@@ -255,3 +255,29 @@ python -m unittest discover -s tests -v
 ```
 
 Tests cover deterministic repeated k-fold and fold-all membership, held-out test exclusion, fold-collection fingerprints, isolated output leaves, three-channel normalisation, pretrained constants, training-only statistics, common inference/validation schemas, exact inference preprocessing, version 0.1 checkpoint reconstruction, epoch-history fields and atomic checkpoint replacement.
+
+## Standardised result presentation (v0.1)
+
+Validation workbooks use `validation_image_summary` and `validation_endpoints`;
+standalone inference workbooks use `image_summary` and `endpoints`. All image,
+endpoint and wide prediction CSVs include `network_name`.
+
+Both frameworks cycle landmark response colours in this order: red, blue, yellow,
+green, cyan, magenta, orange and purple, repeating after eight landmarks. Each
+response is scaled by its own positive maximum, with negative values clipped to
+zero; overlapping colours are added and clipped. Heatmap endpoint labels use the
+same landmark colours. Point-only overlays retain green ground truth and red
+predictions. Colours identify landmarks, not comparable confidence scores.
+
+Training plots use a single loss panel and a second axis for mean endpoint error
+in original-image pixels. Heatmaps also plots training endpoint error; IPV retains
+classification accuracy in its CSV log. Losses remain framework-specific.
+
+From the repository root, run the cross-framework output checks with:
+`python -m unittest discover -s tests -v`.
+
+Standalone inference model, input, output and ground-truth paths are empty strings
+in both frameworks. Set the three required paths before running; leave the
+ground-truth path empty for inference without annotations. IPV matches Heatmaps'
+CUDA and raw response-map saving settings. `BATCH_SIZE=4096` counts patches;
+Heatmaps' `BATCH_SIZE=1` counts whole images.

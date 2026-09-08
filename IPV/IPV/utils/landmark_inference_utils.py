@@ -27,7 +27,10 @@ POINT_PATTERN = re.compile(r'\((-?\d+(?:\.\d+)?),\s*(-?\d+(?:\.\d+)?)\)')
 TASKS_PER_POINT = 2
 PREDICTED_POINT_COLOUR = (0, 0, 255)
 GROUND_TRUTH_POINT_COLOUR = (0, 255, 0)
-POINT_COLOURS = ((0, 0, 255), (255, 0, 0), (0, 255, 255), (0, 255, 0), (255, 255, 0), (255, 0, 0), (255, 0, 255), (128, 0, 255), (255, 128, 0), (0, 128, 255))
+# Shared landmark order (OpenCV BGR): red, blue, yellow, green, cyan, magenta, orange, purple.
+# Keep identical in both independently installable frameworks; repeat after eight landmarks.
+POINT_COLOURS = ((0, 0, 255), (255, 0, 0), (0, 255, 255), (0, 255, 0),
+                 (255, 255, 0), (255, 0, 255), (0, 128, 255), (128, 0, 128))
 ARC_COLOURS = POINT_COLOURS
 POINT_MARKER_SIZE = 16
 POINT_MARKER_THICKNESS = 2
@@ -373,8 +376,8 @@ class LandmarkImageInferer:
         }
 
         with pd.ExcelWriter(output_paths['summary_xlsx'], engine='openpyxl') as writer:
-            pd.DataFrame(summary_rows).to_excel(writer, sheet_name='image_summary', index=False)
-            pd.DataFrame(endpoint_rows).to_excel(writer, sheet_name='endpoints', index=False)
+            pd.DataFrame(summary_rows).to_excel(writer, sheet_name='validation_image_summary' if self.config.run_label == 'validation' else 'image_summary', index=False)
+            pd.DataFrame(endpoint_rows).to_excel(writer, sheet_name='validation_endpoints' if self.config.run_label == 'validation' else 'endpoints', index=False)
 
         write_csv_rows(output_paths['image_summary_csv'], summary_rows, list(summary_rows[0].keys()))
         write_csv_rows(output_paths['endpoints_csv'], endpoint_rows, list(endpoint_rows[0].keys()))
@@ -900,7 +903,7 @@ def create_all_vote_maps_overlay(display_image, vote_maps):
 def create_combined_heatmap_overlay(display_image, smoothed_vote_maps, detected_points):
     """Create a coloured heatmap overlay with predicted points."""
     overlay = create_all_vote_maps_overlay(display_image=display_image, vote_maps=smoothed_vote_maps)
-    draw_points(image=overlay, points=detected_points, colour=PREDICTED_POINT_COLOUR, prefix='P')
+    draw_points_with_point_colours(image=overlay, points=detected_points, prefix='P')
     return overlay
 
 

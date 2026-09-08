@@ -4,27 +4,26 @@ Example script for running IPV landmark inference on a user image or image folde
 Edit the path variables and switches below, then run from the repository root with:
 python -m IPV.infer_landmarks
 """
-from pathlib import Path
-
 from .utils.landmark_inference_utils import build_config_from_checkpoint_metadata, build_image_records, load_model_from_checkpoint, run_landmark_inference_for_records
 
 # ======================================================================================================================
 # Paths
 # ======================================================================================================================
-MODEL_PATH = Path(r'')
-INPUT_PATH = Path(r'')
-OUTPUT_DIR = Path(r'')
-GROUND_TRUTH_MARK_LIST_PATH = None
+MODEL_PATH = ''
+INPUT_PATH = ''
+OUTPUT_DIR = ''
+GROUND_TRUTH_MARK_LIST_PATH = ''
 
 # ======================================================================================================================
 # Inference switches
 # ======================================================================================================================
-DEVICE = 'auto'
+DEVICE = 'cuda'
+# IPV batches patches, whereas Heatmaps batches whole images.
 BATCH_SIZE = 4096
 GRID_SPACING_OVERRIDE = None
 VOTE_SMOOTH_SIGMA_OVERRIDE = None
 USE_PROBABILITY_WEIGHTS_OVERRIDE = None
-SAVE_RAW_VOTE_MAPS = False
+SAVE_RAW_VOTE_MAPS = True
 CLEAR_CUDA_CACHE_BETWEEN_IMAGES = True
 RECURSIVE_IMAGE_SEARCH = False
 SUPPORTED_IMAGE_SUFFIXES = ('.png', '.jpg', '.jpeg', '.bmp', '.tif', '.tiff')
@@ -55,9 +54,13 @@ def build_inference_config(checkpoint_metadata):
 
 def main():
     """Load a trained checkpoint, build image records, and run landmark inference."""
+    for name, value in (('MODEL_PATH', MODEL_PATH), ('INPUT_PATH', INPUT_PATH), ('OUTPUT_DIR', OUTPUT_DIR)):
+        if not str(value).strip():
+            raise ValueError(f'Set {name} before running inference.')
+
     loaded_checkpoint = load_model_from_checkpoint(checkpoint_path=MODEL_PATH, device=DEVICE)
     config = build_inference_config(loaded_checkpoint.metadata)
-    records = build_image_records(input_path=INPUT_PATH, num_points=config.num_points, mark_list_path=GROUND_TRUTH_MARK_LIST_PATH,
+    records = build_image_records(input_path=INPUT_PATH, num_points=config.num_points, mark_list_path=GROUND_TRUTH_MARK_LIST_PATH or None,
                                   recursive=RECURSIVE_IMAGE_SEARCH, supported_suffixes=SUPPORTED_IMAGE_SUFFIXES)
 
     if not records:

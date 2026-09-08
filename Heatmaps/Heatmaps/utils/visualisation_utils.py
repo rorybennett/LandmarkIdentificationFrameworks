@@ -9,6 +9,10 @@ import numpy as np
 
 GROUND_TRUTH_POINT_COLOUR = (0, 255, 0)
 PREDICTED_POINT_COLOUR = (0, 0, 255)
+# Shared landmark order (OpenCV BGR): red, blue, yellow, green, cyan, magenta, orange, purple.
+# Keep identical in both independently installable frameworks; repeat after eight landmarks.
+POINT_COLOURS = ((0, 0, 255), (255, 0, 0), (0, 255, 255), (0, 255, 0),
+                 (255, 255, 0), (255, 0, 255), (0, 128, 255), (128, 0, 128))
 POINT_MARKER_SIZE = 16
 POINT_MARKER_THICKNESS = 2
 HEATMAP_IMAGE_WEIGHT = 0.55
@@ -62,16 +66,23 @@ def resize_heatmaps_to_display(heatmaps, display_shape):
 def create_combined_heatmap_overlay(display_image, heatmaps, predicted_points=None):
     """Overlay all predicted heatmaps on one image and label predicted endpoints."""
     heatmaps = resize_heatmaps_to_display(heatmaps=heatmaps, display_shape=display_image.shape)
-    combined = np.max(heatmaps, axis=0)
-    heatmap = cv2.applyColorMap(normalise_map(combined), cv2.COLORMAP_JET)
+    colour_layer = np.zeros_like(display_image, dtype=np.float32)
 
-    if heatmap.shape != display_image.shape:
-        raise ValueError(f'Heatmap overlay shape {heatmap.shape} does not match display image shape {display_image.shape}.')
+    for point_index, heatmap in enumerate(heatmaps, start=1):
+        max_value = float(np.max(heatmap))
 
-    overlay = cv2.addWeighted(display_image, HEATMAP_IMAGE_WEIGHT, heatmap, HEATMAP_COLOUR_WEIGHT, 0)
+        if max_value <= 0:
+            continue
+
+        normalised_map = np.clip(heatmap.astype(np.float32) / max_value, 0.0, 1.0)
+        colour = np.asarray(get_point_colour(point_index), dtype=np.float32)
+        colour_layer += normalised_map[:, :, None] * colour
+
+    colour_layer = np.clip(colour_layer, 0, 255).astype(np.uint8)
+    overlay = cv2.addWeighted(display_image, HEATMAP_IMAGE_WEIGHT, colour_layer, HEATMAP_COLOUR_WEIGHT, 0)
 
     if predicted_points is not None:
-        draw_points(image=overlay, points=predicted_points, colour=PREDICTED_POINT_COLOUR, prefix='P')
+        draw_points_with_point_colours(image=overlay, points=predicted_points, prefix='P')
 
     return overlay
 
@@ -91,6 +102,20 @@ def draw_points(image, points, colour, prefix):
     """Draw labelled endpoints onto an image."""
     for point_index, (x, y) in enumerate(points, start=1):
         centre = (int(round(x)), int(round(y)))
+        cv2.drawMarker(image, centre, colour, markerType=cv2.MARKER_TILTED_CROSS, markerSize=POINT_MARKER_SIZE, thickness=POINT_MARKER_THICKNESS, line_type=cv2.LINE_AA)
+        cv2.putText(image, f'{prefix}{point_index}', (centre[0] + 6, centre[1] - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.5, colour, 1, cv2.LINE_AA)
+
+
+def get_point_colour(point_index):
+    """Return the fixed BGR display colour for a one-based endpoint index."""
+    return POINT_COLOURS[(int(point_index) - 1) % len(POINT_COLOURS)]
+
+
+def draw_points_with_point_colours(image, points, prefix):
+    """Draw labelled endpoints using the same fixed colours as their heatmaps."""
+    for point_index, (x, y) in enumerate(points, start=1):
+        centre = (int(round(x)), int(round(y)))
+        colour = get_point_colour(point_index)
         cv2.drawMarker(image, centre, colour, markerType=cv2.MARKER_TILTED_CROSS, markerSize=POINT_MARKER_SIZE, thickness=POINT_MARKER_THICKNESS, line_type=cv2.LINE_AA)
         cv2.putText(image, f'{prefix}{point_index}', (centre[0] + 6, centre[1] - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.5, colour, 1, cv2.LINE_AA)
 

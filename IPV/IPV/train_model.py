@@ -785,25 +785,21 @@ class TrainModel:
         return checkpoint_path
 
     def save_history_plot(self, history):
-        """Save epoch-level loss, accuracy, and endpoint-error traces."""
+        """Save loss and endpoint-error traces in the training plot."""
         if not history['epoch']:
             return
 
-        figure, (loss_axis, metric_axis) = plt.subplots(2, 1, figsize=(9, 8), sharex=True)
-        error_axis = metric_axis.twinx()
+        figure, loss_axis = plt.subplots(figsize=(9, 5))
+        error_axis = loss_axis.twinx()
         loss_axis.plot(history['epoch'], history['training_loss'], label='training_loss')
         loss_axis.plot(history['epoch'], history['validation_loss'], label='validation_loss')
-        metric_axis.plot(history['epoch'], history['training_accuracy'], label='training_accuracy')
-        metric_axis.plot(history['epoch'], history['validation_accuracy'], label='validation_accuracy')
-        error_axis.plot(history['epoch'], history['validation_error_px'], linestyle='--', color='tab:red', label='validation_error_px')
-        loss_axis.set_ylabel('Classification loss')
-        metric_axis.set_xlabel('Epoch')
-        metric_axis.set_ylabel('Classification accuracy')
+        error_axis.plot(history['epoch'], history['validation_error_px'], linestyle='--', label='validation_error_px')
+        loss_axis.set_xlabel('Epoch')
+        loss_axis.set_ylabel('Loss')
         error_axis.set_ylabel('Mean endpoint error (px)')
-        loss_axis.legend(loc='best')
-        metric_lines, metric_labels = metric_axis.get_legend_handles_labels()
+        loss_lines, loss_labels = loss_axis.get_legend_handles_labels()
         error_lines, error_labels = error_axis.get_legend_handles_labels()
-        metric_axis.legend(metric_lines + error_lines, metric_labels + error_labels, loc='best')
+        loss_axis.legend(loss_lines + error_lines, loss_labels + error_labels, loc='best')
         figure.tight_layout()
         figure.savefig(self.get_plot_path())
         plt.close(figure)

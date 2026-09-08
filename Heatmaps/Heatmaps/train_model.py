@@ -1765,7 +1765,8 @@ class TrainModel:
         return {'dataset_split': 'validation', 'repetition': int(self.data_config.repetition), 'fold': normalise_fold(self.data_config.fold),
                 'sample_name': sample_name, 'image_path': image_path, 'image_height': int(image_height), 'image_width': int(image_width),
                 'num_points': int(point_errors.size), 'mean_error_px': float(np.mean(point_errors)), 'median_error_px': float(np.median(point_errors)),
-                'max_error_px': float(np.max(point_errors)), 'checkpoint_type': checkpoint_type}
+                'max_error_px': float(np.max(point_errors)), 'checkpoint_type': checkpoint_type,
+                'network_name': self.model_config.network_name}
 
     def create_endpoint_rows(self, sample_name, image_path, target_points, predicted_points, point_errors, checkpoint_type=None):
         """Create one endpoint-level validation row per landmark."""
@@ -1775,7 +1776,8 @@ class TrainModel:
             rows.append({'dataset_split': 'validation', 'repetition': int(self.data_config.repetition), 'fold': normalise_fold(self.data_config.fold),
                          'sample_name': sample_name, 'image_path': image_path, 'point_index': point_index, 'target_x': float(target[0]),
                          'target_y': float(target[1]), 'pred_x': float(predicted[0]), 'pred_y': float(predicted[1]),
-                         'error_px': float(error), 'checkpoint_type': checkpoint_type})
+                         'error_px': float(error), 'checkpoint_type': checkpoint_type,
+                         'network_name': self.model_config.network_name})
 
         return rows
 
@@ -1855,7 +1857,7 @@ class TrainModel:
     def create_prediction_row(self, sample_name, target_points, predicted_points, point_errors):
         """Create one prediction CSV row."""
         row = {'dataset_split': 'validation', 'repetition': int(self.data_config.repetition), 'fold': normalise_fold(self.data_config.fold),
-               'sample_name': sample_name, 'mean_error_px': float(np.mean(point_errors))}
+               'sample_name': sample_name, 'network_name': self.model_config.network_name, 'mean_error_px': float(np.mean(point_errors))}
 
         for point_index, (target, predicted, error) in enumerate(zip(target_points, predicted_points, point_errors), start=1):
             row[f'target_x{point_index}'] = float(target[0])

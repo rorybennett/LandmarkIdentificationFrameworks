@@ -555,6 +555,7 @@ def build_prediction_rows(summary_rows, endpoint_rows):
             'repetition': summary['repetition'],
             'fold': summary['fold'],
             'sample_name': summary['sample_name'],
+            'network_name': summary['network_name'],
             'mean_error_px': summary['mean_error_px'],
         }
 
