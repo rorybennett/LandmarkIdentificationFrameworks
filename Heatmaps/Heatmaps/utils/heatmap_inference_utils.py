@@ -13,9 +13,9 @@ from openpyxl import Workbook
 
 from ..model_registry import build_heatmap_model
 from ..models import unpack_heatmap_output
-from ..normalisation import EXPECTED_NORMALISATION_CHANNELS, normalise_channel_first, validate_normalisation_constants
+from ..normalisation import EXPECTED_NORMALISATION_CHANNELS, validate_normalisation_constants
 from .annotation_utils import read_mark_list, validate_annotation_point_count
-from .io_utils import (heatmaps_to_points, load_image_as_float, resize_channel_first, safe_file_stem,
+from .io_utils import (LETTERBOX_POLICY, validate_canvas_size, prepare_image, remove_padding, heatmaps_to_points, load_image_as_float, safe_file_stem,
                        scale_points_to_original, validate_points_within_image)
 from .progress_bar import ProgressBar
 from .visualisation_utils import create_combined_heatmap_overlay, create_point_overlay, load_display_image
@@ -32,7 +32,7 @@ class HeatmapInferenceConfig:
     output_dir: Path
     num_points: int
     input_channels: int
-    image_size: tuple[int, int]
+    image_size: int
     task_name: str = ''
     repetition: int | None = None
     fold: int | None = None
@@ -85,7 +85,7 @@ class HeatmapImageInferer:
         config.checkpoint_path = None if config.checkpoint_path is None else Path(config.checkpoint_path)
         config.num_points = int(config.num_points)
         config.input_channels = int(config.input_channels)
-        config.image_size = tuple(int(value) for value in config.image_size)
+        config.image_size = validate_canvas_size(config.image_size)
         config.repetition = None if config.repetition is None else int(config.repetition)
         config.fold = None if config.fold is None else int(config.fold)
         config.batch_size = int(config.batch_size)
@@ -107,8 +107,6 @@ class HeatmapImageInferer:
         if config.input_channels not in (1, 3, 4):
             raise ValueError(f'input_channels must be 1, 3, or 4. Got: {config.input_channels}')
 
-        if len(config.image_size) != 2 or min(config.image_size) < 1:
-            raise ValueError(f'image_size must contain two positive values. Got: {config.image_size}')
 
         if config.batch_size < 1:
             raise ValueError('batch_size must be at least 1.')
@@ -172,7 +170,7 @@ class HeatmapImageInferer:
             heatmaps, _ = unpack_heatmap_output(model_output)
 
         self.validate_heatmap_batch(heatmaps=heatmaps, expected_batch_size=len(records))
-        resized_points = heatmaps_to_points(heatmaps)
+        resized_points = heatmaps_to_points(heatmaps, original_sizes, self.config.image_size)
         original_points = scale_points_to_original(points=resized_points, original_sizes=original_sizes,
                                                    image_size=self.config.image_size)
         heatmap_arrays = heatmaps.detach().cpu().numpy()
@@ -211,11 +209,7 @@ class HeatmapImageInferer:
                     f'exactly {self.config.num_points} are required.'
                 )
 
-        resized_image = resize_channel_first(image=image, image_size=self.config.image_size)
-
-        if self.config.normalisation_mean is not None:
-            resized_image = normalise_channel_first(resized_image, self.config.normalisation_mean,
-                                                    self.config.normalisation_std)
+        resized_image = prepare_image(image, self.config.image_size, self.config.normalisation_mean, self.config.normalisation_std)
 
         return {
             'record': record,
@@ -226,7 +220,7 @@ class HeatmapImageInferer:
 
     def validate_heatmap_batch(self, heatmaps, expected_batch_size):
         """Validate the common final output contract for every registered model."""
-        expected_shape = (int(expected_batch_size), self.config.num_points, *self.config.image_size)
+        expected_shape = (int(expected_batch_size), self.config.num_points, self.config.image_size, self.config.image_size)
 
         if not torch.is_tensor(heatmaps):
             raise TypeError('The model final heatmaps must be a tensor.')
@@ -255,7 +249,8 @@ class HeatmapImageInferer:
             raise OSError(f'Could not write point overlay: {point_path}')
 
         if self.config.save_raw_heatmaps:
-            np.save(self.output_dirs['raw_heatmaps'] / f'{output_stem}_{self.config.run_label}_heatmaps.npy', heatmaps)
+            np.save(self.output_dirs['raw_heatmaps'] / f'{output_stem}_{self.config.run_label}_heatmaps.npy',
+                    remove_padding(heatmaps, display_image.shape[:2], self.config.image_size))
 
     def save_combined_summaries(self, results):
         """Write image, endpoint, and wide prediction summaries."""
@@ -387,10 +382,7 @@ def load_model_from_checkpoint(checkpoint_path, device='auto'):
 
 def load_checkpoint(checkpoint_path):
     """Load a checkpoint on CPU before model construction."""
-    try:
-        return torch.load(checkpoint_path, map_location='cpu', weights_only=False)
-    except TypeError:
-        return torch.load(checkpoint_path, map_location='cpu')
+    return torch.load(checkpoint_path, map_location='cpu', weights_only=False)
 
 
 def extract_state_dict(checkpoint):
@@ -419,8 +411,12 @@ def extract_inference_metadata_from_checkpoint(checkpoint):
     preprocessing = require_dict(metadata, 'preprocessing')
     inference = require_dict(metadata, 'inference')
     init_args = dict(require_dict(model, 'init_args'))
-    image_size_metadata = require_dict(preprocessing, 'image_size')
-    image_size = (int(image_size_metadata['height']), int(image_size_metadata['width']))
+    if preprocessing.get('resize') != LETTERBOX_POLICY:
+        raise ValueError('Checkpoint requires the current longest-edge letterbox preprocessing contract; older checkpoints are unsupported.')
+    image_size = validate_canvas_size(preprocessing.get('image_size'))
+    if 'image_size' in init_args:
+        if validate_canvas_size(init_args['image_size']) != image_size:
+            raise ValueError('Model canvas and preprocessing size disagree.')
     num_points = int(task['num_points'])
     input_channels = int(preprocessing['input_channels'])
     network_name = str(model['registry_name'])
@@ -437,6 +433,8 @@ def extract_inference_metadata_from_checkpoint(checkpoint):
     elif normalisation_mean is not None or normalisation_std is not None:
         raise ValueError('Disabled checkpoint normalisation must not contain mean or standard-deviation constants.')
     required_init_args = {'num_of_points', 'input_channels'}
+    if network_name == 'vitpose':
+        required_init_args.add('image_size')
     missing_init_args = sorted(required_init_args - set(init_args))
 
     if missing_init_args:
@@ -477,7 +475,7 @@ def build_config_from_checkpoint_metadata(metadata, output_dir, batch_size=1, sa
         output_dir=Path(output_dir),
         num_points=int(metadata['num_points']),
         input_channels=int(metadata['input_channels']),
-        image_size=tuple(metadata['image_size']),
+        image_size=validate_canvas_size(metadata['image_size']),
         task_name=str(metadata.get('task_name') or ''),
         repetition=metadata.get('repetition'),
         fold=metadata.get('fold'),

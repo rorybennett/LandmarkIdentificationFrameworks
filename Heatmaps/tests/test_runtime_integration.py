@@ -93,7 +93,7 @@ class RuntimeIntegrationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary_dir:
             root = Path(temporary_dir)
             data_config = HeatmapDataConfig(repetition=1, fold=1, task_name='task', num_of_points=2, fold_lists_path=root,
-                                            mark_list_file=root / 'marks.txt', image_data_dir=root, image_size=(32, 32))
+                                            mark_list_file=root / 'marks.txt', image_data_dir=root, image_size=32)
             train_config = TrainConfig(batch_size=1, learning_rate=1e-3, max_training_epochs=1, num_workers=0)
             model_config = HeatmapModelConfig(depth=1)
 
@@ -151,7 +151,7 @@ class RuntimeIntegrationTests(unittest.TestCase):
             trainer = TrainModel(
                 data_config=HeatmapDataConfig(repetition=1, fold=1, task_name='task', num_of_points=2,
                                               fold_lists_path=root / 'folds', mark_list_file=mark_list, image_data_dir=image_dir,
-                                              image_size=(8, 8), heatmap_sigma=1.0),
+                                              image_size=8, heatmap_sigma=1.0),
                 train_config=TrainConfig(batch_size=1, learning_rate=1e-3, max_training_epochs=1, num_workers=0),
                 model_config=HeatmapModelConfig(base_channels=4, depth=1, max_channels=8),
                 output_save_path=output_dir,
@@ -168,7 +168,7 @@ class RuntimeIntegrationTests(unittest.TestCase):
             root = Path(temporary_dir)
             trainer = TrainModel(
                 data_config=HeatmapDataConfig(repetition=2, fold=3, task_name='task', num_of_points=1, fold_lists_path=root,
-                                              mark_list_file=root / 'marks.txt', image_data_dir=root, image_size=(8, 8)),
+                                              mark_list_file=root / 'marks.txt', image_data_dir=root, image_size=8),
                 train_config=TrainConfig(batch_size=1, learning_rate=1e-3, max_training_epochs=1, num_workers=0),
                 model_config=HeatmapModelConfig(base_channels=4, depth=1, max_channels=8),
                 output_save_path=root,
@@ -200,7 +200,7 @@ class RuntimeIntegrationTests(unittest.TestCase):
             trainer = TrainModel(
                 data_config=HeatmapDataConfig(repetition=1, fold='all', task_name='task', num_of_points=1,
                                               fold_lists_path=root / 'folds', mark_list_file=mark_list, image_data_dir=image_dir,
-                                              image_size=(8, 8), heatmap_sigma=1.0),
+                                              image_size=8, heatmap_sigma=1.0),
                 train_config=TrainConfig(batch_size=1, learning_rate=1e-3, max_training_epochs=1, num_workers=0,
                                          save_validation_predictions=True),
                 model_config=HeatmapModelConfig(base_channels=4, depth=1, max_channels=8),
@@ -246,7 +246,7 @@ class RuntimeIntegrationTests(unittest.TestCase):
             trainer = TrainModel(
                 data_config=HeatmapDataConfig(repetition=1, fold=1, task_name='task', num_of_points=2,
                                               fold_lists_path=root / 'folds', mark_list_file=mark_list, image_data_dir=image_dir,
-                                              image_size=(8, 8), heatmap_sigma=1.0),
+                                              image_size=8, heatmap_sigma=1.0),
                 train_config=TrainConfig(batch_size=1, learning_rate=1e-3, max_training_epochs=1, num_workers=0,
                                          save_validation_predictions=True),
                 model_config=HeatmapModelConfig(base_channels=4, depth=1, max_channels=8),
@@ -357,7 +357,7 @@ class RuntimeIntegrationTests(unittest.TestCase):
 
             data_config = HeatmapDataConfig(
                 repetition=1, fold=1, task_name='resume_test', num_of_points=1, fold_lists_path=root / 'folds',
-                mark_list_file=mark_list, image_data_dir=image_dir, image_size=(32, 32), heatmap_sigma=1.0,
+                mark_list_file=mark_list, image_data_dir=image_dir, image_size=32, heatmap_sigma=1.0,
                 oversampling_factor=2, fold_collection_sha256='resume-test-fold-digest',
             )
             train_config = TrainConfig(

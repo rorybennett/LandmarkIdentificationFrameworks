@@ -68,7 +68,7 @@ def print_summary(image_data_dir, image_paths, sizes, average_width, average_hei
     print(f'Average height: {average_height:.2f}')
     print(f'Rounded width: {rounded_width}')
     print(f'Rounded height: {rounded_height}')
-    print(f'Use with heatmaps-train as: --image-size {rounded_height} {rounded_width}')
+    print(f'Use with heatmaps-train as: --image-size {max(rounded_height, rounded_width)}')
 
 
 def main():

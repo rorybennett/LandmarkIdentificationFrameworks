@@ -100,7 +100,7 @@ Set `MODEL_PATH` to `model_best_validation_loss.pth` (normally the checkpoint to
 on their overlays. Directory searches can be made recursive with `RECURSIVE_IMAGE_SEARCH`.
 
 Inference reconstructs the selected U-Net, HRNet, stacked-hourglass, or ViTPose architecture directly from checkpoint metadata. It also restores the training image size,
-channel count and optional three-channel normalisation constants, applies the same image loading, resize and normalisation path used during training, decodes every heatmap by argmax, and scales predictions back into original-image
+channel count and optional three-channel normalisation constants, applies the same image loading, resize and normalisation path used during training, decodes every heatmap by argmax within the valid image area, removes padding offsets and scales predictions back into original-image
 pixel coordinates. When a checkpoint expects three input channels, a single-channel greyscale inference image is replicated across all three channels automatically. Other
 channel mismatches remain errors. No architecture settings need to be copied into the script.
 
@@ -272,8 +272,34 @@ loader, or test results.
 
 ## Choosing an image size
 
-`--image-size HEIGHT WIDTH` is required. Every image and landmark set is resized into this common coordinate system, and every model returns heatmaps at exactly that
-size.
+`--image-size SIZE` is required and accepts one positive integer only. The longest
+image edge is resized to SIZE, preserving aspect ratio up to integer rounding.
+The shorter dimension is rounded to the nearest integer (half upwards, minimum
+one pixel), then centred on a SIZE x SIZE canvas. Odd padding puts the extra pixel
+on the bottom or right. All models return heatmaps on this square canvas.
+
+Landmark pixel centres follow the actual rounded resize dimensions:
+`x_canvas = (x_original + 0.5) * resized_width / original_width - 0.5 + left_padding`
+(and equivalently for y). Gaussian targets are generated at these transformed
+locations and set to zero outside the image content. Sigma is measured in canvas
+pixels. Predictions exclude padding before argmax; offsets and scaling are then
+inverted, and reported coordinates are bounded to original pixel centres.
+
+All four losses (MSE, weighted MSE, Smooth L1 and BCE logits) ignore padding. Loss
+is averaged over valid pixels and landmarks separately for each image, then over
+images in the batch. Hourglass intermediate outputs use exactly the same rule.
+Padding is zero in model-input space: normalisation is applied only to resized
+content, and training-only channel statistics exclude padding. Augmentation occurs
+before letterboxing; validation and inference use the same resize and normalisation.
+
+Visual overlays crop out padding before resizing responses to the source image.
+Raw inference heatmaps are also cropped to resized-content dimensions, without
+resampling their values. Original image dimensions and the exact resize policy
+are available in the summaries/checkpoint metadata for coordinate reconstruction.
+
+Version remains 0.1. The new preprocessing policy and scalar size are required
+in checkpoints; old stretch-resize checkpoints and two-value size arguments are
+unsupported, including for resumption. Train new models with this contract.
 
 Architecture-specific minimum sizes are checked before training:
 
@@ -302,7 +328,7 @@ python -m Heatmaps.utils.calculate_image_size
 The utility prints average and rounded dimensions together with a ready-to-use argument:
 
 ```text
---image-size HEIGHT WIDTH
+--image-size SIZE
 ```
 
 ## Training command
@@ -327,7 +353,7 @@ heatmaps-train 1 1 prostate_transverse true false \
     --fold-lists-path "$HOME/DATA/folds" \
     --mark-list-file "$HOME/DATA/doctors_resampled_transverseMarkList.txt" \
     --image-data-dir "$HOME/DATA/TRANSVERSE" \
-    --image-size 512 512 \
+    --image-size 512 \
     --heatmap-sigma 8 \
     --oversampling-factor 1 \
     --normalise-inputs true \
@@ -415,7 +441,7 @@ The main data options are:
 --fold-lists-path
 --mark-list-file
 --image-data-dir
---image-size HEIGHT WIDTH
+--image-size SIZE
 --heatmap-sigma
 --oversampling-factor
 --recursive-image-search
@@ -486,7 +512,7 @@ The resolved channel count configures the first network layer and is written to 
 
 ### Input-value normalisation
 
-`--normalise-inputs true` calculates a distinct population mean and standard deviation for each of the three channels using only the original images in the selected training split, after conversion to float32 `[0, 1]` and resize to `--image-size`. Validation images and oversampled/augmented copies do not contribute to the statistics.
+`--normalise-inputs true` calculates a distinct population mean and standard deviation for each of the three channels using only the original images in the selected training split, after conversion to float32 `[0, 1]` and aspect-preserving resize, excluding padding. Validation images and oversampled/augmented copies do not contribute to the statistics.
 
 The current ultrasound data may be greyscale stored as RGB, but the calculation intentionally remains three-channel so future colour RGB images follow the same contract. Enabling input normalisation requires exactly three source channels; one- and four-channel training data are rejected rather than collapsed to a single statistic. This option is separate from `--normalisation`, which selects internal CNN normalisation layers such as batch or group normalisation.
 
@@ -653,7 +679,7 @@ Validation export is enabled by default:
 --save-validation-predictions true
 ```
 
-After training, the best checkpoint is reloaded when available; otherwise the last checkpoint is used. Heatmap maxima are converted to resized-image coordinates and then
+After training, the best checkpoint is reloaded when available; otherwise the last checkpoint is used. Heatmap maxima are selected only within image content, padding offsets are removed, and coordinates are
 scaled back into original-image pixels before endpoint errors are calculated.
 
 Set the option to `false` to skip the complete validation export.

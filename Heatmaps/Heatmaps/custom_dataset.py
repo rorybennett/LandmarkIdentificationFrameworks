@@ -10,9 +10,9 @@ import torch
 from torch.utils.data import Dataset
 
 from .heatmap_transforms import get_default_heatmap_transforms
-from .normalisation import ChannelStatistics, normalise_channel_first
+from .normalisation import ChannelStatistics
 from .utils.annotation_utils import read_mark_list, resolve_mark_record, validate_annotation_point_count
-from .utils.io_utils import create_heatmaps, get_image_size, get_split_file_path, load_image_as_float, natural_key, read_split_names, resize_channel_first, resolve_image_path, scale_points, validate_points_within_image
+from .utils.io_utils import prepare_image, remove_padding, valid_content_mask, validate_canvas_size, create_heatmaps, get_image_size, get_split_file_path, load_image_as_float, natural_key, read_split_names, resize_channel_first, resolve_image_path, scale_points, validate_points_within_image
 
 
 @dataclass
@@ -24,7 +24,7 @@ class HeatmapDatasetConfig:
     fold_lists_path: Path
     mark_list_file: Path
     image_data_dir: Path
-    image_size: tuple[int, int]
+    image_size: int
     heatmap_sigma: float
     input_channels: int | None = None
     recursive_image_search: bool = False
@@ -37,6 +37,7 @@ class HeatmapDataset(Dataset):
     """Load full images and generate target heatmaps on demand."""
 
     def __init__(self, config):
+        validate_canvas_size(config.image_size)
         self.config = config
         self.mark_records = read_mark_list(config.mark_list_file)
         self.records = self.build_records()
@@ -57,16 +58,15 @@ class HeatmapDataset(Dataset):
         if is_oversampled and self.oversampling_transform is not None:
             image, original_points = self.oversampling_transform(image=image, points=original_points)
 
-        image = resize_channel_first(image=image, image_size=self.config.image_size)
-
-        if self.config.normalisation_mean is not None:
-            image = normalise_channel_first(image=image, mean=self.config.normalisation_mean,
-                                            standard_deviation=self.config.normalisation_std)
+        image = prepare_image(image, self.config.image_size, self.config.normalisation_mean, self.config.normalisation_std)
+        valid_mask = valid_content_mask([original_size], self.config.image_size)[0]
 
         heatmap_points = scale_points(points=original_points, original_size=original_size, image_size=self.config.image_size)
-        heatmaps = create_heatmaps(points=heatmap_points, image_size=self.config.image_size, sigma=self.config.heatmap_sigma)
+        heatmaps = create_heatmaps(points=heatmap_points, image_size=(self.config.image_size, self.config.image_size), sigma=self.config.heatmap_sigma)
 
-        return {'image': torch.from_numpy(image).float(), 'heatmaps': torch.from_numpy(heatmaps).float(), 'points_original': torch.from_numpy(original_points).float(), 'original_size': torch.from_numpy(original_size).long(), 'sample_name': record['sample_name'], 'image_path': str(record['image_path']), 'is_oversampled': bool(is_oversampled)}
+        heatmaps *= valid_mask.numpy()
+
+        return {'valid_mask': valid_mask, 'image': torch.from_numpy(image).float(), 'heatmaps': torch.from_numpy(heatmaps).float(), 'points_original': torch.from_numpy(original_points).float(), 'original_size': torch.from_numpy(original_size).long(), 'sample_name': record['sample_name'], 'image_path': str(record['image_path']), 'is_oversampled': bool(is_oversampled)}
 
     def resolve_oversampling_factor(self):
         """Return the active oversampling factor for this split."""
@@ -85,7 +85,7 @@ class HeatmapDataset(Dataset):
         if self.config.input_channels is None:
             raise ValueError('input_channels must be resolved before validating dataset records.')
 
-        image_height, image_width = map(int, self.config.image_size)
+        image_height = image_width = self.config.image_size
         expected_image_shape = (int(self.config.input_channels), image_height, image_width)
         expected_heatmap_shape = (int(self.config.num_of_points), image_height, image_width)
 
@@ -116,8 +116,9 @@ class HeatmapDataset(Dataset):
 
         for record in self.records:
             image = load_image_as_float(record['image_path'], input_channels=self.config.input_channels)
+            original_size = image.shape[-2:]
             image = resize_channel_first(image=image, image_size=self.config.image_size)
-            statistics.update(image)
+            statistics.update(remove_padding(image, original_size, self.config.image_size))
 
         return statistics.finalise()
 

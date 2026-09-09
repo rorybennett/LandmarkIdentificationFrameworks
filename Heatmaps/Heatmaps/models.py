@@ -357,16 +357,16 @@ class StackedHourglassHeatmap(OutputActivationMixin, nn.Module):
 class ViTPoseHeatmap(OutputActivationMixin, nn.Module):
     """Plain Vision Transformer backbone with a lightweight heatmap decoder."""
 
-    def __init__(self, num_of_points, input_channels=1, image_size=(512, 512), vit_patch_size=16, vit_embed_dim=384, vit_depth=8, vit_heads=6, vit_mlp_ratio=4.0, vit_dropout=0.0, vit_decoder_channels=256, output_activation='none', final_kernel_size=1):
+    def __init__(self, num_of_points, input_channels=1, image_size=512, vit_patch_size=16, vit_embed_dim=384, vit_depth=8, vit_heads=6, vit_mlp_ratio=4.0, vit_dropout=0.0, vit_decoder_channels=256, output_activation='none', final_kernel_size=1):
         super().__init__()
         validate_vitpose_args(num_of_points=num_of_points, input_channels=input_channels, image_size=image_size, vit_patch_size=vit_patch_size,
                               vit_embed_dim=vit_embed_dim, vit_depth=vit_depth, vit_heads=vit_heads, vit_mlp_ratio=vit_mlp_ratio,
                               vit_dropout=vit_dropout, vit_decoder_channels=vit_decoder_channels, final_kernel_size=final_kernel_size)
         self.num_of_points = int(num_of_points)
         self.input_channels = int(input_channels)
-        self.image_size = tuple(int(value) for value in image_size)
+        self.image_size = int(image_size)
         self.patch_size = int(vit_patch_size)
-        self.grid_size = (math.ceil(self.image_size[0] / self.patch_size), math.ceil(self.image_size[1] / self.patch_size))
+        self.grid_size = (math.ceil(self.image_size / self.patch_size),) * 2
         self.configure_output_activation(output_activation)
         embed_dim = int(vit_embed_dim)
         decoder_channels = int(vit_decoder_channels)
@@ -549,15 +549,13 @@ def validate_hourglass_args(num_of_points, input_channels, hourglass_features, h
 def validate_vitpose_args(num_of_points, input_channels, image_size, vit_patch_size, vit_embed_dim, vit_depth, vit_heads, vit_mlp_ratio, vit_dropout, vit_decoder_channels, final_kernel_size):
     """Validate ViTPose construction values."""
     validate_common_model_args(num_of_points, input_channels, vit_dropout, final_kernel_size)
-    image_size = tuple(int(value) for value in image_size)
-
-    if len(image_size) != 2 or min(image_size) < 1:
-        raise ValueError('image_size must contain two positive values.')
+    from .utils.io_utils import validate_canvas_size
+    image_size = validate_canvas_size(image_size)
 
     if int(vit_patch_size) < 2 or int(vit_patch_size) & (int(vit_patch_size) - 1):
         raise ValueError('vit_patch_size must be a power of two greater than or equal to 2.')
 
-    if min(image_size) < int(vit_patch_size):
+    if image_size < int(vit_patch_size):
         raise ValueError('Both image dimensions must be at least vit_patch_size.')
 
     if int(vit_embed_dim) < 8:

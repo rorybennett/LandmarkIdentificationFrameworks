@@ -7,6 +7,8 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+from .io_utils import remove_padding
+
 GROUND_TRUTH_POINT_COLOUR = (0, 255, 0)
 PREDICTED_POINT_COLOUR = (0, 0, 255)
 # Shared landmark order (OpenCV BGR): red, blue, yellow, green, cyan, magenta, orange, purple.
@@ -65,6 +67,7 @@ def resize_heatmaps_to_display(heatmaps, display_shape):
 
 def create_combined_heatmap_overlay(display_image, heatmaps, predicted_points=None):
     """Overlay all predicted heatmaps on one image and label predicted endpoints."""
+    heatmaps = remove_padding(heatmaps, display_image.shape[:2], int(heatmaps.shape[-1]))
     heatmaps = resize_heatmaps_to_display(heatmaps=heatmaps, display_shape=display_image.shape)
     colour_layer = np.zeros_like(display_image, dtype=np.float32)
 

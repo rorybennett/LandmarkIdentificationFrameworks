@@ -447,20 +447,82 @@ def validate_image_value_range(image, image_path=None):
     return image
 
 
+LETTERBOX_POLICY = {
+    'mode': 'longest_edge_centred_square',
+    'interpolation': 'INTER_AREA',
+    'rounding': 'nearest_half_up_minimum_one',
+    'coordinates': 'pixel_centres',
+    'padding': 'zero_after_normalisation',
+    'normalisation_statistics': 'resized_content_only',
+    'loss': 'valid_pixel_mean_per_image_then_batch_mean',
+    'prediction': 'valid_content_argmax',
+}
+
+
+def validate_canvas_size(image_size):
+    """Require the single positive integer used by the new preprocessing contract."""
+    if isinstance(image_size, bool) or not isinstance(image_size, (int, np.integer)) or image_size < 1:
+        raise ValueError('image_size must be one positive integer (longest edge and square canvas size).')
+    return int(image_size)
+
+
+def letterbox_geometry(original_size, image_size):
+    """Return resized height/width and centred top/left offsets."""
+    size = validate_canvas_size(image_size)
+    height, width = map(int, original_size)
+    if min(height, width) < 1:
+        raise ValueError('Original image dimensions must be positive.')
+    scale = size / max(height, width)
+    resized_height = max(1, int(np.floor(height * scale + 0.5)))
+    resized_width = max(1, int(np.floor(width * scale + 0.5)))
+    return resized_height, resized_width, (size - resized_height) // 2, (size - resized_width) // 2
+
+
+def remove_padding(array, original_size, image_size):
+    """Crop a channel-first canvas to its resized image content."""
+    height, width, top, left = letterbox_geometry(original_size, image_size)
+    if tuple(array.shape[-2:]) != (image_size, image_size):
+        raise ValueError('Expected a square letterboxed canvas.')
+    return array[..., top:top + height, left:left + width]
+
+
 def resize_channel_first(image, image_size):
-    """Resize a channel-first image."""
-    target_height, target_width = map(int, image_size)
-    channels = [cv2.resize(channel, (target_width, target_height), interpolation=cv2.INTER_AREA) for channel in image]
-    return np.stack(channels, axis=0).astype(np.float32)
+    """Preserve aspect ratio and centre resized content on a zero-filled square."""
+    size = validate_canvas_size(image_size)
+    height, width, top, left = letterbox_geometry(image.shape[-2:], size)
+    channels = [cv2.resize(channel, (width, height), interpolation=cv2.INTER_AREA) for channel in image]
+    canvas = np.zeros((image.shape[0], size, size), dtype=np.float32)
+    canvas[:, top:top + height, left:left + width] = np.stack(channels)
+    return canvas
+
+
+def prepare_image(image, image_size, mean=None, standard_deviation=None):
+    """Use identical resizing and zero-after-normalisation padding in every pipeline."""
+    from ..normalisation import normalise_channel_first
+    original_size = image.shape[-2:]
+    canvas = resize_channel_first(image, image_size)
+    content = remove_padding(canvas, original_size, image_size)
+    if mean is not None:
+        content[:] = normalise_channel_first(content, mean, standard_deviation)
+    return canvas
 
 
 def scale_points(points, original_size, image_size):
-    """Scale xy points from original image size to training image size."""
+    """Map original pixel centres to rounded resized-content pixels plus padding."""
+    height, width, top, left = letterbox_geometry(original_size, image_size)
     original_height, original_width = original_size
-    target_height, target_width = image_size
-    scale_x = float(target_width) / float(original_width)
-    scale_y = float(target_height) / float(original_height)
-    return np.asarray([(float(x) * scale_x, float(y) * scale_y) for x, y in points], dtype=np.float32)
+    scale = np.asarray([width / original_width, height / original_height], dtype=np.float32)
+    return (np.asarray(points, dtype=np.float32) + 0.5) * scale - 0.5 + np.asarray([left, top], dtype=np.float32)
+
+
+def valid_content_mask(original_sizes, image_size, device=None):
+    """Build [batch, 1, size, size] masks from the exact rounded resize geometry."""
+    size = validate_canvas_size(image_size)
+    masks = torch.zeros((len(original_sizes), 1, size, size), dtype=torch.bool, device=device)
+    for index, original_size in enumerate(original_sizes):
+        height, width, top, left = letterbox_geometry(original_size, size)
+        masks[index, :, top:top + height, left:left + width] = True
+    return masks
 
 
 def create_heatmaps(points, image_size, sigma):
@@ -477,21 +539,25 @@ def create_heatmaps(points, image_size, sigma):
     return heatmaps
 
 
-def heatmaps_to_points(heatmaps):
-    """Convert heatmaps to xy points using the maximum response."""
+def heatmaps_to_points(heatmaps, original_sizes, image_size):
+    """Select maxima only inside resized image content, never padding."""
     batch_size, num_points, height, width = heatmaps.shape
-    flat_indices = torch.argmax(heatmaps.reshape(batch_size, num_points, height * width), dim=2)
+    if (height, width) != (image_size, image_size):
+        raise ValueError('Heatmap shape does not match the square canvas.')
+    mask = valid_content_mask(original_sizes, image_size, heatmaps.device)
+    values = heatmaps.masked_fill(~mask, -torch.inf)
+    flat_indices = torch.argmax(values.reshape(batch_size, num_points, height * width), dim=2)
     y = torch.div(flat_indices, width, rounding_mode='floor').float()
     x = (flat_indices % width).float()
     return torch.stack((x, y), dim=2)
 
 
 def scale_points_to_original(points, original_sizes, image_size):
-    """Scale predicted resized points back to original image coordinates."""
-    target_height, target_width = map(float, image_size)
-    original_height = original_sizes[:, 0].float().to(points.device)
-    original_width = original_sizes[:, 1].float().to(points.device)
+    """Remove padding and invert the pixel-centre resize for final reporting."""
     scaled = points.clone()
-    scaled[:, :, 0] = scaled[:, :, 0] * (original_width[:, None] / target_width)
-    scaled[:, :, 1] = scaled[:, :, 1] * (original_height[:, None] / target_height)
+    for index, original_size in enumerate(original_sizes):
+        original_height, original_width = map(int, original_size)
+        height, width, top, left = letterbox_geometry(original_size, image_size)
+        scaled[index, :, 0] = ((points[index, :, 0] - left + 0.5) * original_width / width - 0.5).clamp(0, original_width - 1)
+        scaled[index, :, 1] = ((points[index, :, 1] - top + 0.5) * original_height / height - 0.5).clamp(0, original_height - 1)
     return scaled

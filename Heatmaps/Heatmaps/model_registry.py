@@ -94,6 +94,8 @@ def build_heatmap_model(network_name, num_of_points, input_channels, image_size,
     if network_name not in AVAILABLE_MODELS:
         raise ValueError(f'Unknown heatmap model: {network_name}')
 
+    from .utils.io_utils import validate_canvas_size
+    image_size = validate_canvas_size(image_size)
     model_info = AVAILABLE_MODELS[network_name]
     model_kwargs = {field: kwargs[field] for field in model_info['config_fields']}
 

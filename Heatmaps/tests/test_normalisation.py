@@ -38,7 +38,7 @@ class HeatmapNormalisationTests(unittest.TestCase):
             dataset = HeatmapDataset.__new__(HeatmapDataset)
             dataset.config = HeatmapDatasetConfig(
                 repetition=1, fold=1, split_name='training', num_of_points=1, fold_lists_path=root,
-                mark_list_file=root / 'marks.txt', image_data_dir=root, image_size=(2, 2), heatmap_sigma=1.0,
+                mark_list_file=root / 'marks.txt', image_data_dir=root, image_size=2, heatmap_sigma=1.0,
                 input_channels=3,
             )
             dataset.records = [{'image_path': first_path}, {'image_path': second_path}]

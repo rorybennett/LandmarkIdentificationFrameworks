@@ -14,11 +14,11 @@ from Heatmaps.train_model import HeatmapModelConfig
 from Heatmaps.utils.heatmap_inference_utils import (build_config_from_checkpoint_metadata, build_image_records,
                                                     load_inference_image_as_float, load_model_from_checkpoint,
                                                     run_heatmap_inference_for_records)
-from Heatmaps.utils.io_utils import load_image_as_float
+from Heatmaps.utils.io_utils import LETTERBOX_POLICY, load_image_as_float
 
 
 class StandaloneInferenceTests(unittest.TestCase):
-    image_size = (16, 16)
+    image_size = 16
     num_points = 2
     input_channels = 1
 
@@ -59,7 +59,7 @@ class StandaloneInferenceTests(unittest.TestCase):
         init_args = {'num_of_points': self.num_points, 'input_channels': input_channels, **model_kwargs}
 
         if network_name == 'vitpose':
-            init_args['image_size'] = list(self.image_size)
+            init_args['image_size'] = self.image_size
 
         metadata = {
             'schema': 'heatmap_checkpoint_metadata',
@@ -68,7 +68,7 @@ class StandaloneInferenceTests(unittest.TestCase):
             'model': {'registry_name': network_name, 'init_args': init_args},
             'data': {'repetition': 2, 'fold': 3},
             'preprocessing': {
-                'image_size': {'height': self.image_size[0], 'width': self.image_size[1]},
+                'image_size': self.image_size, 'resize': dict(LETTERBOX_POLICY),
                 'input_channels': input_channels,
                 'normalisation': normalisation,
             },
@@ -105,9 +105,9 @@ class StandaloneInferenceTests(unittest.TestCase):
                 with self.subTest(network_name=network_name):
                     checkpoint_path = self.write_checkpoint(root, network_name)
                     loaded = load_model_from_checkpoint(checkpoint_path, device='cpu')
-                    model_output = loaded.model(torch.zeros((1, self.input_channels, *self.image_size)))
+                    model_output = loaded.model(torch.zeros((1, self.input_channels, self.image_size, self.image_size)))
                     heatmaps, _ = unpack_heatmap_output(model_output)
-                    self.assertEqual(tuple(heatmaps.shape), (1, self.num_points, *self.image_size))
+                    self.assertEqual(tuple(heatmaps.shape), (1, self.num_points, self.image_size, self.image_size))
                     self.assertEqual(loaded.metadata['network_name'], network_name)
 
     def test_inference_replicates_greyscale_images_for_rgb_models(self):
@@ -161,7 +161,7 @@ class StandaloneInferenceTests(unittest.TestCase):
             }
             self.assertTrue(expected_files.issubset({path.name for path in output_dir.iterdir()}))
             raw_heatmaps = np.load(output_dir / 'inference_raw_heatmaps' / 'patient_inference_heatmaps.npy')
-            self.assertEqual(raw_heatmaps.shape, (self.num_points, *self.image_size))
+            self.assertEqual(raw_heatmaps.shape, (self.num_points, self.image_size, self.image_size))
             self.assertTrue((output_dir / 'inference_logs' / 'inference_run_metadata.json').is_file())
 
 

@@ -14,7 +14,7 @@ from pathlib import Path
 from . import parameters as pms
 from .model_registry import get_available_model_names, get_model_config_fields
 from .train_model import HeatmapDataConfig, HeatmapModelConfig, TrainConfig, TrainModel
-from .utils.io_utils import ALL_FOLD_NAME, discover_fold_numbers, discover_repetition_numbers, get_split_file_path, is_all_fold, normalise_fold, str_to_bool, validate_fold_split_overlaps, validate_repeated_kfold_lists
+from .utils.io_utils import LETTERBOX_POLICY, ALL_FOLD_NAME, discover_fold_numbers, discover_repetition_numbers, get_split_file_path, is_all_fold, normalise_fold, str_to_bool, validate_fold_split_overlaps, validate_repeated_kfold_lists
 
 RESULTS_DIR_NAME = 'TRAINING_RESULTS'
 MIN_POINTS_PER_IMAGE = 1
@@ -351,10 +351,7 @@ def validate_args(args, num_of_repetitions, num_of_folds):
     if not args.image_data_dir.is_dir():
         raise ValueError(f'--image-data-dir does not exist or is not a directory: {args.image_data_dir}')
 
-    if len(args.image_size) != 2:
-        raise ValueError('--image-size must contain exactly two values: HEIGHT WIDTH.')
-
-    image_height, image_width = args.image_size
+    image_height = image_width = args.image_size
 
     if image_height < 1 or image_width < 1:
         raise ValueError('--image-size values must be at least 1.')
@@ -535,13 +532,14 @@ def calculate_fold_collection_sha256(fold_lists_path, repetition_numbers, fold_n
 
 def build_run_name(args, num_of_repetitions, num_of_folds, fold_collection_sha256):
     """Build a deterministic folder name shared by every repetition and fold in one experiment."""
-    height, width = args.image_size
+    height = width = args.image_size
     fingerprint_payload = {
         'num_of_repetitions': num_of_repetitions,
         'num_of_folds_per_repetition': num_of_folds,
         'fold_collection_sha256': fold_collection_sha256,
         'num_points': args.num_points,
-        'image_size': list(args.image_size),
+        'image_size': args.image_size,
+        'resize': dict(LETTERBOX_POLICY),
         'heatmap_sigma': args.heatmap_sigma,
         'oversampling_factor': args.oversampling_factor,
         'recursive_image_search': args.recursive_image_search,
@@ -617,8 +615,8 @@ def parse_args():
                         help='Root containing repetition_N directories with training_fN.txt and val_fN.txt files, plus optional training_fall.txt and val_fall.txt files.')
     parser.add_argument('--mark-list-file', type=Path, required=True, help='Landmark mark-list file.')
     parser.add_argument('--image-data-dir', type=Path, required=True, help='Directory containing source images.')
-    parser.add_argument('--image-size', type=int, nargs=2, required=True, metavar=('HEIGHT', 'WIDTH'),
-                        help='Training image size in HEIGHT WIDTH order. Use Heatmaps.utils.calculate_image_size to estimate a sensible value.')
+    parser.add_argument('--image-size', type=int, required=True, metavar='SIZE',
+                        help='Longest edge and square padded canvas size in pixels; aspect ratio is preserved.')
     parser.add_argument('--heatmap-sigma', type=float, default=pms.heatmap_sigma, help='Gaussian sigma for target heatmaps.')
     parser.add_argument('--oversampling-factor', type=int, default=1,
                         help='Training-set multiplier. A value of 1 uses each image once; values above 1 add augmented copies using Heatmaps/Heatmaps/heatmap_transforms.py.')
@@ -713,7 +711,7 @@ def build_configs(args):
                            fold_collection_sha256=fold_collection_sha256, resume_training=args.resume_training)
     data_config = HeatmapDataConfig(repetition=args.repetition, fold=args.fold, task_name=task_name, num_of_points=args.num_points,
                                     fold_lists_path=args.fold_lists_path,
-                                    mark_list_file=args.mark_list_file, image_data_dir=args.image_data_dir, image_size=tuple(args.image_size),
+                                    mark_list_file=args.mark_list_file, image_data_dir=args.image_data_dir, image_size=args.image_size,
                                      heatmap_sigma=args.heatmap_sigma, input_channels=None, recursive_image_search=args.recursive_image_search,
                                      oversampling_factor=args.oversampling_factor, fold_collection_sha256=fold_collection_sha256,
                                      normalise_inputs=args.normalise_inputs)

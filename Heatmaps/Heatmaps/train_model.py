@@ -31,7 +31,7 @@ from .model_registry import build_heatmap_model, get_model_config_fields, get_mo
 from .models import count_trainable_parameters, unpack_heatmap_output
 from .normalisation import EXPECTED_NORMALISATION_CHANNELS, validate_normalisation_constants
 from .runtime_metadata import collect_runtime_metadata, utc_now_iso
-from .utils.io_utils import get_split_file_path, heatmaps_to_points, infer_image_channel_count, normalise_fold, safe_file_stem, scale_points_to_original
+from .utils.io_utils import LETTERBOX_POLICY, validate_canvas_size, get_split_file_path, heatmaps_to_points, infer_image_channel_count, normalise_fold, safe_file_stem, scale_points_to_original
 from .utils.progress_bar import ProgressBar
 from .utils.visualisation_utils import save_validation_overlays
 
@@ -75,7 +75,7 @@ class HeatmapDataConfig:
     fold_lists_path: Path
     mark_list_file: Path
     image_data_dir: Path
-    image_size: tuple[int, int]
+    image_size: int
     heatmap_sigma: float = 8.0
     input_channels: int | None = None
     recursive_image_search: bool = False
@@ -148,7 +148,7 @@ class WeightedMSELoss(nn.Module):
 
     def forward(self, outputs, targets):
         weights = 1.0 + targets * self.positive_weight
-        return torch.mean(weights * (outputs - targets) ** 2)
+        return weights * (outputs - targets) ** 2
 
 
 class TrainModel:
@@ -403,7 +403,7 @@ class TrainModel:
             with torch.amp.autocast('cuda', enabled=self.train_config.use_amp and self.device.type == 'cuda'):
                 model_output = model(images)
                 outputs, auxiliary_outputs = unpack_heatmap_output(model_output)
-                loss = self.calculate_model_loss(outputs=outputs, auxiliary_outputs=auxiliary_outputs, targets=targets, criterion=criterion)
+                loss = self.calculate_model_loss(outputs=outputs, auxiliary_outputs=auxiliary_outputs, targets=targets, criterion=criterion, valid_mask=batch['valid_mask'].to(self.device))
 
             scaler.scale(loss).backward()
             scaler.step(optimiser)
@@ -430,7 +430,7 @@ class TrainModel:
                 original_size = batch['original_size'].to(self.device, non_blocking=True)
                 model_output = model(images)
                 outputs, auxiliary_outputs = unpack_heatmap_output(model_output)
-                loss = self.calculate_model_loss(outputs=outputs, auxiliary_outputs=auxiliary_outputs, targets=targets, criterion=criterion)
+                loss = self.calculate_model_loss(outputs=outputs, auxiliary_outputs=auxiliary_outputs, targets=targets, criterion=criterion, valid_mask=batch['valid_mask'].to(self.device))
                 batch_error = self.calculate_batch_error(outputs=outputs, points_original=points_original, original_size=original_size)
                 total_loss += loss.item() * images.size(0)
                 total_error_px += batch_error.sum().item()
@@ -469,7 +469,7 @@ class TrainModel:
                 original_size = batch['original_size'].to(self.device, non_blocking=True)
                 model_output = model(images)
                 outputs, _ = unpack_heatmap_output(model_output)
-                predicted_resized = heatmaps_to_points(outputs)
+                predicted_resized = heatmaps_to_points(outputs, original_size, self.data_config.image_size)
                 predicted_original = scale_points_to_original(points=predicted_resized, original_sizes=original_size, image_size=self.data_config.image_size)
                 errors = torch.linalg.norm(predicted_original - points_original, dim=2)
 
@@ -637,14 +637,21 @@ class TrainModel:
                                     input_channels=int(self.data_config.input_channels), image_size=self.data_config.image_size, **model_kwargs)
         return model.to(self.device)
 
-    def calculate_model_loss(self, outputs, auxiliary_outputs, targets, criterion):
-        """Calculate final and optional intermediate-supervision losses."""
-        loss = criterion(outputs, targets)
+    def calculate_model_loss(self, outputs, auxiliary_outputs, targets, criterion, valid_mask):
+        """Average valid pixels per image, then images; apply the same rule to every head."""
+        mask = valid_mask.to(device=outputs.device, dtype=torch.bool).expand_as(targets)
+        counts = mask.sum(dim=(1, 2, 3))
+        if torch.any(counts == 0):
+            raise ValueError('Every image must contain valid pixels.')
 
+        def masked_loss(prediction):
+            # Mask before evaluating the criterion, preventing padding values affecting gradients.
+            values = criterion(prediction.masked_fill(~mask, 0), targets.masked_fill(~mask, 0))
+            return (values.masked_fill(~mask, 0).sum(dim=(1, 2, 3)) / counts).mean()
+
+        loss = masked_loss(outputs)
         if auxiliary_outputs and float(self.model_config.auxiliary_loss_weight) > 0:
-            auxiliary_loss = torch.stack([criterion(auxiliary_output, targets) for auxiliary_output in auxiliary_outputs]).mean()
-            loss = loss + float(self.model_config.auxiliary_loss_weight) * auxiliary_loss
-
+            loss = loss + float(self.model_config.auxiliary_loss_weight) * torch.stack([masked_loss(value) for value in auxiliary_outputs]).mean()
         return loss
 
     def build_criterion(self):
@@ -652,16 +659,16 @@ class TrainModel:
         loss_name = str(self.train_config.loss_name).lower()
 
         if loss_name == 'mse':
-            return nn.MSELoss()
+            return nn.MSELoss(reduction='none')
 
         if loss_name == 'weighted_mse':
             return WeightedMSELoss(positive_weight=self.train_config.positive_weight)
 
         if loss_name == 'smooth_l1':
-            return nn.SmoothL1Loss()
+            return nn.SmoothL1Loss(reduction='none')
 
         if loss_name == 'bce_logits':
-            return nn.BCEWithLogitsLoss()
+            return nn.BCEWithLogitsLoss(reduction='none')
 
         raise ValueError(f'Unknown loss_name: {self.train_config.loss_name}')
 
@@ -694,7 +701,7 @@ class TrainModel:
 
     def calculate_batch_error(self, outputs, points_original, original_size):
         """Calculate endpoint error in original image pixels."""
-        predicted_resized = heatmaps_to_points(outputs)
+        predicted_resized = heatmaps_to_points(outputs, original_size, self.data_config.image_size)
         predicted_original = scale_points_to_original(points=predicted_resized, original_sizes=original_size, image_size=self.data_config.image_size)
         return torch.linalg.norm(predicted_original - points_original, dim=2)
 
@@ -751,6 +758,10 @@ class TrainModel:
     def load_checkpoint_state(self, model, checkpoint_path):
         """Load checkpoint weights into a model."""
         checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
+        from .utils.heatmap_inference_utils import extract_inference_metadata_from_checkpoint
+        metadata = extract_inference_metadata_from_checkpoint(checkpoint)
+        if metadata['image_size'] != self.data_config.image_size:
+            raise ValueError('Checkpoint canvas size does not match the configured size.')
 
         state_dict = checkpoint.get('state_dict') if isinstance(checkpoint, dict) else None
 
@@ -789,13 +800,13 @@ class TrainModel:
         data_config = self.serialise(asdict(self.data_config))
         train_config = self.serialise(asdict(self.train_config))
         model_config = self.serialise(asdict(self.model_config))
-        image_height, image_width = [int(value) for value in self.data_config.image_size]
+        image_height = image_width = validate_canvas_size(self.data_config.image_size)
         input_channels = None if self.data_config.input_channels is None else int(self.data_config.input_channels)
         model_init_config = self.serialise(get_model_kwargs(self.model_config.network_name, self.model_config))
         model_init_args = {'num_of_points': int(self.data_config.num_of_points), 'input_channels': input_channels, **model_init_config}
 
         if self.model_config.network_name == 'vitpose':
-            model_init_args['image_size'] = [image_height, image_width]
+            model_init_args['image_size'] = self.data_config.image_size
 
         registry_entry = get_model_registry_entry(self.model_config.network_name)
 
@@ -812,13 +823,13 @@ class TrainModel:
                      'fold_lists_path': str(self.data_config.fold_lists_path),
                      'mark_list_file': str(self.data_config.mark_list_file), 'image_data_dir': str(self.data_config.image_data_dir),
                      'recursive_image_search': bool(self.data_config.recursive_image_search), 'input_channels': input_channels},
-            'preprocessing': {'image_size': {'height': image_height, 'width': image_width}, 'heatmap_sigma': float(self.data_config.heatmap_sigma),
+            'preprocessing': {'image_size': self.data_config.image_size, 'heatmap_sigma': float(self.data_config.heatmap_sigma),
                               'input_channels': input_channels, 'tensor_shape': ['batch', input_channels, image_height, image_width],
                               'channel_order': 'channels_first', 'loaded_image_value_range': 'float32_0_to_1',
                               'model_input_values': ('three_channel_standardised' if self.data_config.normalise_inputs else 'float32_0_to_1'),
                               'normalisation': self.build_normalisation_metadata(),
-                              'resize': {'library': 'cv2.resize', 'interpolation': 'INTER_AREA'},
-                              'target_heatmaps': {'channels': int(self.data_config.num_of_points), 'generation': 'normalised_gaussian_per_landmark'}},
+                              'resize': dict(LETTERBOX_POLICY),
+                              'target_heatmaps': {'channels': int(self.data_config.num_of_points), 'generation': 'normalised_gaussian_per_landmark_masked_to_content'}},
             'inference': {'heatmap_to_point': 'argmax', 'output_coordinate_space': 'original_image_pixels', 'scale_back_to_original': True,
                           'resized_coordinate_space': {'height': image_height, 'width': image_width}},
             'augmentation': self.build_augmentation_metadata(),
@@ -841,7 +852,7 @@ class TrainModel:
             'source': 'training_split_images' if self.data_config.normalise_inputs else 'disabled',
             'statistic': 'population',
             'calculated_from': 'training_split_only' if self.data_config.normalise_inputs else None,
-            'calculation_inputs': 'unaugmented_float32_0_to_1_training_images_after_resize',
+            'calculation_inputs': 'unaugmented_float32_0_to_1_resized_training_content_excluding_padding',
         }
 
     def build_checkpoint_metadata(self, checkpoint_type, epoch, validation_metrics):
@@ -916,6 +927,9 @@ class TrainModel:
         """Reject incomplete, completed, or configuration-incompatible resume checkpoints."""
         if not isinstance(checkpoint, dict):
             raise ValueError(f'Resume checkpoint is not a structured Heatmaps checkpoint: {checkpoint_path}')
+
+        from .utils.heatmap_inference_utils import extract_inference_metadata_from_checkpoint
+        extract_inference_metadata_from_checkpoint(checkpoint)
 
         if checkpoint.get('format_version') != CHECKPOINT_FORMAT_VERSION or checkpoint.get('schema_version') != CHECKPOINT_SCHEMA_VERSION:
             raise ValueError(
@@ -1096,7 +1110,7 @@ class TrainModel:
                 'image_data_dir': str(Path(self.data_config.image_data_dir).resolve()),
                 'training_images_sha256': self.sha256_dataset_images(training_loader.dataset),
                 'validation_images_sha256': self.sha256_dataset_images(validation_loader.dataset),
-                'image_size': [int(value) for value in self.data_config.image_size],
+                'image_size': self.data_config.image_size, 'resize': dict(LETTERBOX_POLICY),
                 'heatmap_sigma': float(self.data_config.heatmap_sigma),
                 'input_channels': int(self.data_config.input_channels),
                 'recursive_image_search': bool(self.data_config.recursive_image_search),
@@ -1421,10 +1435,7 @@ class TrainModel:
         if int(self.data_config.num_of_points) < MIN_POINTS_PER_IMAGE or int(self.data_config.num_of_points) > MAX_POINTS_PER_IMAGE:
             raise ValueError(f'num_of_points must be between {MIN_POINTS_PER_IMAGE} and {MAX_POINTS_PER_IMAGE}. Got: {self.data_config.num_of_points}')
 
-        if len(tuple(self.data_config.image_size)) != 2:
-            raise ValueError('image_size must be a two-item tuple: height, width.')
-
-        image_height, image_width = (int(value) for value in self.data_config.image_size)
+        image_height = image_width = validate_canvas_size(self.data_config.image_size)
 
         if image_height < 1 or image_width < 1:
             raise ValueError(f'image_size values must be positive. Got: {self.data_config.image_size}')
