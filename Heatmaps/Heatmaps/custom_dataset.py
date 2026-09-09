@@ -27,6 +27,7 @@ class HeatmapDatasetConfig:
     image_size: int
     heatmap_sigma: float
     input_channels: int | None = None
+    enforce_greyscale: bool = False
     recursive_image_search: bool = False
     oversampling_factor: int = 1
     normalisation_mean: tuple[float, float, float] | None = None
@@ -51,7 +52,7 @@ class HeatmapDataset(Dataset):
         original_index = int(index) % len(self.records)
         is_oversampled = int(index) >= len(self.records)
         record = self.records[original_index]
-        image = load_image_as_float(record['image_path'], input_channels=self.config.input_channels)
+        image = load_image_as_float(record['image_path'], input_channels=self.config.input_channels, enforce_greyscale=self.config.enforce_greyscale)
         original_size = np.asarray(image.shape[1:3], dtype=np.int64)
         original_points = np.asarray(record['points'], dtype=np.float32)
 
@@ -115,7 +116,7 @@ class HeatmapDataset(Dataset):
         statistics = ChannelStatistics()
 
         for record in self.records:
-            image = load_image_as_float(record['image_path'], input_channels=self.config.input_channels)
+            image = load_image_as_float(record['image_path'], input_channels=self.config.input_channels, enforce_greyscale=self.config.enforce_greyscale)
             original_size = image.shape[-2:]
             image = resize_channel_first(image=image, image_size=self.config.image_size)
             statistics.update(remove_padding(image, original_size, self.config.image_size))

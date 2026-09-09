@@ -11,6 +11,7 @@ import numpy as np
 import torch
 from skimage import io
 from skimage.util import img_as_float32
+from ..greyscale import to_three_channel_greyscale
 
 REPETITION_DIR_PATTERN = re.compile(r'^repetition_(\d+)$')
 TRAINING_LIST_PATTERN = re.compile(r'^training_f(\d+)\.txt$')
@@ -423,10 +424,12 @@ def convert_channels_if_needed(image, input_channels, image_path=None):
     return image
 
 
-def load_image_as_float(image_path, input_channels):
+def load_image_as_float(image_path, input_channels, enforce_greyscale=False):
     """Load an image as channel-first float32 in the requested channel count."""
     image = img_as_float32(io.imread(image_path))
     validate_image_value_range(image=image, image_path=image_path)
+    if enforce_greyscale:
+        image = to_three_channel_greyscale(image)
     image = convert_channels_if_needed(image=image, input_channels=input_channels, image_path=image_path)
     return np.moveaxis(image, -1, 0).astype(np.float32)
 

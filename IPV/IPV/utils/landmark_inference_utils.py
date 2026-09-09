@@ -59,6 +59,7 @@ class LandmarkInferenceConfig:
     angle_intervals: list
     grid_spacing: int
     input_channels: int
+    enforce_greyscale: bool = False
     task_name: str = ''
     repetition: int | None = None
     fold: int | str | None = None
@@ -144,6 +145,8 @@ class LandmarkImageInferer:
         config.num_points = int(config.num_points)
         config.grid_spacing = int(config.grid_spacing)
         config.input_channels = int(config.input_channels)
+        if config.enforce_greyscale and config.input_channels != 3:
+            raise ValueError('Enforced greyscale requires three input channels.')
         config.batch_size = int(config.batch_size)
         config.smoothing_sigma = float(config.smoothing_sigma)
         config.sub_patch_scales = [int(scale) for scale in config.sub_patch_scales]
@@ -235,7 +238,7 @@ class LandmarkImageInferer:
     def infer_record(self, record):
         """Run inference for one image and save per-image visual outputs."""
         record = LandmarkImageRecord(sample_name=record.sample_name, image_path=Path(record.image_path), ground_truth_points=record.ground_truth_points)
-        image = load_input_image(record.image_path, input_channels=self.config.input_channels)
+        image = load_input_image(record.image_path, input_channels=self.config.input_channels, enforce_greyscale=self.config.enforce_greyscale)
         display_image = load_display_image(record.image_path)
         centres = list(create_centres(image_shape=image.shape, step_size=self.config.grid_spacing))
 
@@ -568,10 +571,13 @@ def read_mark_list(mark_list_path, expected_points, selected_sample_names=None):
     return mark_records
 
 
-def load_input_image(image_path, input_channels):
+def load_input_image(image_path, input_channels, enforce_greyscale=False):
     """Load one source image as float32 HWC and match the model channel count."""
     image = io.imread(image_path)
     image = img_as_float32(image)
+    if enforce_greyscale:
+        from ..greyscale import to_three_channel_greyscale
+        image = to_three_channel_greyscale(image)
 
     if image.ndim == 2:
         image = image[:, :, np.newaxis]
@@ -1189,6 +1195,10 @@ def extract_inference_metadata_from_checkpoint(checkpoint):
     task_metadata = require_dict(metadata, 'task')
     model_metadata = require_dict(metadata, 'model')
     preprocessing_metadata = require_dict(metadata, 'preprocessing')
+    if type(preprocessing_metadata.get('enforce_greyscale')) is not bool:
+        raise ValueError('Checkpoint must declare the enforce_greyscale preprocessing policy.')
+    if preprocessing_metadata['enforce_greyscale'] and int(preprocessing_metadata['input_channels']) != 3:
+        raise ValueError('Enforced greyscale requires three input channels.')
     inference_metadata = require_dict(metadata, 'inference')
     data_metadata = metadata.get('data', {}) if isinstance(metadata.get('data', {}), dict) else {}
     init_args = require_dict(model_metadata, 'init_args')
@@ -1244,7 +1254,7 @@ def extract_inference_metadata_from_checkpoint(checkpoint):
         'sub_patch_scales': [int(scale) for scale in preprocessing_metadata['sub_patch_scales']],
         'patch_size': int(preprocessing_metadata['patch_size']),
         'num_sub_patches': int(preprocessing_metadata['num_sub_patches']),
-        'input_channels': int(preprocessing_metadata['input_channels']),
+        'input_channels': int(preprocessing_metadata['input_channels']), 'enforce_greyscale': preprocessing_metadata['enforce_greyscale'],
         'grid_spacing': int(inference_metadata['grid_spacing']),
         'smoothing_sigma': float(smoothing_sigma) if smoothing_sigma is not None else 7.0,
         'use_probability_weights': bool(vote_accumulation.get('use_probability_weights', True)),
@@ -1267,7 +1277,7 @@ def build_config_from_checkpoint_metadata(metadata, output_dir, batch_size=2048,
         sub_patch_scales=metadata['sub_patch_scales'], distance_intervals=metadata['distance_intervals'],
         angle_intervals=metadata['angle_intervals'],
         grid_spacing=int(grid_spacing) if grid_spacing is not None else int(metadata['grid_spacing']),
-        input_channels=int(metadata['input_channels']), task_name=str(metadata.get('task_name') or ''),
+        input_channels=int(metadata['input_channels']), enforce_greyscale=metadata['enforce_greyscale'], task_name=str(metadata.get('task_name') or ''),
         repetition=metadata.get('repetition'), fold=metadata.get('fold'), network_name=metadata.get('network_name'),
         batch_size=int(batch_size),
         smoothing_sigma=float(smoothing_sigma) if smoothing_sigma is not None else float(metadata.get('smoothing_sigma', 7.0)),

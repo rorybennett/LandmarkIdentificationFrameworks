@@ -82,6 +82,7 @@ class HeatmapDataConfig:
     oversampling_factor: int = 1
     fold_collection_sha256: str | None = None
     normalise_inputs: bool = False
+    enforce_greyscale: bool = False
     normalisation_mean: tuple[float, float, float] | None = None
     normalisation_std: tuple[float, float, float] | None = None
 
@@ -561,11 +562,11 @@ class TrainModel:
         if unsupported_sources:
             raise ValueError(f'Unsupported source channel count(s): {unsupported_sources}. Supported source images are greyscale, RGB, and RGBA.')
 
-        if len(unique_source_channels) != 1:
+        if len(unique_source_channels) != 1 and not self.data_config.enforce_greyscale:
             raise ValueError(
                 f'Input-channel mismatch detected across train/validation images: {counts_text}. All images for a task must have the same number of source channels.')
 
-        resolved_channels = int(unique_source_channels[0])
+        resolved_channels = 3 if self.data_config.enforce_greyscale else int(unique_source_channels[0])
         self.data_config.input_channels = resolved_channels
         training_dataset.config.input_channels = resolved_channels
         validation_dataset.config.input_channels = resolved_channels
@@ -587,7 +588,7 @@ class TrainModel:
 
         if int(self.data_config.input_channels) != EXPECTED_NORMALISATION_CHANNELS:
             raise ValueError(
-                f'Input normalisation requires exactly {EXPECTED_NORMALISATION_CHANNELS} channels so each RGB channel remains distinct; '
+                f'Input normalisation requires exactly {EXPECTED_NORMALISATION_CHANNELS} channels; '
                 f'the training data contains {self.data_config.input_channels} channel(s).'
             )
 
@@ -622,7 +623,7 @@ class TrainModel:
                                     num_of_points=self.data_config.num_of_points,
                                     fold_lists_path=self.data_config.fold_lists_path, mark_list_file=self.data_config.mark_list_file,
                                     image_data_dir=self.data_config.image_data_dir, image_size=self.data_config.image_size, heatmap_sigma=self.data_config.heatmap_sigma,
-                                    input_channels=self.data_config.input_channels, recursive_image_search=self.data_config.recursive_image_search,
+                                    input_channels=self.data_config.input_channels, enforce_greyscale=self.data_config.enforce_greyscale, recursive_image_search=self.data_config.recursive_image_search,
                                     oversampling_factor=self.data_config.oversampling_factor,
                                     normalisation_mean=self.data_config.normalisation_mean,
                                     normalisation_std=self.data_config.normalisation_std)
@@ -824,7 +825,7 @@ class TrainModel:
                      'mark_list_file': str(self.data_config.mark_list_file), 'image_data_dir': str(self.data_config.image_data_dir),
                      'recursive_image_search': bool(self.data_config.recursive_image_search), 'input_channels': input_channels},
             'preprocessing': {'image_size': self.data_config.image_size, 'heatmap_sigma': float(self.data_config.heatmap_sigma),
-                              'input_channels': input_channels, 'tensor_shape': ['batch', input_channels, image_height, image_width],
+                              'input_channels': input_channels, 'enforce_greyscale': bool(self.data_config.enforce_greyscale), 'tensor_shape': ['batch', input_channels, image_height, image_width],
                               'channel_order': 'channels_first', 'loaded_image_value_range': 'float32_0_to_1',
                               'model_input_values': ('three_channel_standardised' if self.data_config.normalise_inputs else 'float32_0_to_1'),
                               'normalisation': self.build_normalisation_metadata(),
@@ -1112,7 +1113,7 @@ class TrainModel:
                 'validation_images_sha256': self.sha256_dataset_images(validation_loader.dataset),
                 'image_size': self.data_config.image_size, 'resize': dict(LETTERBOX_POLICY),
                 'heatmap_sigma': float(self.data_config.heatmap_sigma),
-                'input_channels': int(self.data_config.input_channels),
+                'input_channels': int(self.data_config.input_channels), 'enforce_greyscale': bool(self.data_config.enforce_greyscale),
                 'recursive_image_search': bool(self.data_config.recursive_image_search),
                 'oversampling_factor': int(self.data_config.oversampling_factor),
                 'normalisation': self.build_normalisation_metadata(),

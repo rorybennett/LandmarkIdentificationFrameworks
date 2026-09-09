@@ -836,3 +836,16 @@ augmentation metadata and sampled factors in the transform preview logs.
 
 Edit the ranges and probability in `Heatmaps/heatmap_transforms.py`. The preview
 utility also accepts `gain`, `contrast` and `gamma` individually.
+
+### Enforced greyscale
+
+Use `--enforce-greyscale true` to convert source images to three identical
+luminance channels before preprocessing (default: `false`). RGB uses
+0.299 R + 0.587 G + 0.114 B; single-channel images are replicated and RGBA
+uses its RGB channels, ignoring alpha. This removes colour differences,
+not image annotations or watermarks.
+
+With `--normalise-inputs true`, statistics are calculated from the converted
+training inputs, giving identical means and standard deviations across channels.
+The setting is saved in checkpoints and applied automatically at inference.
+Checkpoints must declare this policy; earlier checkpoints are unsupported.

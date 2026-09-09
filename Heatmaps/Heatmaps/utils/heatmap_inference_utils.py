@@ -33,6 +33,7 @@ class HeatmapInferenceConfig:
     num_points: int
     input_channels: int
     image_size: int
+    enforce_greyscale: bool = False
     task_name: str = ''
     repetition: int | None = None
     fold: int | None = None
@@ -85,6 +86,8 @@ class HeatmapImageInferer:
         config.checkpoint_path = None if config.checkpoint_path is None else Path(config.checkpoint_path)
         config.num_points = int(config.num_points)
         config.input_channels = int(config.input_channels)
+        if config.enforce_greyscale and config.input_channels != 3:
+            raise ValueError('Enforced greyscale requires three input channels.')
         config.image_size = validate_canvas_size(config.image_size)
         config.repetition = None if config.repetition is None else int(config.repetition)
         config.fold = None if config.fold is None else int(config.fold)
@@ -193,7 +196,7 @@ class HeatmapImageInferer:
         """Load and validate one image using the training preprocessing contract."""
         record = HeatmapImageRecord(sample_name=str(record.sample_name), image_path=Path(record.image_path),
                                     ground_truth_points=record.ground_truth_points)
-        image = load_inference_image_as_float(record.image_path, input_channels=self.config.input_channels)
+        image = load_inference_image_as_float(record.image_path, input_channels=self.config.input_channels, enforce_greyscale=self.config.enforce_greyscale)
         original_size = tuple(int(value) for value in image.shape[1:3])
         ground_truth_points = None
 
@@ -294,10 +297,10 @@ def run_heatmap_inference_for_records(model, config, records, device=None):
     return HeatmapImageInferer(model=model, config=config, device=device).infer_records(records)
 
 
-def load_inference_image_as_float(image_path, input_channels):
+def load_inference_image_as_float(image_path, input_channels, enforce_greyscale=False):
     """Load an image, replicating one greyscale channel when the model expects RGB."""
     try:
-        return load_image_as_float(image_path, input_channels=input_channels)
+        return load_image_as_float(image_path, input_channels=input_channels, enforce_greyscale=enforce_greyscale)
     except ValueError as channel_error:
         if int(input_channels) != 3:
             raise
@@ -409,6 +412,10 @@ def extract_inference_metadata_from_checkpoint(checkpoint):
     task = require_dict(metadata, 'task')
     model = require_dict(metadata, 'model')
     preprocessing = require_dict(metadata, 'preprocessing')
+    if type(preprocessing.get('enforce_greyscale')) is not bool:
+        raise ValueError('Checkpoint must declare the enforce_greyscale preprocessing policy.')
+    if preprocessing['enforce_greyscale'] and int(preprocessing['input_channels']) != 3:
+        raise ValueError('Enforced greyscale requires three input channels.')
     inference = require_dict(metadata, 'inference')
     init_args = dict(require_dict(model, 'init_args'))
     if preprocessing.get('resize') != LETTERBOX_POLICY:
@@ -456,7 +463,7 @@ def extract_inference_metadata_from_checkpoint(checkpoint):
         'init_args': init_args,
         'network_name': network_name,
         'num_points': num_points,
-        'input_channels': input_channels,
+        'input_channels': input_channels, 'enforce_greyscale': preprocessing['enforce_greyscale'],
         'image_size': image_size,
         'task_name': str(task.get('name') or ''),
         'repetition': data.get('repetition', task.get('repetition')),
@@ -474,7 +481,7 @@ def build_config_from_checkpoint_metadata(metadata, output_dir, batch_size=1, sa
     config = HeatmapInferenceConfig(
         output_dir=Path(output_dir),
         num_points=int(metadata['num_points']),
-        input_channels=int(metadata['input_channels']),
+        input_channels=int(metadata['input_channels']), enforce_greyscale=metadata['enforce_greyscale'],
         image_size=validate_canvas_size(metadata['image_size']),
         task_name=str(metadata.get('task_name') or ''),
         repetition=metadata.get('repetition'),

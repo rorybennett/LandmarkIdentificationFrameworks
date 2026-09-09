@@ -281,3 +281,20 @@ in both frameworks. Set the three required paths before running; leave the
 ground-truth path empty for inference without annotations. IPV matches Heatmaps'
 CUDA and raw response-map saving settings. `BATCH_SIZE=4096` counts patches;
 Heatmaps' `BATCH_SIZE=1` counts whole images.
+
+### Enforced greyscale
+
+Use `--enforce-greyscale true` to convert source images to three identical
+luminance channels before preprocessing (default: `false`). RGB uses
+0.299 R + 0.587 G + 0.114 B; single-channel images are replicated and RGBA
+uses its RGB channels, ignoring alpha. This removes colour differences,
+not image annotations or watermarks.
+
+With `--normalise-inputs true`, statistics are calculated from the converted
+training inputs, giving identical means and standard deviations across channels.
+The setting is saved in checkpoints and applied automatically at inference.
+Checkpoints must declare this policy; earlier checkpoints are unsupported.
+
+Recreate generated patches when changing this setting. Enforced greyscale uses
+training-patch statistics even for pretrained models, rather than unequal
+ImageNet RGB constants.

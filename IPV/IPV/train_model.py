@@ -86,6 +86,7 @@ class TrainConfig:
     validation_use_probability_weights: bool = True
     validation_save_raw_vote_maps: bool = False
     normalise_inputs: bool = False
+    enforce_greyscale: bool = False
 
 
 class TrainModel:
@@ -323,7 +324,7 @@ class TrainModel:
             distance_intervals=self.tasks_classes[0],
             angle_intervals=self.tasks_classes[1],
             grid_spacing=int(self.require_metadata_value(data_metadata, 'grid_spacing')),
-            input_channels=int(self.input_channels),
+            input_channels=int(self.input_channels), enforce_greyscale=self.train_config.enforce_greyscale,
             batch_size=int(self.train_config.validation_inference_batch_size),
             smoothing_sigma=float(self.train_config.validation_vote_smoothing_sigma),
             use_probability_weights=bool(self.train_config.validation_use_probability_weights),
@@ -470,6 +471,8 @@ class TrainModel:
         train_csv_path = self.get_train_csv_path()
         val_csv_path = self.get_val_csv_path()
 
+        if self.read_data_creation_metadata().get('enforce_greyscale') is not self.train_config.enforce_greyscale:
+            raise ValueError('Generated patch greyscale policy differs or is missing; recreate data with the selected enforce-greyscale setting.')
         train_dataset = CustomDataset(train_csv_path, num_sub_patches=self.quadruplet_config.num_sub_patches)
         val_dataset = CustomDataset(val_csv_path, num_sub_patches=self.quadruplet_config.num_sub_patches)
         self.training_generator = torch.Generator()
@@ -497,11 +500,11 @@ class TrainModel:
 
         if int(self.input_channels) != EXPECTED_NORMALISATION_CHANNELS:
             raise ValueError(
-                f'Input normalisation requires exactly {EXPECTED_NORMALISATION_CHANNELS} channels so each RGB channel remains distinct; '
+                f'Input normalisation requires exactly {EXPECTED_NORMALISATION_CHANNELS} channels; '
                 f'the training data contains {self.input_channels} channel(s).'
             )
 
-        if is_pretrained_model(self.quadruplet_config.network_name):
+        if is_pretrained_model(self.quadruplet_config.network_name) and not self.train_config.enforce_greyscale:
             mean, standard_deviation = IMAGENET_RGB_MEAN, IMAGENET_RGB_STD
             source = 'torchvision_imagenet_pretrained_weights'
         else:
@@ -676,7 +679,7 @@ class TrainModel:
 
             image_name, target_points = mark_records[sample_name]
             image_path = image_data_dir / image_name
-            image = load_input_image(image_path, input_channels=self.input_channels)
+            image = load_input_image(image_path, input_channels=self.input_channels, enforce_greyscale=self.train_config.enforce_greyscale)
             vote_inputs = []
 
             for point_input in record['vote_inputs']:
@@ -890,7 +893,7 @@ class TrainModel:
             'sub_patch_scales': [int(scale) for scale in sub_patch_scales],
             'patch_size': int(patch_size),
             'num_sub_patches': int(self.quadruplet_config.num_sub_patches),
-            'input_channels': int(self.input_channels),
+            'input_channels': int(self.input_channels), 'enforce_greyscale': bool(self.train_config.enforce_greyscale),
             'tensor_shape': '[batch, num_sub_patches, channels, patch_size, patch_size]',
             'channel_order': 'channels_first',
             'loaded_image_value_range': 'float32_0_to_1',
@@ -913,7 +916,7 @@ class TrainModel:
             'source': self.normalisation_source,
             'statistic': 'population',
             'calculated_from': ('pretrained_weight_recipe' if is_pretrained_model(self.quadruplet_config.network_name)
-                                and self.train_config.normalise_inputs else
+                                and self.train_config.normalise_inputs and not self.train_config.enforce_greyscale else
                                 ('training_split_only' if self.train_config.normalise_inputs else None)),
         }
 
@@ -977,6 +980,7 @@ class TrainModel:
         raw_metadata = dict(zip(rows[0], rows[1]))
 
         return {
+            'enforce_greyscale': self.parse_metadata_value(raw_metadata.get('ENFORCE_GREYSCALE')),
             'task_name': raw_metadata.get('TASK_NAME'),
             'num_of_points': int(raw_metadata.get('NUM_OF_POINTS')),
             'sub_patch_scales': self.parse_metadata_value(raw_metadata.get('SUB_PATCH_SCALES')),
@@ -1012,6 +1016,7 @@ class TrainModel:
             'num_of_points': run_info.get('num_of_points'),
             'sub_patch_scales': sub_patch_scales,
             'patch_size': sub_patch_scales[0] if sub_patch_scales else None,
+            'enforce_greyscale': data_config.get('enforce_greyscale'),
             'patches_per_training_sample': data_config.get('patches_per_training_sample'),
             'grid_spacing': data_config.get('val_grid_spacing', data_config.get('grid_spacing')),
             'sampling_variances': data_config.get('sampling_variances'),

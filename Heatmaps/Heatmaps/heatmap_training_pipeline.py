@@ -544,6 +544,7 @@ def build_run_name(args, num_of_repetitions, num_of_folds, fold_collection_sha25
         'oversampling_factor': args.oversampling_factor,
         'recursive_image_search': args.recursive_image_search,
         'normalise_inputs': args.normalise_inputs,
+        'enforce_greyscale': args.enforce_greyscale,
         'batch_size': args.batch_size,
         'learning_rate': args.learning_rate,
         'max_training_epochs': args.max_training_epochs,
@@ -621,8 +622,10 @@ def parse_args():
     parser.add_argument('--oversampling-factor', type=int, default=1,
                         help='Training-set multiplier. A value of 1 uses each image once; values above 1 add augmented copies using Heatmaps/Heatmaps/heatmap_transforms.py.')
     parser.add_argument('--recursive-image-search', type=str_to_bool, default=False, help='Search image-data-dir recursively.')
+    parser.add_argument('--enforce-greyscale', type=str_to_bool, default=False,
+                        help='Convert source images to three identical luminance channels before preprocessing.')
     parser.add_argument('--normalise-inputs', type=str_to_bool, default=False,
-                        help='Calculate distinct three-channel mean and standard-deviation values from the training split and normalise model inputs.')
+                        help='Calculate three-channel mean and standard-deviation values from the training split and normalise model inputs.')
 
     parser.add_argument('--batch-size', type=int, default=4, help='Training batch size.')
     parser.add_argument('--learning-rate', type=float, default=1e-3, help='Initial learning rate.')
@@ -714,7 +717,7 @@ def build_configs(args):
                                     mark_list_file=args.mark_list_file, image_data_dir=args.image_data_dir, image_size=args.image_size,
                                      heatmap_sigma=args.heatmap_sigma, input_channels=None, recursive_image_search=args.recursive_image_search,
                                      oversampling_factor=args.oversampling_factor, fold_collection_sha256=fold_collection_sha256,
-                                     normalise_inputs=args.normalise_inputs)
+                                     enforce_greyscale=args.enforce_greyscale, normalise_inputs=args.normalise_inputs)
     train_config = TrainConfig(batch_size=args.batch_size, learning_rate=args.learning_rate, max_training_epochs=args.max_training_epochs, num_workers=args.train_workers,
                                random_seed=args.random_seed, optimiser_name=args.optimiser_name, loss_name=args.loss_name, positive_weight=args.positive_weight,
                                weight_decay=args.weight_decay,

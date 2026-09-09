@@ -49,6 +49,7 @@ class DataCreationConfig:
     random_seed: int
     keep_part_csvs: bool
     fold_collection_sha256: str
+    enforce_greyscale: bool = False
 
     @property
     def tasks_classes(self):
@@ -113,7 +114,7 @@ class IPVTrainingPipeline:
             sampling_variances=self.data_config.sampling_variances,
             num_workers=self.data_config.num_workers,
             random_seed=self.data_config.random_seed,
-            keep_part_csvs=self.data_config.keep_part_csvs
+            keep_part_csvs=self.data_config.keep_part_csvs, enforce_greyscale=self.data_config.enforce_greyscale
         )
 
         data_creator.validate_inputs(current_fold=self.fold)
@@ -534,6 +535,7 @@ class IPVTrainingPipeline:
                 'MARK_LIST_FILE',
                 'IMAGE_DATA_DIR',
                 'FOLD_LISTS_PATH',
+                'ENFORCE_GREYSCALE',
                 'FOLD_COLLECTION_SHA256'
             ])
             writer.writerow([
@@ -553,6 +555,7 @@ class IPVTrainingPipeline:
                 self.data_config.mark_list_file,
                 self.data_config.image_data_dir,
                 self.data_config.fold_lists_path,
+                self.data_config.enforce_greyscale,
                 self.run_config.fold_collection_sha256,
             ])
 
@@ -815,6 +818,8 @@ def parse_args():
     parser.add_argument('--early-stop-min-delta', type=float, default=1e-4, help='Minimum validation-loss improvement required to reset patience.')
     parser.add_argument('--early-stop-warmup-epochs', type=int, default=10, help='Initial epochs before early stopping is allowed.')
     parser.add_argument('--use-amp', type=str_to_bool, default=False, help='Use CUDA automatic mixed precision.')
+    parser.add_argument('--enforce-greyscale', type=str_to_bool, default=False,
+                        help='Convert source images to three identical luminance channels before preprocessing.')
     parser.add_argument('--normalise-inputs', type=str_to_bool, default=False,
                         help='Normalise each of the three input channels. Pretrained networks use ImageNet constants; other networks use training-split patch statistics.')
     parser.add_argument('--save-validation-results', type=str_to_bool, default=True,
@@ -1068,6 +1073,7 @@ def build_run_name(args, num_of_repetitions, num_of_folds, fold_collection_sha25
         'early_stop_patience': args.early_stop_patience, 'early_stop_min_delta': args.early_stop_min_delta,
         'early_stop_warmup_epochs': args.early_stop_warmup_epochs, 'use_amp': args.use_amp,
         'normalise_inputs': args.normalise_inputs,
+        'enforce_greyscale': args.enforce_greyscale,
         'save_validation_results': args.save_validation_results,
         'validation_inference_batch_size': args.validation_inference_batch_size,
         'validation_vote_smoothing_sigma': args.validation_vote_smoothing_sigma,
@@ -1166,7 +1172,7 @@ def build_configs(args):
         sampling_variances=pms.sampling_variances,
         num_workers=args.data_creation_workers,
         random_seed=args.random_seed,
-        keep_part_csvs=args.keep_part_csvs,
+        keep_part_csvs=args.keep_part_csvs, enforce_greyscale=args.enforce_greyscale,
         fold_collection_sha256=fold_collection_sha256,
     )
 
@@ -1191,7 +1197,7 @@ def build_configs(args):
         validation_vote_smoothing_sigma=args.validation_vote_smoothing_sigma,
         validation_use_probability_weights=args.validation_use_probability_weights,
         validation_save_raw_vote_maps=args.validation_save_raw_vote_maps,
-        normalise_inputs=args.normalise_inputs,
+        enforce_greyscale=args.enforce_greyscale, normalise_inputs=args.normalise_inputs,
     )
 
     quadruplet_config = QuadrupletConfig(

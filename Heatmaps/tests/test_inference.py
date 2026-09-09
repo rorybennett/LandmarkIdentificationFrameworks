@@ -69,7 +69,7 @@ class StandaloneInferenceTests(unittest.TestCase):
             'data': {'repetition': 2, 'fold': 3},
             'preprocessing': {
                 'image_size': self.image_size, 'resize': dict(LETTERBOX_POLICY),
-                'input_channels': input_channels,
+                'input_channels': input_channels, 'enforce_greyscale': False,
                 'normalisation': normalisation,
             },
             'inference': {'heatmap_to_point': 'argmax', 'scale_back_to_original': True},

@@ -10,6 +10,7 @@ import numpy as np
 from scipy.spatial import distance as dist
 from skimage import io
 from skimage.transform import resize
+from .greyscale import to_three_channel_greyscale
 from skimage.util import img_as_float32, img_as_ubyte
 
 from .utils.patch_utils import create_patch, get_angle, get_label
@@ -48,6 +49,7 @@ class PatchJob:
     image_save_path: Path
     part_csv_path: Path
     seed: int
+    enforce_greyscale: bool = False
 
 
 def natural_key(value):
@@ -117,12 +119,13 @@ def infer_image_channel_count(image_path):
     return get_image_channel_count(image=image, image_path=image_path)
 
 
-def load_patch_source_image(image_path):
-    """Load a source image for patch extraction without changing its channel count."""
+def load_patch_source_image(image_path, enforce_greyscale=False):
+    """Load a source image and optionally enforce greyscale before patch extraction."""
     image = io.imread(image_path)
     get_image_channel_count(image=image, image_path=image_path)
 
-    return img_as_float32(image)
+    image = img_as_float32(image)
+    return to_three_channel_greyscale(image) if enforce_greyscale else image
 
 
 def load_display_image(image_path):
@@ -249,7 +252,7 @@ def create_patch_job(job):
     """Create all patch images and CSV rows for one sample."""
     rng = np.random.default_rng(job.seed)
 
-    image = load_patch_source_image(job.image_path)
+    image = load_patch_source_image(job.image_path, enforce_greyscale=job.enforce_greyscale)
     display_image = load_display_image(job.image_path)
     patch_creator = PatchCreator(image, sub_patch_scales=job.sub_patch_scales)
 
@@ -305,7 +308,7 @@ class DataCreator:
                  sampling_variances=(500, 10000),
                  num_workers=1,
                  random_seed=42,
-                 keep_part_csvs=False):
+                 keep_part_csvs=False, enforce_greyscale=False):
 
         self.task_name = self.resolve_task_name(task_name=task_name)
         self.num_of_points = self.validate_num_points(num_of_points)
@@ -326,6 +329,7 @@ class DataCreator:
         self.num_workers = num_workers
         self.random_seed = random_seed
         self.keep_part_csvs = keep_part_csvs
+        self.enforce_greyscale = enforce_greyscale
 
         self.patch_size = subpatch_scales[0]
         self.fold_lists_path = Path(fold_lists_path)
@@ -523,6 +527,7 @@ class DataCreator:
             image = io.imread(image_path)
             self.validate_mark_points(sample_name=sample_name, points=points, image_shape=image.shape)
             input_channels = get_image_channel_count(image=image, image_path=image_path)
+            input_channels = 3 if self.enforce_greyscale else input_channels
             channel_counts.setdefault(input_channels, []).append(sample_name)
 
         if len(channel_counts) != 1:
@@ -660,7 +665,7 @@ class DataCreator:
                 patch_save_path=patch_save_path,
                 image_save_path=image_save_path,
                 part_csv_path=part_csv_dir / f'{sample_index}_{safe_file_stem(sample_name)}.csv',
-                seed=seed
+                enforce_greyscale=self.enforce_greyscale, seed=seed
             ))
 
         return jobs

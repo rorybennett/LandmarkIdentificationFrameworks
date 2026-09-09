@@ -123,9 +123,9 @@ class RuntimeIntegrationTests(unittest.TestCase):
             write_split('Val', [(3, 3)])
             metadata_headers = ['TASK_NAME', 'NUM_OF_POINTS', 'SUB_PATCH_SCALES', 'PATCH_SIZE',
                                 'PATCHES_PER_TRAINING_SAMPLE', 'GRID_DATA_STEP', 'SAMPLING_VARIANCES',
-                                'RANDOM_SEED', 'MARK_LIST_FILE', 'IMAGE_DATA_DIR', 'FOLD_LISTS_PATH']
+                                'RANDOM_SEED', 'MARK_LIST_FILE', 'IMAGE_DATA_DIR', 'FOLD_LISTS_PATH', 'ENFORCE_GREYSCALE']
             metadata_values = ['task', 1, '[8, 10, 12, 14]', 8, 2, 4, '(1,)', 42, mark_list, image_dir,
-                               fold_lists.parent]
+                               fold_lists.parent, False]
             with open(data_dir / 'data_info.csv', 'w', newline='', encoding='utf-8') as metadata_file:
                 writer = csv.writer(metadata_file)
                 writer.writerow(metadata_headers)

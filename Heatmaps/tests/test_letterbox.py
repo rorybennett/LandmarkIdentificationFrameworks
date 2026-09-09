@@ -92,7 +92,7 @@ class LetterboxTests(unittest.TestCase):
             config.normalisation_mean, config.normalisation_std = mean, std
             sample = dataset[0]
             inferer = object.__new__(HeatmapImageInferer)
-            inferer.config = SimpleNamespace(input_channels=3, image_size=8, num_points=1,
+            inferer.config = SimpleNamespace(input_channels=3, enforce_greyscale=False, image_size=8, num_points=1,
                                              normalisation_mean=mean, normalisation_std=std)
             prepared = inferer.prepare_record(HeatmapImageRecord('sample', root / 'sample.png', [(2, 1)]))
             torch.testing.assert_close(sample['image'], prepared['image'])
