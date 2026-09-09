@@ -24,6 +24,10 @@ GAUSSIAN_NOISE_MEAN = 0.0
 GAUSSIAN_NOISE_SIGMA = 0.1
 GAUSSIAN_NOISE_CLIP = True
 GAUSSIAN_BLUR_KERNEL_SIZE = 5
+GLOBAL_GAIN_RANGE = (0.8, 1.2)
+CONTRAST_RANGE = (0.8, 1.2)
+GAMMA_RANGE = (0.8, 1.25)
+INTENSITY_PROBABILITY = 0.5
 
 
 @dataclass
@@ -156,6 +160,71 @@ class RandomAffine:
 
 
 
+def apply_intensity_transform(image, points, name, factor_range, probability):
+    """Adjust colour channels together, preserving alpha, black background and landmarks."""
+    low, high = map(float, factor_range)
+    if not (np.isfinite(low) and np.isfinite(high) and 0 < low <= high):
+        raise ValueError('Intensity factor range must contain two finite positive values in ascending order.')
+    if not np.isfinite(probability) or not 0 <= probability <= 1:
+        raise ValueError('Intensity probability must be between zero and one.')
+    params = {'transform': name, 'probability': float(probability), 'factor_range': [low, high],
+              'applied': False, 'factor': None, 'preserve_black_background': True}
+    if np.random.random() >= probability:
+        return image, points, params
+
+    result = image.copy().astype(np.float32)
+    channels = min(result.shape[0], 3)
+    colour = result[:channels]
+    content_mask = np.any(colour != 0, axis=0)
+    if not np.any(content_mask):
+        params['reason'] = 'empty_content'
+        return result, points, params
+    factor = float(np.random.uniform(low, high))
+    if name == 'global_gain':
+        adjusted = colour * factor
+    elif name == 'contrast':
+        centre = colour[:, content_mask].mean(axis=1)[:, None, None]
+        adjusted = centre + factor * (colour - centre)
+        params['centre_per_channel'] = centre.reshape(-1).astype(float).tolist()
+    elif name == 'gamma':
+        adjusted = np.power(np.clip(colour, 0.0, 1.0), factor)
+    else:
+        raise ValueError(f'Unknown intensity transform: {name}')
+    result[:channels] = np.where(content_mask[None], np.clip(adjusted, 0.0, 1.0), 0.0)
+    params.update(applied=True, factor=factor)
+    return result, points, params
+
+
+@dataclass
+class RandomGlobalGain:
+    factor_range: tuple[float, float] = GLOBAL_GAIN_RANGE
+    probability: float = INTENSITY_PROBABILITY
+
+    def __call__(self, image, points):
+        image, points, self.last_params = apply_intensity_transform(image, points, 'global_gain', self.factor_range, self.probability)
+        return image, points
+
+
+@dataclass
+class RandomContrast:
+    factor_range: tuple[float, float] = CONTRAST_RANGE
+    probability: float = INTENSITY_PROBABILITY
+
+    def __call__(self, image, points):
+        image, points, self.last_params = apply_intensity_transform(image, points, 'contrast', self.factor_range, self.probability)
+        return image, points
+
+
+@dataclass
+class RandomGamma:
+    factor_range: tuple[float, float] = GAMMA_RANGE
+    probability: float = INTENSITY_PROBABILITY
+
+    def __call__(self, image, points):
+        image, points, self.last_params = apply_intensity_transform(image, points, 'gamma', self.factor_range, self.probability)
+        return image, points
+
+
 @dataclass
 class GaussianNoise:
     mean: float = GAUSSIAN_NOISE_MEAN
@@ -218,6 +287,9 @@ def get_default_heatmap_transforms():
     """Return task-agnostic default oversampling transforms for heatmap landmark training."""
     return Compose([
         RandomAffine(),
+        RandomGlobalGain(),
+        RandomContrast(),
+        RandomGamma(),
         GaussianNoise(),
         GaussianBlur(),
     ])
@@ -228,10 +300,16 @@ def get_augmentation_policy():
     return {
         'name': 'default_heatmap_oversampling_0_1',
         'random_source': 'numpy.random seeded by training random_seed and DataLoader worker seeds',
-        'transform_order': ['RandomAffine', 'GaussianNoise', 'GaussianBlur'],
+        'transform_order': ['RandomAffine', 'RandomGlobalGain', 'RandomContrast', 'RandomGamma', 'GaussianNoise', 'GaussianBlur'],
         'transforms': [
             {'name': 'RandomAffine', 'degrees': float(AFFINE_DEGREES), 'shear': float(AFFINE_SHEAR), 'translate': tuple(float(value) for value in AFFINE_TRANSLATE),
              'scale': tuple(float(value) for value in AFFINE_SCALE), 'max_attempts': int(AFFINE_MAX_ATTEMPTS)},
+            {'name': 'RandomGlobalGain', 'factor_range': GLOBAL_GAIN_RANGE, 'probability': INTENSITY_PROBABILITY,
+             'operation': 'multiply_intensity', 'preserve_black_background': True},
+            {'name': 'RandomContrast', 'factor_range': CONTRAST_RANGE, 'probability': INTENSITY_PROBABILITY,
+             'operation': 'scale_about_per_channel_nonblack_content_mean', 'preserve_black_background': True},
+            {'name': 'RandomGamma', 'factor_range': GAMMA_RANGE, 'probability': INTENSITY_PROBABILITY,
+             'operation': 'intensity_power_gamma', 'preserve_black_background': True},
             {'name': 'GaussianNoise', 'mean': float(GAUSSIAN_NOISE_MEAN), 'sigma': float(GAUSSIAN_NOISE_SIGMA), 'clip': bool(GAUSSIAN_NOISE_CLIP),
              'preserve_greyscale_rgb': True},
             {'name': 'GaussianBlur', 'kernel_size': int(GAUSSIAN_BLUR_KERNEL_SIZE)},

@@ -814,3 +814,25 @@ From the repository root, run the cross-framework output checks with:
 Standalone inference model, input, output and ground-truth paths are empty strings.
 Set the three required paths before running; leave the ground-truth path empty
 for inference without annotations.
+
+### Gain, contrast and gamma augmentation
+
+The default augmented-training-copy sequence is RandomAffine, RandomGlobalGain,
+RandomContrast, RandomGamma, GaussianNoise, GaussianBlur. Original training copies,
+validation and inference do not receive these stochastic augmentations.
+
+Each new intensity transform has an independent 50% probability. Gain multiplies
+intensities by a factor in [0.8, 1.2]. Contrast scales deviations from each channel's
+nonblack-content mean by a shared factor in [0.8, 1.2]. Gamma uses `image ** gamma`
+with gamma in [0.8, 1.25] (below one brightens; above one darkens).
+These are mild image-domain approximations, not calibrated scanner controls.
+
+The same sampled factor is used across colour channels; replicated greyscale RGB
+channels remain equal. Alpha and landmark coordinates are unchanged. The new
+transforms preserve all-zero background pixels and clip colour values to [0, 1].
+They run before normalisation and letterboxing, so canvas padding is unaffected.
+Existing noise and blur retain their previous behaviour. Settings are recorded in
+augmentation metadata and sampled factors in the transform preview logs.
+
+Edit the ranges and probability in `Heatmaps/heatmap_transforms.py`. The preview
+utility also accepts `gain`, `contrast` and `gamma` individually.

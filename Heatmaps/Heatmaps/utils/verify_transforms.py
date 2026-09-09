@@ -21,7 +21,7 @@ from .. import heatmap_transforms as htf
 from .annotation_utils import read_mark_list, validate_annotation_point_count
 
 SUPPORTED_IMAGE_SUFFIXES = ('.png', '.jpg', '.jpeg', '.bmp', '.tif', '.tiff')
-TRANSFORM_CHOICES = ('erasing', 'affine', 'noise', 'blur', 'default')
+TRANSFORM_CHOICES = ('erasing', 'affine', 'gain', 'contrast', 'gamma', 'noise', 'blur', 'default')
 POINT_MARKER_SIZE = 50
 POINT_LABEL_OFFSET = (7, -7)
 POINT_LABEL_FONT_SIZE = 10
@@ -80,6 +80,15 @@ def make_transform(transform_name):
 
     if transform_name == 'affine':
         return htf.RandomAffine()
+
+    if transform_name == 'gain':
+        return htf.RandomGlobalGain(probability=1.0)
+
+    if transform_name == 'contrast':
+        return htf.RandomContrast(probability=1.0)
+
+    if transform_name == 'gamma':
+        return htf.RandomGamma(probability=1.0)
 
     if transform_name == 'noise':
         return htf.GaussianNoise()
