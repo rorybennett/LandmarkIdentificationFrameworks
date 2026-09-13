@@ -500,12 +500,12 @@ def resize_channel_first(image, image_size):
 
 
 def prepare_image(image, image_size, mean=None, standard_deviation=None):
-    """Use identical resizing and zero-after-normalisation padding in every pipeline."""
+    """Shared min-max content scaling, optional standardisation, and zero padding."""
     from ..normalisation import normalise_channel_first
-    original_size = image.shape[-2:]
     canvas = resize_channel_first(image, image_size)
-    content = remove_padding(canvas, original_size, image_size)
-    if mean is not None:
+    content = remove_padding(canvas, image.shape[-2:], image_size)
+    content[:] = (content-content.min()) / max(float(content.max()-content.min()), 1e-8)
+    if mean is not None or standard_deviation is not None:
         content[:] = normalise_channel_first(content, mean, standard_deviation)
     return canvas
 

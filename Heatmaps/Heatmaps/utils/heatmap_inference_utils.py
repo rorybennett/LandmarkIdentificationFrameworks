@@ -90,7 +90,8 @@ class HeatmapImageInferer:
             raise ValueError('Enforced greyscale requires three input channels.')
         config.image_size = validate_canvas_size(config.image_size)
         config.repetition = None if config.repetition is None else int(config.repetition)
-        config.fold = None if config.fold is None else int(config.fold)
+        from .io_utils import normalise_fold
+        config.fold = None if config.fold is None else normalise_fold(config.fold)
         config.batch_size = int(config.batch_size)
         config.save_raw_heatmaps = bool(config.save_raw_heatmaps)
         config.clear_cuda_cache_between_batches = bool(config.clear_cuda_cache_between_batches)
@@ -376,7 +377,7 @@ def load_model_from_checkpoint(checkpoint_path, device='auto'):
     init_args.pop('input_channels', None)
     init_args.pop('image_size', None)
     model = build_heatmap_model(network_name=metadata['network_name'], num_of_points=metadata['num_points'],
-                                input_channels=metadata['input_channels'], image_size=metadata['image_size'], **init_args)
+                                input_channels=metadata['input_channels'], image_size=metadata['image_size'], initialise_pretrained=False, **init_args)
     model.load_state_dict(extract_state_dict(checkpoint), strict=True)
     model.to(device)
     model.eval()
@@ -428,6 +429,8 @@ def extract_inference_metadata_from_checkpoint(checkpoint):
     input_channels = int(preprocessing['input_channels'])
     network_name = str(model['registry_name'])
     normalisation = require_dict(preprocessing, 'normalisation')
+    if preprocessing.get('model_input_values') != ('three_channel_standardised' if normalisation.get('enabled') else 'per_image_minmax_0_to_1_content_only'):
+        raise ValueError('Checkpoint must declare per-image min-max preprocessing.')
     normalisation_enabled = bool(normalisation.get('enabled'))
     normalisation_mean = normalisation.get('mean')
     normalisation_std = normalisation.get('standard_deviation')
@@ -440,7 +443,7 @@ def extract_inference_metadata_from_checkpoint(checkpoint):
     elif normalisation_mean is not None or normalisation_std is not None:
         raise ValueError('Disabled checkpoint normalisation must not contain mean or standard-deviation constants.')
     required_init_args = {'num_of_points', 'input_channels'}
-    if network_name == 'vitpose':
+    if network_name in ('vitpose', 'vit-medsam'):
         required_init_args.add('image_size')
     missing_init_args = sorted(required_init_args - set(init_args))
 
@@ -628,7 +631,10 @@ def resolve_device(device='auto'):
     if device is None or str(device).lower() == 'auto':
         return torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-    return torch.device(device)
+    resolved = torch.device(device)
+    if resolved.type == 'cuda' and not torch.cuda.is_available():
+        raise RuntimeError('CUDA was requested but is unavailable. Install a CUDA-enabled PyTorch build or explicitly select CPU.')
+    return resolved
 
 
 def clear_device_memory(device=None):

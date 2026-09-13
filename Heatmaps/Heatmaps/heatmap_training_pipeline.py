@@ -180,6 +180,10 @@ class HeatmapTrainingPipeline:
             self.run_results_path / '.validation_results.tmp',
             self.run_results_path / '.validation_results.backup',
         ]
+        targets += [self.run_results_path / name for name in (
+                'model_best_validation_pixel_error.pth', '.model_best_validation_pixel_error.pth.tmp',
+                'validation_best_loss', 'validation_best_pixel_error', '.validation_best_loss.tmp',
+                '.validation_best_loss.backup', '.validation_best_pixel_error.tmp', '.validation_best_pixel_error.backup', 'validation_progress')]
         existing_targets = [target for target in targets if target.exists()]
 
         if not existing_targets:
@@ -264,7 +268,8 @@ class HeatmapTrainingPipeline:
         print(f'\tLoss: {self.train_config.loss_name}', flush=True)
         print(f'\tPositive weight: {self.train_config.positive_weight}', flush=True)
         print(f'\tWeight decay: {self.train_config.weight_decay}', flush=True)
-        print(f'\tMomentum: {self.train_config.momentum}', flush=True)
+        if self.train_config.optimiser_name == 'sgd':
+            print(f'\tMomentum: {self.train_config.momentum}', flush=True)
         print(f'\tLR schedule: {self.train_config.lr_schedule}', flush=True)
         print(f'\tLR step size: {self.train_config.lr_step_size}', flush=True)
         print(f'\tLR gamma: {self.train_config.lr_gamma}', flush=True)
@@ -419,8 +424,7 @@ def validate_model_args(args, image_height, image_width):
     if args.dropout < 0 or args.dropout >= 1:
         raise ValueError('--dropout must be in the range [0, 1).')
 
-    if args.vit_dropout < 0 or args.vit_dropout >= 1:
-        raise ValueError('--vit-dropout must be in the range [0, 1).')
+
 
     if args.auxiliary_loss_weight < 0:
         raise ValueError('--auxiliary-loss-weight must be at least 0.')
@@ -461,22 +465,12 @@ def validate_model_args(args, image_height, image_width):
             raise ValueError('Stacked hourglass requires --hourglass-features >= 16 and positive stack, depth, and block counts.')
 
         minimum_image_size = 8 * (2 ** int(args.hourglass_depth))
-    elif network_name == 'vitpose':
-        patch_size = int(args.vit_patch_size)
-
-        if patch_size < 2 or patch_size & (patch_size - 1):
-            raise ValueError('--vit-patch-size must be a power of two greater than or equal to 2.')
-
-        if args.vit_embed_dim < 8 or args.vit_depth < 1 or args.vit_heads < 1:
-            raise ValueError('ViTPose requires --vit-embed-dim >= 8 and positive depth and head counts.')
-
-        if args.vit_embed_dim % args.vit_heads != 0:
-            raise ValueError('--vit-heads must divide --vit-embed-dim exactly.')
-
-        if args.vit_mlp_ratio <= 0 or args.vit_decoder_channels < 16:
-            raise ValueError('ViTPose requires --vit-mlp-ratio > 0 and --vit-decoder-channels >= 16.')
-
-        minimum_image_size = patch_size
+    elif network_name in ('vitpose', 'vit-medsam'):
+        minimum_image_size = 16
+        if args.normalise_inputs or not args.enforce_greyscale:
+            raise ValueError('Pretrained ViTs require --enforce-greyscale true --normalise-inputs false.')
+        if not args.resume_training and args.train_model and not Path(args.pretrained_checkpoint).is_file():
+            raise ValueError('Supply --pretrained-checkpoint for pretrained ViT training.')
     else:
         raise ValueError(f'Unknown heatmap model: {network_name}')
 
@@ -563,9 +557,11 @@ def build_run_name(args, num_of_repetitions, num_of_folds, fold_collection_sha25
         'early_stop_warmup_epochs': args.early_stop_warmup_epochs,
         'use_amp': args.use_amp,
         'network_name': args.network_name,
+
         'model_options': {field_name: getattr(args, field_name) for field_name in get_model_config_fields(args.network_name)},
         'auxiliary_loss_weight': args.auxiliary_loss_weight if args.network_name == 'stacked_hourglass' else None,
     }
+    fingerprint_payload['advanced_options'] = {key: value for key, value in vars(args).items() if key.startswith(('constraint_', 'decoder_plateau_', 'finetune_', 'encoder_')) or key in ('landmark_constraint_loss', 'pretrained_checkpoint', 'freeze_encoder_epochs', 'lr_decay_epochs', 'lr_min_factor', 'lr_plateau_patience', 'visualise_validation_progress_images', 'visualise_validation_progress_epochs')}
     fingerprint_text = json.dumps(fingerprint_payload, sort_keys=True, separators=(',', ':'))
     fingerprint = hashlib.sha256(fingerprint_text.encode('utf-8')).hexdigest()[:12]
     parts = ['heatmap', f'{num_of_repetitions}rep', f'{num_of_folds}fold', f'{args.num_points}points', args.network_name, f'im{height}x{width}',
@@ -633,11 +629,12 @@ def parse_args():
     parser.add_argument('--train-workers', type=int, default=8, help='DataLoader worker count.')
     parser.add_argument('--random-seed', type=int, default=42, help='Random seed used for Python, NumPy, PyTorch, and DataLoader workers.')
     parser.add_argument('--optimiser-name', choices=['adamw', 'sgd'], default='adamw', help='Optimiser.')
-    parser.add_argument('--loss-name', choices=['mse', 'weighted_mse', 'smooth_l1', 'bce_logits'], default='weighted_mse', help='Training loss.')
+    from .heatmap_losses import HEATMAP_LOSSES, LANDMARK_CONSTRAINTS
+    parser.add_argument('--loss-name', choices=tuple(HEATMAP_LOSSES), default='weighted_mse', help='Training loss.')
     parser.add_argument('--positive-weight', type=float, default=20.0, help='Peak-region weight for weighted_mse.')
     parser.add_argument('--weight-decay', type=float, default=1e-4, help='Weight decay.')
     parser.add_argument('--momentum', type=float, default=0.9, help='SGD momentum.')
-    parser.add_argument('--lr-schedule', choices=['none', 'step', 'plateau'], default='plateau', help='Learning-rate schedule.')
+    parser.add_argument('--lr-schedule', choices=['none', 'step', 'plateau', 'cosine', 'linear', 'exponential'], default='plateau', help='Learning-rate schedule.')
     parser.add_argument('--lr-step-size', type=int, default=20, help='StepLR epoch interval.')
     parser.add_argument('--lr-gamma', type=float, default=0.5, help='Learning-rate reduction factor.')
     parser.add_argument('--early-stop-patience', type=int, default=15, help='Epochs without improvement before stopping.')
@@ -665,13 +662,6 @@ def parse_args():
     parser.add_argument('--hourglass-blocks', type=int, default=1, help='Residual blocks at each hourglass level.')
     parser.add_argument('--auxiliary-loss-weight', type=float, default=1.0, help='Weight applied to intermediate stacked-hourglass heatmap losses.')
 
-    parser.add_argument('--vit-patch-size', type=int, default=16, help='ViTPose patch size. Must be a power of two.')
-    parser.add_argument('--vit-embed-dim', type=int, default=384, help='ViTPose transformer embedding width.')
-    parser.add_argument('--vit-depth', type=int, default=8, help='ViTPose transformer layer count.')
-    parser.add_argument('--vit-heads', type=int, default=6, help='ViTPose attention-head count.')
-    parser.add_argument('--vit-mlp-ratio', type=float, default=4.0, help='ViTPose transformer MLP expansion ratio.')
-    parser.add_argument('--vit-dropout', type=float, default=0.0, help='ViTPose transformer dropout probability.')
-    parser.add_argument('--vit-decoder-channels', type=int, default=256, help='Initial ViTPose heatmap-decoder width.')
 
     parser.add_argument('--normalisation', choices=['batch', 'instance', 'group', 'none'], default='batch', help='CNN normalisation layer.')
     parser.add_argument('--activation', choices=['relu', 'leaky_relu', 'elu', 'gelu'], default='relu', help='CNN activation function.')
@@ -680,7 +670,37 @@ def parse_args():
     parser.add_argument('--padding-mode', choices=['zeros', 'reflect', 'replicate', 'circular'], default='zeros', help='CNN convolution padding mode.')
     parser.add_argument('--final-kernel-size', type=int, choices=[1, 3], default=1, help='Final heatmap convolution kernel size.')
 
-    return parser.parse_args()
+    parser.add_argument('--device', choices=['cuda','cpu','auto'], default='cuda', help='Training device.')
+    parser.add_argument('--pretrained-checkpoint', default='')
+    parser.add_argument('--encoder-learning-rate', type=float, default=1e-5)
+    parser.add_argument('--freeze-encoder-epochs', type=int, default=5)
+    parser.add_argument('--finetune-last-blocks', type=int, choices=range(1,13), default=4)
+    parser.add_argument('--decoder-channels', type=int, default=256)
+    parser.add_argument('--gradient-checkpointing', type=str_to_bool, default=True)
+    parser.add_argument('--decoder-plateau-patience', type=int, default=10)
+    parser.add_argument('--decoder-plateau-min-delta', type=float, default=0.1)
+    parser.add_argument('--finetune-decoder-lr-factor', type=float, default=0.5)
+    parser.add_argument('--lr-plateau-patience', type=int, default=3)
+    parser.add_argument('--lr-decay-epochs', type=int, default=50)
+    parser.add_argument('--lr-min-factor', type=float, default=0.01)
+    parser.add_argument('--landmark-constraint-loss', choices=tuple(LANDMARK_CONSTRAINTS) + ('prostate-taus', 'prostate_saus'), default=None)
+    parser.add_argument('--constraint-angle-weight', type=float, default=0.01)
+    parser.add_argument('--constraint-side-weight', type=float, default=0.01)
+    parser.add_argument('--constraint-temperature', type=float, default=0.05)
+    parser.add_argument('--constraint-margin', type=float, default=0.02)
+    parser.add_argument('--visualise-validation-progress-images', type=int, default=0)
+    parser.add_argument('--visualise-validation-progress-epochs', type=int, default=0)
+    args = parser.parse_args()
+    if args.network_name in ('vitpose', 'vit-medsam'):
+        import sys
+        supplied = {item.split('=')[0] for item in sys.argv[1:]}
+        for flag, value in {'learning_rate':1e-4, 'max_training_epochs':300, 'enforce_greyscale':True,
+                            'weight_decay':1e-4, 'early_stop_patience':30, 'lr_schedule':'plateau'}.items():
+            if '--'+flag.replace('_','-') not in supplied:
+                setattr(args, flag, value)
+    args.landmark_constraint_loss = {'prostate-taus':'prostate_taus', 'prostate_saus':'prostate-saus'}.get(args.landmark_constraint_loss, args.landmark_constraint_loss)
+    return args
+
 
 
 def build_configs(args):
@@ -718,22 +738,12 @@ def build_configs(args):
                                      heatmap_sigma=args.heatmap_sigma, input_channels=None, recursive_image_search=args.recursive_image_search,
                                      oversampling_factor=args.oversampling_factor, fold_collection_sha256=fold_collection_sha256,
                                      enforce_greyscale=args.enforce_greyscale, normalise_inputs=args.normalise_inputs)
-    train_config = TrainConfig(batch_size=args.batch_size, learning_rate=args.learning_rate, max_training_epochs=args.max_training_epochs, num_workers=args.train_workers,
-                               random_seed=args.random_seed, optimiser_name=args.optimiser_name, loss_name=args.loss_name, positive_weight=args.positive_weight,
-                               weight_decay=args.weight_decay,
-                               momentum=args.momentum, lr_schedule=args.lr_schedule, lr_step_size=args.lr_step_size, lr_gamma=args.lr_gamma,
-                               early_stop_patience=args.early_stop_patience, early_stop_min_delta=args.early_stop_min_delta,
-                               early_stop_warmup_epochs=args.early_stop_warmup_epochs, use_amp=args.use_amp,
-                               save_validation_predictions=args.save_validation_predictions)
-    model_config = HeatmapModelConfig(network_name=args.network_name, base_channels=args.base_channels, depth=args.depth, channel_multiplier=args.channel_multiplier,
-                                      max_channels=args.max_channels, normalisation=None if args.normalisation == 'none' else args.normalisation,
-                                      activation=args.activation, dropout=args.dropout, upsampling=args.upsampling, output_activation=args.output_activation,
-                                      padding_mode=args.padding_mode, final_kernel_size=args.final_kernel_size, hrnet_width=args.hrnet_width,
-                                      hrnet_modules=args.hrnet_modules, hrnet_blocks=args.hrnet_blocks, hourglass_features=args.hourglass_features,
-                                      hourglass_stacks=args.hourglass_stacks, hourglass_depth=args.hourglass_depth, hourglass_blocks=args.hourglass_blocks,
-                                      auxiliary_loss_weight=args.auxiliary_loss_weight, vit_patch_size=args.vit_patch_size, vit_embed_dim=args.vit_embed_dim,
-                                      vit_depth=args.vit_depth, vit_heads=args.vit_heads, vit_mlp_ratio=args.vit_mlp_ratio, vit_dropout=args.vit_dropout,
-                                      vit_decoder_channels=args.vit_decoder_channels)
+    from dataclasses import fields
+    values = dict(vars(args), num_workers=args.train_workers)
+    train_config = TrainConfig(**{f.name: values[f.name] for f in fields(TrainConfig) if f.name in values})
+    model_config = HeatmapModelConfig(**{f.name: values[f.name] for f in fields(HeatmapModelConfig) if f.name in values})
+    if model_config.normalisation == 'none':
+        model_config.normalisation = None
     return run_config, data_config, train_config, model_config
 
 

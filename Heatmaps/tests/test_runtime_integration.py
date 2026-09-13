@@ -94,7 +94,7 @@ class RuntimeIntegrationTests(unittest.TestCase):
             root = Path(temporary_dir)
             data_config = HeatmapDataConfig(repetition=1, fold=1, task_name='task', num_of_points=2, fold_lists_path=root,
                                             mark_list_file=root / 'marks.txt', image_data_dir=root, image_size=32)
-            train_config = TrainConfig(batch_size=1, learning_rate=1e-3, max_training_epochs=1, num_workers=0)
+            train_config = TrainConfig(batch_size=1, learning_rate=1e-3, max_training_epochs=1, num_workers=0, device='cpu')
             model_config = HeatmapModelConfig(depth=1)
 
             def make_pipeline(repetition, fold):
@@ -152,7 +152,7 @@ class RuntimeIntegrationTests(unittest.TestCase):
                 data_config=HeatmapDataConfig(repetition=1, fold=1, task_name='task', num_of_points=2,
                                               fold_lists_path=root / 'folds', mark_list_file=mark_list, image_data_dir=image_dir,
                                               image_size=8, heatmap_sigma=1.0),
-                train_config=TrainConfig(batch_size=1, learning_rate=1e-3, max_training_epochs=1, num_workers=0),
+                train_config=TrainConfig(batch_size=1, learning_rate=1e-3, max_training_epochs=1, num_workers=0, device='cpu'),
                 model_config=HeatmapModelConfig(base_channels=4, depth=1, max_channels=8),
                 output_save_path=output_dir,
             )
@@ -169,7 +169,7 @@ class RuntimeIntegrationTests(unittest.TestCase):
             trainer = TrainModel(
                 data_config=HeatmapDataConfig(repetition=2, fold=3, task_name='task', num_of_points=1, fold_lists_path=root,
                                               mark_list_file=root / 'marks.txt', image_data_dir=root, image_size=8),
-                train_config=TrainConfig(batch_size=1, learning_rate=1e-3, max_training_epochs=1, num_workers=0),
+                train_config=TrainConfig(batch_size=1, learning_rate=1e-3, max_training_epochs=1, num_workers=0, device='cpu'),
                 model_config=HeatmapModelConfig(base_channels=4, depth=1, max_channels=8),
                 output_save_path=root,
             )
@@ -177,7 +177,7 @@ class RuntimeIntegrationTests(unittest.TestCase):
                                                 predicted_points=np.asarray([[2, 3]]), point_errors=np.asarray([1.4]))
             self.assertEqual(row['dataset_split'], 'validation')
             self.assertEqual((row['repetition'], row['fold']), (2, 3))
-            self.assertEqual(trainer.get_validation_output_path(), root / 'validation_results')
+            self.assertEqual(trainer.get_validation_output_path(), root / 'validation_best_loss')
             self.assertEqual(trainer.get_checkpoint_path('best_validation_loss').name, 'model_best_validation_loss.pth')
 
     def test_fold_all_keeps_standard_validation_outputs(self):
@@ -210,7 +210,7 @@ class RuntimeIntegrationTests(unittest.TestCase):
             trainer.train()
 
             self.assertTrue((output_dir / 'model_best_validation_loss.pth').is_file())
-            self.assertTrue((output_dir / 'validation_results' / 'validation_predictions.csv').is_file())
+            self.assertTrue((output_dir / 'validation_best_loss' / 'validation_predictions.csv').is_file())
             summary = json.loads((output_dir / 'validation_checkpoint_summary.json').read_text(encoding='utf-8'))
             self.assertEqual(summary['fold'], 'all')
             checkpoint = torch.load(output_dir / 'model_best_validation_loss.pth', map_location='cpu', weights_only=False)
@@ -258,10 +258,10 @@ class RuntimeIntegrationTests(unittest.TestCase):
             self.assertTrue(callback_called)
             expected_outputs = {
                 'model_best_validation_loss.pth', 'model_last_epoch.pth', 'validation_checkpoint_summary.json',
-                'training_validation_log.csv', 'training_validation_plot.png', 'validation_results',
+                'training_validation_log.csv', 'training_validation_plot.png', 'validation_best_loss',
             }
             self.assertTrue(expected_outputs.issubset({path.name for path in output_dir.iterdir()}))
-            validation_dir = output_dir / 'validation_results'
+            validation_dir = output_dir / 'validation_best_loss'
             expected_validation_outputs = {
                 'validation_summary.xlsx', 'validation_image_summary.csv', 'validation_endpoints.csv', 'validation_predictions.csv',
                 'validation_heatmap_overlays', 'validation_point_overlays', 'validation_logs',

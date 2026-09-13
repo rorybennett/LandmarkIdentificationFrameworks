@@ -6,7 +6,7 @@ import importlib
 
 from .heatmap_transforms import get_default_heatmap_transforms
 from .model_registry import build_heatmap_model, get_available_model_names
-from .models import HRNetHeatmap, StackedHourglassHeatmap, UNetHeatmap, ViTPoseHeatmap, count_trainable_parameters
+from .models import HRNetHeatmap, StackedHourglassHeatmap, UNetHeatmap, ViTPoseHeatmap, MedSAMHeatmap, count_trainable_parameters
 
 __version__ = "0.1"
 
@@ -29,6 +29,7 @@ __all__ = [
     'HRNetHeatmap',
     'StackedHourglassHeatmap',
     'ViTPoseHeatmap',
+    'MedSAMHeatmap',
     'count_trainable_parameters',
     'get_default_heatmap_transforms',
     'build_heatmap_model',

@@ -88,6 +88,7 @@ class LetterboxTests(unittest.TestCase):
             dataset = HeatmapDataset(config)
             mean, std = dataset.calculate_normalisation_statistics()
             source = np.moveaxis(cv2.cvtColor(image, cv2.COLOR_BGR2RGB), -1, 0) / 255.
+            source = (source - source.min()) / (source.max() - source.min())
             np.testing.assert_allclose(mean, source.mean(axis=(1, 2)), atol=1e-7)
             config.normalisation_mean, config.normalisation_std = mean, std
             sample = dataset[0]
@@ -112,7 +113,7 @@ class LetterboxTests(unittest.TestCase):
 
     def test_all_architectures_produce_square_maps_for_letterboxed_inputs(self):
         image = torch.from_numpy(prepare_image(np.ones((1, 32, 64), np.float32), 64))[None]
-        for name in ('unet_basic', 'hrnet', 'stacked_hourglass', 'vitpose'):
+        for name in ('unet_basic', 'hrnet', 'stacked_hourglass'):
             config = inference_fixtures.StandaloneInferenceTests.model_config(name)
             model = build_heatmap_model(name, 2, 1, 64, **get_model_kwargs(name, config)).eval()
             with torch.no_grad():
@@ -158,7 +159,7 @@ class LetterboxTests(unittest.TestCase):
             config = build_config_from_checkpoint_metadata(loaded.metadata, root / 'inference', save_raw_heatmaps=True)
             result = run_heatmap_inference_for_records(loaded.model, config,
                 [HeatmapImageRecord('val', root / 'val.png', [(3, 2)])], 'cpu')[0]
-            with open(root / 'outputs' / 'validation_results' / 'validation_endpoints.csv') as f:
+            with open(root / 'outputs' / 'validation_best_loss' / 'validation_endpoints.csv') as f:
                 row = next(csv.DictReader(f))
             for field in ('pred_x', 'pred_y', 'error_px'):
                 self.assertAlmostEqual(float(row[field]), result['endpoint_rows'][0][field], places=5)

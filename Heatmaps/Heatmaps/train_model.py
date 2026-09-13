@@ -22,7 +22,8 @@ import torch
 from openpyxl import Workbook
 from torch import nn
 from torch.optim import AdamW, SGD
-from torch.optim.lr_scheduler import ReduceLROnPlateau, StepLR
+from torch.optim.lr_scheduler import ReduceLROnPlateau, StepLR, LambdaLR
+import math
 from torch.utils.data import DataLoader
 
 from .custom_dataset import HeatmapDataset, HeatmapDatasetConfig
@@ -92,13 +93,16 @@ class TrainConfig:
     batch_size: int
     learning_rate: float
     max_training_epochs: int
+    device: str = 'cuda'
     num_workers: int = 8
     random_seed: int = 42
     optimiser_name: str = 'adamw'
     loss_name: str = 'weighted_mse'
     positive_weight: float = 20.0
-    weight_decay: float = 1e-4
     momentum: float = 0.9
+    visualise_validation_progress_images: int = 0
+    visualise_validation_progress_epochs: int = 0
+    weight_decay: float = 1e-4
     lr_schedule: str = 'plateau'
     lr_step_size: int = 20
     lr_gamma: float = 0.5
@@ -107,6 +111,22 @@ class TrainConfig:
     early_stop_warmup_epochs: int = 10
     use_amp: bool = False
     save_validation_predictions: bool = True
+    pretrained_checkpoint: str = ''
+    pretrained_checkpoint_sha256: str = ''
+    encoder_learning_rate: float = 1e-5
+    freeze_encoder_epochs: int = 5
+    finetune_last_blocks: int = 4
+    decoder_plateau_patience: int = 10
+    decoder_plateau_min_delta: float = 0.1
+    finetune_decoder_lr_factor: float = 0.5
+    lr_plateau_patience: int = 3
+    lr_decay_epochs: int = 50
+    lr_min_factor: float = 0.01
+    landmark_constraint_loss: str | None = None
+    constraint_angle_weight: float = 0.01
+    constraint_side_weight: float = 0.01
+    constraint_temperature: float = 0.05
+    constraint_margin: float = 0.02
 
 
 @dataclass
@@ -131,25 +151,10 @@ class HeatmapModelConfig:
     hourglass_depth: int = 4
     hourglass_blocks: int = 1
     auxiliary_loss_weight: float = 1.0
-    vit_patch_size: int = 16
-    vit_embed_dim: int = 384
-    vit_depth: int = 8
-    vit_heads: int = 6
-    vit_mlp_ratio: float = 4.0
-    vit_dropout: float = 0.0
-    vit_decoder_channels: int = 256
+    decoder_channels: int = 256
+    gradient_checkpointing: bool = True
 
 
-class WeightedMSELoss(nn.Module):
-    """Apply stronger loss near landmark heatmap peaks."""
-
-    def __init__(self, positive_weight=20.0):
-        super().__init__()
-        self.positive_weight = float(positive_weight)
-
-    def forward(self, outputs, targets):
-        weights = 1.0 + targets * self.positive_weight
-        return weights * (outputs - targets) ** 2
 
 
 class TrainModel:
@@ -160,7 +165,9 @@ class TrainModel:
         self.train_config = train_config
         self.model_config = model_config
         self.output_path = Path(output_save_path)
-        self.device = device or torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        from .utils.heatmap_inference_utils import resolve_device
+        self.device = resolve_device(train_config.device if device is None else device)
+        self.is_pretrained = model_config.network_name in ('vitpose', 'vit-medsam')
         self.resume_training = bool(resume_training)
         self.runtime_metadata = None
         self.training_status = 'initialising'
@@ -180,11 +187,16 @@ class TrainModel:
         self.current_session_start_perf = None
         self.training_generator = None
         self.validation_generator = None
+        self.validation_progress = None
+        self.best_pixel_checkpoint = None
+        self.stage_control = {'joint_start_epoch': None if self.is_pretrained else 1, 'pending_transition': False,
+                              'decoder_best_error': None, 'decoder_bad_epochs': 0}
         self.history = self.empty_history()
         self.validate_configs()
 
     def train(self, on_dataset_validated=None, on_training_state_ready=None):
         """Run or explicitly resume the fold training workflow."""
+        self.validate_pretraining()
         self.workflow_started_at = utc_now_iso()
         self.workflow_start_perf = time.perf_counter()
         self.set_random_seed(self.train_config.random_seed)
@@ -201,15 +213,14 @@ class TrainModel:
 
             self.training_status = 'dataset_validated'
 
-            if on_dataset_validated is not None:
-                on_dataset_validated()
-
             model_setup_start = time.perf_counter()
             model = self.build_model()
             criterion = self.build_criterion()
             optimiser = self.build_optimiser(model)
             scheduler = self.build_scheduler(optimiser)
             scaler = torch.amp.GradScaler('cuda', enabled=self.train_config.use_amp and self.device.type == 'cuda')
+            if on_dataset_validated is not None:
+                on_dataset_validated()
             resume_signature = self.build_resume_signature(training_loader=training_loader, validation_loader=validation_loader)
             history = self.empty_history()
             best_epoch = None
@@ -266,6 +277,24 @@ class TrainModel:
                              else range(start_epoch, self.train_config.max_training_epochs + 1))
 
             for epoch in epochs_to_run:
+                if self.stage_control['pending_transition']:
+                    model.load_state_dict(self.best_pixel_checkpoint['state_dict'], strict=True)
+                    optimiser.state.clear()
+                    for group, rate in zip(optimiser.param_groups, (
+                            self.train_config.learning_rate * self.train_config.finetune_decoder_lr_factor,
+                            self.train_config.encoder_learning_rate)):
+                        group['lr'] = rate
+                        group['initial_lr'] = rate
+                    scheduler = self.build_scheduler(optimiser)
+                    self.stage_control.update(joint_start_epoch=epoch, pending_transition=False)
+                    early_stop_best_validation_loss = float('inf')
+                    bad_epochs = 0
+                    print(f"\tDecoder plateau: restored epoch {self.best_pixel_checkpoint['epoch']}; starting joint fine-tuning.", flush=True)
+                joint_start = self.stage_control['joint_start_epoch']
+                if self.is_pretrained:
+                    model.set_finetuning_stage(joint_start is not None, self.train_config.finetune_last_blocks)
+                stage = 'encoder_and_decoder' if joint_start is not None else 'decoder_only'
+                print(f'\tTraining stage: {stage if self.is_pretrained else "full_model"}; LRs={[group["lr"] for group in optimiser.param_groups]}', flush=True)
                 epoch_started_at = utc_now_iso()
                 epoch_start = time.perf_counter()
                 print(f"\t{dt.datetime.now().strftime('%d/%m/%Y %H:%M:%S')} - Epoch {epoch}/{self.train_config.max_training_epochs}", flush=True)
@@ -285,7 +314,7 @@ class TrainModel:
                 self.validate_finite_metrics(phase='validation', metrics=validation_metrics)
 
                 if scheduler is not None:
-                    scheduler.step(validation_metrics['loss']) if isinstance(scheduler, ReduceLROnPlateau) else scheduler.step()
+                    scheduler.step(validation_metrics['error_px']) if isinstance(scheduler, ReduceLROnPlateau) else scheduler.step()
 
                 is_new_best = best_validation_metrics is None or validation_metrics['loss'] < best_validation_metrics['loss']
                 is_early_stop_improvement = validation_metrics['loss'] < early_stop_best_validation_loss - self.train_config.early_stop_min_delta
@@ -298,10 +327,13 @@ class TrainModel:
                 if is_early_stop_improvement:
                     early_stop_best_validation_loss = validation_metrics['loss']
 
-                if epoch >= self.train_config.early_stop_warmup_epochs:
+                if joint_start is None:
+                    self.update_decoder_plateau(epoch, validation_metrics['error_px'])
+                joint_age = 0 if joint_start is None else epoch - joint_start + 1
+                if joint_age >= self.train_config.early_stop_warmup_epochs:
                     bad_epochs = 0 if is_early_stop_improvement else bad_epochs + 1
 
-                should_early_stop = epoch >= self.train_config.early_stop_warmup_epochs and bad_epochs >= self.train_config.early_stop_patience
+                should_early_stop = joint_start is not None and joint_age >= self.train_config.early_stop_warmup_epochs and bad_epochs >= self.train_config.early_stop_patience
                 epoch_termination_reason = ('early_stopping' if should_early_stop else
                                             'max_epochs_reached' if epoch >= self.train_config.max_training_epochs else 'in_progress')
                 last_epoch = epoch
@@ -328,6 +360,9 @@ class TrainModel:
                                                                 checkpoint_type='best_validation_loss', epoch=epoch,
                                                                 validation_metrics=validation_metrics, training_state=None,
                                                                 resume_signature=resume_signature, best_model_state_dict=None)
+
+                self.save_best_pixel_checkpoint(model, epoch, validation_metrics)
+                self.validation_progress.render(self, model, epoch)
 
                 last_checkpoint_path = self.save_checkpoint(model=model, optimiser=optimiser, scheduler=scheduler, scaler=scaler,
                                                             checkpoint_type='last_epoch', epoch=epoch,
@@ -356,8 +391,17 @@ class TrainModel:
                 validation_export_start = time.perf_counter()
 
                 try:
-                    validation_output_paths = self.save_validation_predictions(model=model, validation_loader=validation_loader,
-                                                                               checkpoint_path=best_checkpoint_path or last_checkpoint_path)
+                    validation_output_paths = {}
+                    self.training_status = 'completed'
+                    for label, selected_path in (('validation_best_loss', best_checkpoint_path),
+                                                 ('validation_best_pixel_error', self.get_checkpoint_path('best_validation_pixel_error'))):
+                        self.validation_directory = label
+                        paths = self.save_validation_predictions(model=model, validation_loader=validation_loader,
+                                                                 checkpoint_path=selected_path)
+                        self.write_validation_run_metadata(**self.validation_metadata_context)
+                        self.commit_validation_output()
+                        validation_output_paths[label] = paths
+                    self.validation_metadata_context = None
                 finally:
                     self.validation_export_duration_seconds = time.perf_counter() - validation_export_start
 
@@ -404,7 +448,7 @@ class TrainModel:
             with torch.amp.autocast('cuda', enabled=self.train_config.use_amp and self.device.type == 'cuda'):
                 model_output = model(images)
                 outputs, auxiliary_outputs = unpack_heatmap_output(model_output)
-                loss = self.calculate_model_loss(outputs=outputs, auxiliary_outputs=auxiliary_outputs, targets=targets, criterion=criterion, valid_mask=batch['valid_mask'].to(self.device))
+                loss = self.calculate_model_loss(outputs=outputs, auxiliary_outputs=auxiliary_outputs, targets=targets, criterion=criterion, valid_mask=batch['valid_mask'].to(self.device), constraint_batch=batch)
 
             scaler.scale(loss).backward()
             scaler.step(optimiser)
@@ -431,7 +475,7 @@ class TrainModel:
                 original_size = batch['original_size'].to(self.device, non_blocking=True)
                 model_output = model(images)
                 outputs, auxiliary_outputs = unpack_heatmap_output(model_output)
-                loss = self.calculate_model_loss(outputs=outputs, auxiliary_outputs=auxiliary_outputs, targets=targets, criterion=criterion, valid_mask=batch['valid_mask'].to(self.device))
+                loss = self.calculate_model_loss(outputs=outputs, auxiliary_outputs=auxiliary_outputs, targets=targets, criterion=criterion, valid_mask=batch['valid_mask'].to(self.device), constraint_batch=batch)
                 batch_error = self.calculate_batch_error(outputs=outputs, points_original=points_original, original_size=original_size)
                 total_loss += loss.item() * images.size(0)
                 total_error_px += batch_error.sum().item()
@@ -530,6 +574,9 @@ class TrainModel:
                                      pin_memory=self.device.type == 'cuda', worker_init_fn=seed_worker, generator=self.training_generator)
         validation_loader = DataLoader(validation_dataset, batch_size=self.train_config.batch_size, shuffle=False, num_workers=self.train_config.num_workers,
                                        pin_memory=self.device.type == 'cuda', worker_init_fn=seed_worker, generator=self.validation_generator)
+        from .validation_progress import ValidationProgress
+        self.validation_progress = ValidationProgress(validation_dataset, self.train_config.visualise_validation_progress_images,
+            self.train_config.visualise_validation_progress_epochs, self.train_config.random_seed, self.output_path / 'validation_progress')
         return training_loader, validation_loader
 
     def validate_dataset_membership(self, training_dataset, validation_dataset):
@@ -583,7 +630,7 @@ class TrainModel:
             training_dataset.config.normalisation_std = None
             validation_dataset.config.normalisation_mean = None
             validation_dataset.config.normalisation_std = None
-            print('\tInput normalisation disabled.', flush=True)
+            print('\tMedSAM per-image min-max scaling enabled; dataset standardisation disabled.', flush=True)
             return
 
         if int(self.data_config.input_channels) != EXPECTED_NORMALISATION_CHANNELS:
@@ -635,10 +682,10 @@ class TrainModel:
 
         model_kwargs = get_model_kwargs(self.model_config.network_name, self.model_config)
         model = build_heatmap_model(network_name=self.model_config.network_name, num_of_points=self.data_config.num_of_points,
-                                    input_channels=int(self.data_config.input_channels), image_size=self.data_config.image_size, **model_kwargs)
+                                    input_channels=int(self.data_config.input_channels), image_size=self.data_config.image_size, pretrained_checkpoint=self.train_config.pretrained_checkpoint, initialise_pretrained=not self.resume_training, **model_kwargs)
         return model.to(self.device)
 
-    def calculate_model_loss(self, outputs, auxiliary_outputs, targets, criterion, valid_mask):
+    def calculate_model_loss(self, outputs, auxiliary_outputs, targets, criterion, valid_mask, constraint_batch=None):
         """Average valid pixels per image, then images; apply the same rule to every head."""
         mask = valid_mask.to(device=outputs.device, dtype=torch.bool).expand_as(targets)
         counts = mask.sum(dim=(1, 2, 3))
@@ -653,37 +700,51 @@ class TrainModel:
         loss = masked_loss(outputs)
         if auxiliary_outputs and float(self.model_config.auxiliary_loss_weight) > 0:
             loss = loss + float(self.model_config.auxiliary_loss_weight) * torch.stack([masked_loss(value) for value in auxiliary_outputs]).mean()
+        if self.train_config.landmark_constraint_loss is not None:
+            if constraint_batch is None:
+                raise ValueError('Constraint loss requires original sizes and inverse augmentation matrices.')
+            from .heatmap_losses import constraint_terms
+            with torch.autocast(device_type=outputs.device.type, enabled=False):
+                angle, sides = constraint_terms(
+                    outputs, valid_mask, constraint_batch['original_size'].to(outputs.device),
+                    constraint_batch['inverse_augmentation'].to(outputs.device),
+                    self.train_config.constraint_temperature, self.train_config.constraint_margin, self.train_config.landmark_constraint_loss)
+            loss = loss + self.train_config.constraint_angle_weight * angle + self.train_config.constraint_side_weight * sides
         return loss
 
     def build_criterion(self):
-        """Build the requested loss function."""
-        loss_name = str(self.train_config.loss_name).lower()
+        from .heatmap_losses import build_heatmap_loss
+        return build_heatmap_loss(self.train_config)
 
-        if loss_name == 'mse':
-            return nn.MSELoss(reduction='none')
-
-        if loss_name == 'weighted_mse':
-            return WeightedMSELoss(positive_weight=self.train_config.positive_weight)
-
-        if loss_name == 'smooth_l1':
-            return nn.SmoothL1Loss(reduction='none')
-
-        if loss_name == 'bce_logits':
-            return nn.BCEWithLogitsLoss(reduction='none')
-
-        raise ValueError(f'Unknown loss_name: {self.train_config.loss_name}')
+    def validate_pretraining(self):
+        """Validate initialisation before any existing training outputs are cleared."""
+        if not self.is_pretrained:
+            return
+        source = Path(self.train_config.pretrained_checkpoint)
+        if self.resume_training:
+            checkpoint = torch.load(self.get_checkpoint_path('last_epoch'), map_location='cpu', weights_only=False)
+            saved = checkpoint['metadata']['raw_configs']['train_config']
+            self.train_config.pretrained_checkpoint_sha256 = saved['pretrained_checkpoint_sha256']
+            if source.is_file() and self.sha256_file(source) != self.train_config.pretrained_checkpoint_sha256:
+                raise ValueError('Pretrained encoder initialisation checkpoint changed since this run started.')
+        else:
+            if not source.is_file():
+                raise FileNotFoundError(f'A local pretrained ViT-B checkpoint is required; no random-initialisation training is allowed: {source}')
+            self.train_config.pretrained_checkpoint_sha256 = self.sha256_file(source)
 
     def build_optimiser(self, model):
-        """Build the requested optimiser."""
-        optimiser_name = str(self.train_config.optimiser_name).lower()
-
-        if optimiser_name == 'adamw':
-            return AdamW(model.parameters(), lr=self.train_config.learning_rate, weight_decay=self.train_config.weight_decay)
-
-        if optimiser_name == 'sgd':
-            return SGD(model.parameters(), lr=self.train_config.learning_rate, momentum=self.train_config.momentum, weight_decay=self.train_config.weight_decay)
-
-        raise ValueError(f'Unknown optimiser_name: {self.train_config.optimiser_name}')
+        """Keep both parameter groups stable through warm-up and checkpoint resume."""
+        if not self.is_pretrained:
+            options = dict(lr=self.train_config.learning_rate, weight_decay=self.train_config.weight_decay)
+            if self.train_config.optimiser_name == 'sgd':
+                return SGD(model.parameters(), momentum=self.train_config.momentum, **options)
+            return AdamW(model.parameters(), **options)
+        groups = [
+            {'params': model.decoder_parameters(), 'lr': self.train_config.learning_rate, 'name': 'landmark_decoder'},
+            {'params': model.finetuning_parameters(self.train_config.finetune_last_blocks), 'lr': self.train_config.encoder_learning_rate, 'name': 'pretrained_image_encoder'},
+        ]
+        model.set_finetuning_stage(False, self.train_config.finetune_last_blocks)
+        return AdamW(groups, weight_decay=self.train_config.weight_decay)
 
     def build_scheduler(self, optimiser):
         """Build the learning-rate scheduler."""
@@ -696,9 +757,33 @@ class TrainModel:
             return StepLR(optimiser, step_size=self.train_config.lr_step_size, gamma=self.train_config.lr_gamma)
 
         if schedule == 'plateau':
-            return ReduceLROnPlateau(optimiser, mode='min', factor=self.train_config.lr_gamma, patience=5)
+            return ReduceLROnPlateau(optimiser, mode='min', factor=self.train_config.lr_gamma, patience=self.train_config.lr_plateau_patience, min_lr=[g['lr'] * self.train_config.lr_min_factor for g in optimiser.param_groups])
 
+        if schedule in ('cosine', 'linear', 'exponential'):
+            horizon = self.train_config.lr_decay_epochs
+            floor = self.train_config.lr_min_factor
+            gamma = self.train_config.lr_gamma
+            def multiplier(epoch):
+                progress = min(epoch / horizon, 1.0)
+                if schedule == 'cosine':
+                    return floor + (1 - floor) * (1 + math.cos(math.pi * progress)) / 2
+                if schedule == 'linear':
+                    return 1 - (1 - floor) * progress
+                return max(floor, gamma ** epoch)
+            return LambdaLR(optimiser, multiplier)
         raise ValueError(f'Unknown lr_schedule: {self.train_config.lr_schedule}')
+
+    def update_decoder_plateau(self, epoch, error):
+        control = self.stage_control
+        best = control['decoder_best_error']
+        if best is None or error < best - self.train_config.decoder_plateau_min_delta:
+            control['decoder_best_error'] = float(error)
+            control['decoder_bad_epochs'] = 0
+        else:
+            control['decoder_bad_epochs'] += 1
+        control['pending_transition'] = (epoch >= self.train_config.freeze_encoder_epochs
+                                         and control['decoder_bad_epochs'] >= self.train_config.decoder_plateau_patience)
+
 
     def calculate_batch_error(self, outputs, points_original, original_size):
         """Calculate endpoint error in original image pixels."""
@@ -750,11 +835,36 @@ class TrainModel:
                 'rng_state': self.capture_rng_state(),
                 'data_loader_generator_states': self.capture_data_loader_generator_states(),
                 'best_model_state_dict': best_model_state_dict,
+                'best_pixel_checkpoint': self.best_pixel_checkpoint,
                 'resume_signature': resume_signature,
             })
 
         self.atomic_torch_save(payload=payload, checkpoint_path=checkpoint_path)
         return checkpoint_path
+
+    def save_best_pixel_checkpoint(self, model, epoch, validation_metrics):
+        """Save a separate inference checkpoint when mean validation pixel error improves."""
+        if self.best_pixel_checkpoint is not None:
+            best_error = self.best_pixel_checkpoint['validation_metrics']['validation_error_px']
+            if validation_metrics['error_px'] >= best_error:
+                return
+        checkpoint_type = 'best_validation_pixel_error'
+        self.best_pixel_checkpoint = {
+            'format_version': CHECKPOINT_FORMAT_VERSION,
+            'schema': 'heatmap_training_checkpoint',
+            'schema_version': CHECKPOINT_SCHEMA_VERSION,
+            'created_at': utc_now_iso(),
+            'epoch': int(epoch),
+            'next_epoch': int(epoch) + 1,
+            'checkpoint_type': checkpoint_type,
+            'resume_capable': False,
+            'state_dict': self.clone_state_dict_to_cpu(model.state_dict()),
+            'optimiser_state_dict': None,
+            'validation_metrics': self.label_validation_metrics(validation_metrics),
+            'metadata': self.build_checkpoint_metadata(checkpoint_type, epoch, validation_metrics),
+        }
+        self.atomic_torch_save(self.best_pixel_checkpoint, self.get_checkpoint_path(checkpoint_type))
+        print(f"\tNew best pixel-error model saved from epoch {epoch}: {validation_metrics['error_px']:.2f}px", flush=True)
 
     def load_checkpoint_state(self, model, checkpoint_path):
         """Load checkpoint weights into a model."""
@@ -778,7 +888,7 @@ class TrainModel:
         """Write validation-based checkpoint-selection and run metadata."""
         validation_summary_path = None if validation_output_paths is None else validation_output_paths.get('validation_summary_xlsx')
         validation_predictions_path = None if validation_output_paths is None else validation_output_paths.get('validation_predictions_csv')
-        summary = {'format_version': CHECKPOINT_FORMAT_VERSION, 'schema': 'heatmap_validation_checkpoint_summary',
+        summary = {'validation_exports': self.serialise(validation_output_paths), 'format_version': CHECKPOINT_FORMAT_VERSION, 'schema': 'heatmap_validation_checkpoint_summary',
                    'schema_version': CHECKPOINT_SCHEMA_VERSION, 'created_at': utc_now_iso(),
                    'repetition': int(self.data_config.repetition), 'fold': normalise_fold(self.data_config.fold), 'task_name': self.data_config.task_name,
                    'num_of_points': int(self.data_config.num_of_points), 'checkpoints': {
@@ -793,6 +903,12 @@ class TrainModel:
                    'validation_predictions_path': str(validation_predictions_path) if validation_predictions_path is not None else None,
                    'metadata': self.build_run_metadata()}
 
+        if self.best_pixel_checkpoint is not None:
+            summary['checkpoints']['best_validation_pixel_error'] = self.build_checkpoint_descriptor(
+                path=self.get_checkpoint_path('best_validation_pixel_error'), checkpoint_type='best_validation_pixel_error',
+                epoch=self.best_pixel_checkpoint['epoch'],
+                validation_metrics=self.unlabel_validation_metrics(self.best_pixel_checkpoint['validation_metrics']))
+
         with open(self.get_checkpoint_summary_path(), 'w', encoding='utf-8') as summary_file:
             json.dump(summary, summary_file, indent=4, default=str)
 
@@ -806,7 +922,7 @@ class TrainModel:
         model_init_config = self.serialise(get_model_kwargs(self.model_config.network_name, self.model_config))
         model_init_args = {'num_of_points': int(self.data_config.num_of_points), 'input_channels': input_channels, **model_init_config}
 
-        if self.model_config.network_name == 'vitpose':
+        if self.is_pretrained:
             model_init_args['image_size'] = self.data_config.image_size
 
         registry_entry = get_model_registry_entry(self.model_config.network_name)
@@ -827,7 +943,7 @@ class TrainModel:
             'preprocessing': {'image_size': self.data_config.image_size, 'heatmap_sigma': float(self.data_config.heatmap_sigma),
                               'input_channels': input_channels, 'enforce_greyscale': bool(self.data_config.enforce_greyscale), 'tensor_shape': ['batch', input_channels, image_height, image_width],
                               'channel_order': 'channels_first', 'loaded_image_value_range': 'float32_0_to_1',
-                              'model_input_values': ('three_channel_standardised' if self.data_config.normalise_inputs else 'float32_0_to_1'),
+                              'model_input_values': ('three_channel_standardised' if self.data_config.normalise_inputs else 'per_image_minmax_0_to_1_content_only'),
                               'normalisation': self.build_normalisation_metadata(),
                               'resize': dict(LETTERBOX_POLICY),
                               'target_heatmaps': {'channels': int(self.data_config.num_of_points), 'generation': 'normalised_gaussian_per_landmark_masked_to_content'}},
@@ -837,7 +953,7 @@ class TrainModel:
             'training': {'train_config': train_config, 'optimiser': self.train_config.optimiser_name, 'loss': self.train_config.loss_name,
                          'random_seed': int(self.train_config.random_seed),
                          'resume': {'supported_from': 'model_last_epoch.pth', 'epoch_boundary_only': True},
-                         'auxiliary_loss_weight': float(self.model_config.auxiliary_loss_weight) if self.model_config.network_name == 'stacked_hourglass' else None},
+                         'auxiliary_loss_weight': None},
             'runtime_environment': self.runtime_metadata,
             'timing': self.get_timing_summary(),
             'raw_configs': {'data_config': data_config, 'train_config': train_config, 'model_config': model_config}
@@ -850,7 +966,7 @@ class TrainModel:
             'channels': EXPECTED_NORMALISATION_CHANNELS,
             'mean': None if self.data_config.normalisation_mean is None else list(self.data_config.normalisation_mean),
             'standard_deviation': None if self.data_config.normalisation_std is None else list(self.data_config.normalisation_std),
-            'source': 'training_split_images' if self.data_config.normalise_inputs else 'disabled',
+            'source': 'per_image_minmax_after_letterbox_resize_excluding_padding',
             'statistic': 'population',
             'calculated_from': 'training_split_only' if self.data_config.normalise_inputs else None,
             'calculation_inputs': 'unaugmented_float32_0_to_1_resized_training_content_excluding_padding',
@@ -896,6 +1012,9 @@ class TrainModel:
         self.validate_resume_checkpoint(checkpoint=checkpoint, checkpoint_path=checkpoint_path, resume_signature=resume_signature)
         self.remove_stale_checkpoint_temps()
         training_state = checkpoint['training_state']
+        self.stage_control = copy.deepcopy(training_state['stage_control'])
+        self.best_pixel_checkpoint = checkpoint['best_pixel_checkpoint']
+        self.atomic_torch_save(self.best_pixel_checkpoint, self.get_checkpoint_path('best_validation_pixel_error'))
         model.load_state_dict(checkpoint['state_dict'], strict=True)
         optimiser.load_state_dict(checkpoint['optimiser_state_dict'])
         checkpoint_scheduler_state = checkpoint['scheduler_state_dict']
@@ -948,7 +1067,7 @@ class TrainModel:
         required_fields = {
             'epoch', 'next_epoch', 'validation_metrics',
             'state_dict', 'optimiser_state_dict', 'scheduler_state_dict', 'grad_scaler_state_dict', 'training_state',
-            'rng_state', 'data_loader_generator_states', 'best_model_state_dict', 'resume_signature',
+            'rng_state', 'data_loader_generator_states', 'best_model_state_dict', 'best_pixel_checkpoint', 'resume_signature',
         }
         missing_fields = sorted(required_fields - set(checkpoint))
 
@@ -976,13 +1095,24 @@ class TrainModel:
         training_state = checkpoint['training_state']
         required_training_fields = {
             'completed_epoch', 'next_epoch', 'history', 'best_epoch', 'best_validation_metrics',
-            'early_stop_best_validation_loss', 'bad_epochs', 'last_validation_metrics', 'termination_reason', 'training_sessions',
+            'early_stop_best_validation_loss', 'bad_epochs', 'last_validation_metrics', 'termination_reason', 'training_sessions', 'stage_control',
         }
         missing_training_fields = sorted(required_training_fields - set(training_state))
 
         if missing_training_fields:
             raise ValueError(f'Resume checkpoint training state is incomplete; missing fields: {missing_training_fields}.')
 
+        if training_state.get('validation_progress_samples') != self.validation_progress.sample_names:
+            raise ValueError('Validation progress sample selection changed since this run started.')
+        control = training_state['stage_control']
+        if not isinstance(control, dict) or set(control) != {'joint_start_epoch', 'pending_transition', 'decoder_best_error', 'decoder_bad_epochs'}:
+            raise ValueError('Resume checkpoint has invalid stage control.')
+        if type(control['pending_transition']) is not bool or type(control['decoder_bad_epochs']) is not int or control['decoder_bad_epochs'] < 0:
+            raise ValueError('Resume checkpoint has invalid decoder plateau counters.')
+        if self.is_pretrained and (control['decoder_best_error'] is None or not math.isfinite(control['decoder_best_error'])):
+            raise ValueError('Resume checkpoint has invalid decoder best error.')
+        if control['joint_start_epoch'] is not None and (type(control['joint_start_epoch']) is not int or not 1 <= control['joint_start_epoch'] <= int(training_state['completed_epoch']) or control['pending_transition']):
+            raise ValueError('Resume checkpoint has invalid joint-stage epoch.')
         completed_epoch = int(training_state['completed_epoch'])
 
         if int(checkpoint['epoch']) != completed_epoch:
@@ -1016,6 +1146,17 @@ class TrainModel:
             )
 
         self.validate_history(training_state['history'], completed_epoch=completed_epoch)
+        pixel_checkpoint = checkpoint['best_pixel_checkpoint']
+        history = training_state['history']
+        best_index = min(range(completed_epoch), key=lambda index: history['validation_error_px'][index])
+        if (not isinstance(pixel_checkpoint, dict) or pixel_checkpoint.get('checkpoint_type') != 'best_validation_pixel_error'
+                or pixel_checkpoint.get('epoch') != best_index + 1
+                or pixel_checkpoint.get('validation_metrics') != {
+                    'validation_loss': history['validation_loss'][best_index],
+                    'validation_error_px': history['validation_error_px'][best_index]}):
+            raise ValueError('Resume checkpoint best pixel-error snapshot disagrees with its validation history.')
+        self.validate_state_dict_snapshot(checkpoint['state_dict'], pixel_checkpoint['state_dict'])
+
 
     def ensure_best_checkpoint(self, best_checkpoint_path, best_epoch, best_validation_metrics, best_model_state_dict):
         """Restore the committed best checkpoint if an interruption left its sibling file ahead or missing."""
@@ -1204,7 +1345,7 @@ class TrainModel:
 
     def remove_stale_checkpoint_temps(self):
         """Discard uncommitted temporary siblings after the committed last checkpoint validates."""
-        for checkpoint_type in ('best_validation_loss', 'last_epoch'):
+        for checkpoint_type in ('best_validation_loss', 'best_validation_pixel_error', 'last_epoch'):
             checkpoint_path = self.get_checkpoint_path(checkpoint_type)
             temporary_path = checkpoint_path.with_name(f'.{checkpoint_path.name}.tmp')
 
@@ -1220,6 +1361,8 @@ class TrainModel:
                              bad_epochs, last_validation_metrics, termination_reason):
         """Build the loop/control state required to continue at the next epoch."""
         return {
+            'validation_progress_samples': self.validation_progress.sample_names,
+            'stage_control': copy.deepcopy(self.stage_control),
             'completed_epoch': int(completed_epoch),
             'next_epoch': int(completed_epoch) + 1,
             'history': copy.deepcopy(history),
@@ -1470,13 +1613,10 @@ class TrainModel:
         if self.train_config.weight_decay < 0:
             raise ValueError(f'weight_decay must be at least 0. Got: {self.train_config.weight_decay}')
 
-        if self.train_config.momentum < 0:
-            raise ValueError(f'momentum must be at least 0. Got: {self.train_config.momentum}')
-
         if self.train_config.lr_step_size < 1:
             raise ValueError(f'lr_step_size must be at least 1. Got: {self.train_config.lr_step_size}')
 
-        if self.train_config.lr_gamma <= 0:
+        if not math.isfinite(self.train_config.lr_gamma) or self.train_config.lr_gamma <= 0 or (self.train_config.lr_schedule in ('plateau', 'step', 'exponential') and self.train_config.lr_gamma >= 1):
             raise ValueError(f'lr_gamma must be greater than 0. Got: {self.train_config.lr_gamma}')
 
         if self.train_config.early_stop_patience < 1:
@@ -1492,76 +1632,42 @@ class TrainModel:
             raise ValueError('loss_name=bce_logits requires output_activation=none because BCEWithLogitsLoss expects raw logits.')
 
     def validate_model_config(self, image_height, image_width):
-        """Validate the selected architecture and its image-size requirements."""
-        network_name = str(self.model_config.network_name).lower()
-        get_model_config_fields(network_name)
-
-        if self.model_config.dropout < 0 or self.model_config.dropout >= 1:
-            raise ValueError(f'dropout must be in the range [0, 1). Got: {self.model_config.dropout}')
-
-        if self.model_config.vit_dropout < 0 or self.model_config.vit_dropout >= 1:
-            raise ValueError(f'vit_dropout must be in the range [0, 1). Got: {self.model_config.vit_dropout}')
-
-        if self.model_config.auxiliary_loss_weight < 0:
-            raise ValueError(f'auxiliary_loss_weight must be at least 0. Got: {self.model_config.auxiliary_loss_weight}')
-
-        if network_name == 'unet_basic':
-            if self.model_config.base_channels < 1 or self.model_config.depth < 1 or self.model_config.channel_multiplier < 1:
-                raise ValueError('U-Net base_channels, depth, and channel_multiplier must be at least 1.')
-
-            if self.model_config.max_channels < self.model_config.base_channels:
-                raise ValueError('max_channels must be greater than or equal to base_channels.')
-
-            minimum_image_size = 2 ** int(self.model_config.depth)
-            deepest_height = image_height // minimum_image_size
-            deepest_width = image_width // minimum_image_size
-
-            if self.model_config.normalisation in ('batch', 'instance') and deepest_height * deepest_width < 2:
-                raise ValueError(f'image_size produces a {deepest_height} x {deepest_width} deepest U-Net feature map. Use a larger image, a shallower network, or normalisation=None.')
-
-            if self.model_config.normalisation == 'group':
-                deepest_channels = min(int(self.model_config.base_channels) * (int(self.model_config.channel_multiplier) ** int(self.model_config.depth)), int(self.model_config.max_channels))
-                groups = min(8, deepest_channels)
-
-                while deepest_channels % groups != 0:
-                    groups -= 1
-
-                if (deepest_channels // groups) * deepest_height * deepest_width < 2:
-                    raise ValueError('The deepest U-Net feature map does not contain enough values per group for group normalisation.')
-
-            if self.model_config.padding_mode == 'reflect' and (deepest_height < 2 or deepest_width < 2):
-                raise ValueError('padding_mode=reflect requires both deepest U-Net feature-map dimensions to be at least 2.')
-        elif network_name == 'hrnet':
-            if self.model_config.hrnet_width < 4 or self.model_config.hrnet_modules < 1 or self.model_config.hrnet_blocks < 1:
-                raise ValueError('HRNet requires hrnet_width >= 4, hrnet_modules >= 1, and hrnet_blocks >= 1.')
-
-            minimum_image_size = 64
-        elif network_name == 'stacked_hourglass':
-            if self.model_config.hourglass_features < 16 or self.model_config.hourglass_stacks < 1 or self.model_config.hourglass_depth < 1 or self.model_config.hourglass_blocks < 1:
-                raise ValueError('Stacked hourglass requires hourglass_features >= 16 and positive stack, depth, and block counts.')
-
-            minimum_image_size = 8 * (2 ** int(self.model_config.hourglass_depth))
-        elif network_name == 'vitpose':
-            patch_size = int(self.model_config.vit_patch_size)
-
-            if patch_size < 2 or patch_size & (patch_size - 1):
-                raise ValueError('vit_patch_size must be a power of two greater than or equal to 2.')
-
-            if self.model_config.vit_embed_dim < 8 or self.model_config.vit_depth < 1 or self.model_config.vit_heads < 1:
-                raise ValueError('ViTPose requires vit_embed_dim >= 8 and positive transformer depth and head counts.')
-
-            if self.model_config.vit_embed_dim % self.model_config.vit_heads != 0:
-                raise ValueError('vit_heads must divide vit_embed_dim exactly.')
-
-            if self.model_config.vit_mlp_ratio <= 0 or self.model_config.vit_decoder_channels < 16:
-                raise ValueError('ViTPose requires vit_mlp_ratio > 0 and vit_decoder_channels >= 16.')
-
-            minimum_image_size = patch_size
-        else:
-            raise ValueError(f'Unknown heatmap model: {network_name}')
-
-        if image_height < minimum_image_size or image_width < minimum_image_size:
-            raise ValueError(f'image_size must be at least {minimum_image_size} x {minimum_image_size} for {network_name}. Got: {image_height} x {image_width}')
+        """Validate shared objectives and architecture-specific fine-tuning controls."""
+        get_model_config_fields(self.model_config.network_name)
+        if self.is_pretrained:
+            from .models.pretrained import validate_model_options
+            validate_model_options(image_height, 3, self.model_config.decoder_channels, self.model_config.output_activation, self.model_config.final_kernel_size)
+            if self.data_config.normalise_inputs or not self.data_config.enforce_greyscale:
+                raise ValueError('Pretrained ViT ultrasound inputs require enforce_greyscale=True and normalise_inputs=False; per-image min-max scaling is applied instead.')
+            if self.train_config.optimiser_name != 'adamw':
+                raise ValueError('Pretrained ViT fine-tuning uses AdamW only.')
+            if not 0 < self.train_config.encoder_learning_rate < self.train_config.learning_rate:
+                raise ValueError('encoder_learning_rate must be positive and lower than the decoder learning_rate.')
+            if not 1 <= self.train_config.freeze_encoder_epochs < self.train_config.max_training_epochs:
+                raise ValueError('freeze_encoder_epochs must be at least 1 and below max_training_epochs so both stages run.')
+            if not 1 <= self.train_config.finetune_last_blocks <= 12:
+                raise ValueError('finetune_last_blocks must be between 1 and 12.')
+        from .heatmap_losses import LANDMARK_CONSTRAINTS
+        constraint = self.train_config.landmark_constraint_loss
+        if constraint is not None:
+            if constraint not in LANDMARK_CONSTRAINTS:
+                raise ValueError('Unknown landmark constraint loss.')
+            if self.data_config.num_of_points != LANDMARK_CONSTRAINTS[constraint][0]:
+                raise ValueError(f'{constraint} requires {LANDMARK_CONSTRAINTS[constraint][0]} landmarks.')
+        for name in ('constraint_angle_weight', 'constraint_side_weight', 'constraint_temperature', 'constraint_margin'):
+            value = getattr(self.train_config, name)
+            if not math.isfinite(value) or value < 0 or (name in ('constraint_temperature', 'constraint_margin') and value == 0):
+                raise ValueError(f'Invalid {name}.')
+        if self.train_config.visualise_validation_progress_images < 0 or self.train_config.visualise_validation_progress_epochs < 0:
+            raise ValueError('Validation progress counts must be non-negative.')
+        if self.train_config.optimiser_name not in ('adamw', 'sgd'):
+            raise ValueError('Unknown optimiser.')
+        if self.train_config.decoder_plateau_patience < 1 or not math.isfinite(self.train_config.decoder_plateau_min_delta) or self.train_config.decoder_plateau_min_delta < 0:
+            raise ValueError('Decoder plateau patience must be positive and min delta non-negative.')
+        if self.train_config.lr_plateau_patience < 0 or self.train_config.lr_decay_epochs < 1:
+            raise ValueError('Scheduler patience must be non-negative and decay epochs positive.')
+        if not 0 < self.train_config.lr_min_factor <= 1 or not 0 < self.train_config.finetune_decoder_lr_factor <= 1:
+            raise ValueError('Learning-rate factors must be in (0, 1].')
 
     @staticmethod
     def set_random_seed(seed):
@@ -1701,15 +1807,15 @@ class TrainModel:
 
     def get_validation_output_path(self):
         """Return the validation output directory."""
-        return self.output_path / 'validation_results'
+        return self.output_path / getattr(self, 'validation_directory', 'validation_best_loss')
 
     def get_validation_staging_path(self):
         """Return the same-volume staging directory for a complete validation export."""
-        return self.output_path / '.validation_results.tmp'
+        return self.output_path / ('.' + self.get_validation_output_path().name + '.tmp')
 
     def get_validation_backup_path(self):
         """Return the temporary backup used while committing a validation export."""
-        return self.output_path / '.validation_results.backup'
+        return self.output_path / ('.' + self.get_validation_output_path().name + '.backup')
 
     def prepare_validation_staging_path(self):
         """Recover a previously committed export and clear only uncommitted staging data."""
@@ -1765,6 +1871,9 @@ class TrainModel:
 
         if name == 'model_best_validation_loss':
             return 'best_validation_loss'
+
+        if name == 'model_best_validation_pixel_error':
+            return 'best_validation_pixel_error'
 
         if name == 'model_last_epoch':
             return 'last_epoch'

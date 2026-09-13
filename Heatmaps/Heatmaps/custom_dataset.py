@@ -56,8 +56,12 @@ class HeatmapDataset(Dataset):
         original_size = np.asarray(image.shape[1:3], dtype=np.int64)
         original_points = np.asarray(record['points'], dtype=np.float32)
 
+        augmentation = np.eye(3, dtype=np.float32)
         if is_oversampled and self.oversampling_transform is not None:
             image, original_points = self.oversampling_transform(image=image, points=original_points)
+            for params in self.oversampling_transform.last_params:
+                if params.get('transform') == 'random_affine':
+                    augmentation = np.asarray(params['matrix'], dtype=np.float32) @ augmentation
 
         image = prepare_image(image, self.config.image_size, self.config.normalisation_mean, self.config.normalisation_std)
         valid_mask = valid_content_mask([original_size], self.config.image_size)[0]
@@ -67,7 +71,7 @@ class HeatmapDataset(Dataset):
 
         heatmaps *= valid_mask.numpy()
 
-        return {'valid_mask': valid_mask, 'image': torch.from_numpy(image).float(), 'heatmaps': torch.from_numpy(heatmaps).float(), 'points_original': torch.from_numpy(original_points).float(), 'original_size': torch.from_numpy(original_size).long(), 'sample_name': record['sample_name'], 'image_path': str(record['image_path']), 'is_oversampled': bool(is_oversampled)}
+        return {'inverse_augmentation': torch.from_numpy(np.linalg.inv(augmentation).astype(np.float32)), 'valid_mask': valid_mask, 'image': torch.from_numpy(image).float(), 'heatmaps': torch.from_numpy(heatmaps).float(), 'points_original': torch.from_numpy(original_points).float(), 'original_size': torch.from_numpy(original_size).long(), 'sample_name': record['sample_name'], 'image_path': str(record['image_path']), 'is_oversampled': bool(is_oversampled)}
 
     def resolve_oversampling_factor(self):
         """Return the active oversampling factor for this split."""
@@ -118,7 +122,7 @@ class HeatmapDataset(Dataset):
         for record in self.records:
             image = load_image_as_float(record['image_path'], input_channels=self.config.input_channels, enforce_greyscale=self.config.enforce_greyscale)
             original_size = image.shape[-2:]
-            image = resize_channel_first(image=image, image_size=self.config.image_size)
+            image = prepare_image(image=image, image_size=self.config.image_size)
             statistics.update(remove_padding(image, original_size, self.config.image_size))
 
         return statistics.finalise()

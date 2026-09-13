@@ -24,3 +24,7 @@ heatmaps-infer = "Heatmaps.infer_landmarks:main"
 
 [tool.setuptools.packages.find]
 include = ["Heatmaps*"]
+
+[tool.setuptools.package-data]
+"Heatmaps.models" = ["NOTICE.md", "LICENSE_VITPOSE"]
+"Heatmaps.models.sam" = ["LICENSE", "NOTICE.md", "upstream.json"]

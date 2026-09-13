@@ -43,8 +43,8 @@ class HeatmapNormalisationTests(unittest.TestCase):
             )
             dataset.records = [{'image_path': first_path}, {'image_path': second_path}]
             mean, standard_deviation = dataset.calculate_normalisation_statistics()
-            expected = np.concatenate([np.moveaxis(first.astype(np.float32) / 255.0, -1, 0),
-                                       np.moveaxis(second.astype(np.float32) / 255.0, -1, 0)], axis=1).reshape(3, -1)
+            expected = np.concatenate([np.moveaxis((first.astype(np.float32) - first.min()) / (first.max() - first.min()), -1, 0),
+                                       np.moveaxis((second.astype(np.float32) - second.min()) / (second.max() - second.min()), -1, 0)], axis=1).reshape(3, -1)
             np.testing.assert_allclose(mean, expected.mean(axis=1), atol=1e-7)
             np.testing.assert_allclose(standard_deviation, expected.std(axis=1), atol=1e-7)
 

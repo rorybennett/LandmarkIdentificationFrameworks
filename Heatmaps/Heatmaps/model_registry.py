@@ -2,12 +2,20 @@
 Model registry for heatmap-regression networks.
 """
 
-from .models import HRNetHeatmap, StackedHourglassHeatmap, UNetHeatmap, ViTPoseHeatmap
+from .models import HRNetHeatmap, StackedHourglassHeatmap, UNetHeatmap, ViTPoseHeatmap, MedSAMHeatmap
+
 
 AVAILABLE_MODELS = {
+    'vit-medsam': {
+        'description': 'Pretrained MedSAM ViT-B with staged landmark fine-tuning.',
+        'module': 'Heatmaps.models.vit_medsam', 'class_name': 'MedSAMHeatmap',
+        'builder': MedSAMHeatmap,
+        'config_fields': ('decoder_channels', 'output_activation', 'final_kernel_size', 'gradient_checkpointing'),
+        'paper_url': 'https://www.nature.com/articles/s41467-024-44824-z',
+    },
     'unet_basic': {
         'description': 'Configurable U-Net for dense landmark heatmap regression.',
-        'module': 'Heatmaps.models',
+        'module': 'Heatmaps.models.unet',
         'class_name': 'UNetHeatmap',
         'builder': UNetHeatmap,
         'config_fields': ('base_channels', 'depth', 'channel_multiplier', 'max_channels', 'normalisation', 'activation', 'dropout', 'upsampling',
@@ -16,7 +24,7 @@ AVAILABLE_MODELS = {
     },
     'hrnet': {
         'description': 'High-resolution multi-branch network with repeated multi-scale fusion.',
-        'module': 'Heatmaps.models',
+        'module': 'Heatmaps.models.hrnet',
         'class_name': 'HRNetHeatmap',
         'builder': HRNetHeatmap,
         'config_fields': ('hrnet_width', 'hrnet_modules', 'hrnet_blocks', 'normalisation', 'activation', 'dropout', 'output_activation', 'padding_mode',
@@ -25,7 +33,7 @@ AVAILABLE_MODELS = {
     },
     'stacked_hourglass': {
         'description': 'Stacked bottom-up/top-down hourglass model with intermediate heatmap supervision.',
-        'module': 'Heatmaps.models',
+        'module': 'Heatmaps.models.stacked_hourglass',
         'class_name': 'StackedHourglassHeatmap',
         'builder': StackedHourglassHeatmap,
         'config_fields': ('hourglass_features', 'hourglass_stacks', 'hourglass_depth', 'hourglass_blocks', 'normalisation', 'activation', 'dropout',
@@ -33,13 +41,10 @@ AVAILABLE_MODELS = {
         'paper_url': 'https://arxiv.org/abs/1603.06937',
     },
     'vitpose': {
-        'description': 'Plain Vision Transformer backbone with a lightweight heatmap decoder.',
-        'module': 'Heatmaps.models',
-        'class_name': 'ViTPoseHeatmap',
-        'builder': ViTPoseHeatmap,
-        'config_fields': ('vit_patch_size', 'vit_embed_dim', 'vit_depth', 'vit_heads', 'vit_mlp_ratio', 'vit_dropout', 'vit_decoder_channels',
-                          'output_activation', 'final_kernel_size'),
-        'paper_url': 'https://arxiv.org/abs/2204.12484',
+        'description': 'ViTPose-pretrained ViT-B encoder with a landmark decoder.',
+        'module': 'Heatmaps.models.vitpose', 'class_name': 'ViTPoseHeatmap', 'builder': ViTPoseHeatmap,
+        'config_fields': ('decoder_channels','output_activation','final_kernel_size','gradient_checkpointing'),
+        'paper_url': 'https://github.com/ViTAE-Transformer/ViTPose',
     },
 }
 
@@ -99,7 +104,9 @@ def build_heatmap_model(network_name, num_of_points, input_channels, image_size,
     model_info = AVAILABLE_MODELS[network_name]
     model_kwargs = {field: kwargs[field] for field in model_info['config_fields']}
 
-    if network_name == 'vitpose':
+    if network_name in ('vitpose', 'vit-medsam'):
         model_kwargs['image_size'] = image_size
 
+    if network_name in ('vitpose','vit-medsam'):
+        model_kwargs.update(pretrained_checkpoint=kwargs.get('pretrained_checkpoint'), initialise_pretrained=kwargs.get('initialise_pretrained', True))
     return model_info['builder'](num_of_points=num_of_points, input_channels=input_channels, **model_kwargs)

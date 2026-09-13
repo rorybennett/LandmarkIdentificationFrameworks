@@ -17,8 +17,7 @@ COPY_FILES="false"
 RESUME_TRAINING="false"
 RUN_NAME=""
 
-IMAGE_HEIGHT=512
-IMAGE_WIDTH=512
+IMAGE_SIZE=512
 HEATMAP_SIGMA=8
 OVERSAMPLING_FACTOR=1
 RECURSIVE_IMAGE_SEARCH="false"
@@ -66,14 +65,11 @@ HOURGLASS_DEPTH=4
 HOURGLASS_BLOCKS=1
 AUXILIARY_LOSS_WEIGHT=1.0
 
-VIT_PATCH_SIZE=16
-VIT_EMBED_DIM=384
-VIT_DEPTH=8
-VIT_HEADS=6
-VIT_MLP_RATIO=4.0
-VIT_DROPOUT=0.0
-VIT_DECODER_CHANNELS=256
 
+PRETRAINED_CHECKPOINT=''
+LANDMARK_CONSTRAINT_LOSS=''
+VISUALISE_VALIDATION_PROGRESS_IMAGES=0
+VISUALISE_VALIDATION_PROGRESS_EPOCHS=0
 ARGS=(
     "$REPETITION" "$FOLD" "$TASK_NAME" "$TRAIN_MODEL" "$COPY_FILES"
     --run-dir "$RUN_DIR"
@@ -83,7 +79,7 @@ ARGS=(
     --fold-lists-path "$FOLD_LISTS_DIR"
     --mark-list-file "$MARK_LIST_FILE"
     --image-data-dir "$IMAGE_DATA_DIR"
-    --image-size "$IMAGE_HEIGHT" "$IMAGE_WIDTH"
+    --image-size "$IMAGE_SIZE"
     --heatmap-sigma "$HEATMAP_SIGMA"
     --oversampling-factor "$OVERSAMPLING_FACTOR"
     --recursive-image-search "$RECURSIVE_IMAGE_SEARCH"
@@ -126,17 +122,14 @@ ARGS=(
     --hourglass-depth "$HOURGLASS_DEPTH"
     --hourglass-blocks "$HOURGLASS_BLOCKS"
     --auxiliary-loss-weight "$AUXILIARY_LOSS_WEIGHT"
-    --vit-patch-size "$VIT_PATCH_SIZE"
-    --vit-embed-dim "$VIT_EMBED_DIM"
-    --vit-depth "$VIT_DEPTH"
-    --vit-heads "$VIT_HEADS"
-    --vit-mlp-ratio "$VIT_MLP_RATIO"
-    --vit-dropout "$VIT_DROPOUT"
-    --vit-decoder-channels "$VIT_DECODER_CHANNELS"
 )
 
 if [[ -n "$RUN_NAME" ]]; then
     ARGS+=(--run-name "$RUN_NAME")
 fi
 
-heatmaps-train "${ARGS[@]}"
+ARGS+=(--visualise-validation-progress-images "$VISUALISE_VALIDATION_PROGRESS_IMAGES" --visualise-validation-progress-epochs "$VISUALISE_VALIDATION_PROGRESS_EPOCHS")
+[[ -z "$LANDMARK_CONSTRAINT_LOSS" ]] || ARGS+=(--landmark-constraint-loss "$LANDMARK_CONSTRAINT_LOSS")
+[[ -z "$PRETRAINED_CHECKPOINT" ]] || ARGS+=(--pretrained-checkpoint "$PRETRAINED_CHECKPOINT")
+cd "$(dirname "${BASH_SOURCE[0]}")"
+python -u -m Heatmaps.heatmap_training_pipeline "${ARGS[@]}"

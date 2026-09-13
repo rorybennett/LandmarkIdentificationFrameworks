@@ -2,7 +2,7 @@
 
 Full-image heatmap-regression landmark localisation for the `LandmarkIdentificationFrameworks/Heatmaps` package.
 
-The package trains a convolutional neural network to produce one heatmap per landmark. Source images are loaded directly, resized into a common training coordinate
+The package trains a convolutional or transformer network to produce one heatmap per landmark. Source images are loaded directly, resized into a common training coordinate
 system, and paired with Gaussian target heatmaps generated from the supplied landmark coordinates.
 
 **Package version:** `0.1`
@@ -12,7 +12,7 @@ system, and paired with Gaussian target heatmaps generated from the supplied lan
 The package currently provides:
 
 - repeated k-fold training and validation;
-- configurable U-Net, HRNet, stacked-hourglass, and ViTPose heatmap regressors;
+- configurable U-Net, HRNet, stacked-hourglass, pretrained ViTPose-B and MedSAM ViT-B heatmap regressors;
 - landmark-preserving image augmentation;
 - automatic greyscale, RGB, or RGBA input-channel detection;
 - deterministic seeding for Python, NumPy, PyTorch, and DataLoader workers;
@@ -39,7 +39,17 @@ Heatmaps/
     heatmap_transforms.py
     infer_landmarks.py
     model_registry.py
-    models.py
+    heatmap_losses.py
+    validation_progress.py
+    models/
+      common.py
+      unet.py
+      hrnet.py
+      stacked_hourglass.py
+      pretrained.py
+      vitpose.py
+      vit_medsam.py
+      sam/  # Bundled encoder, licence and provenance
     parameters.py
     train_model.py
     utils/
@@ -308,7 +318,7 @@ Architecture-specific minimum sizes are checked before training:
 | `unet_basic`        | Each dimension must be at least `2 ** depth`; normalisation and reflect padding can require a larger deepest feature map |
 | `hrnet`             | Each dimension must be at least `64` pixels                                                                              |
 | `stacked_hourglass` | Each dimension must be at least `8 * (2 ** hourglass_depth)`                                                             |
-| `vitpose`           | Each dimension must be at least `vit_patch_size`                                                                         |
+| `vitpose`           | Canvas must be at least 16 pixels                                                                         |
 
 Odd and non-divisible dimensions are supported. CNN decoder outputs are aligned to the requested image size, while ViTPose pads internally to a complete patch grid and
 crops the result back to the requested size.
@@ -512,11 +522,11 @@ The resolved channel count configures the first network layer and is written to 
 
 ### Input-value normalisation
 
-`--normalise-inputs true` calculates a distinct population mean and standard deviation for each of the three channels using only the original images in the selected training split, after conversion to float32 `[0, 1]` and aspect-preserving resize, excluding padding. Validation images and oversampled/augmented copies do not contribute to the statistics.
+`--normalise-inputs true` calculates a distinct population mean and standard deviation for each of the three channels using only the original images in the selected training split, after aspect-preserving resize and per-image content min-max scaling to float32 `[0, 1]`, excluding padding. Validation images and oversampled/augmented copies do not contribute to the statistics.
 
 The current ultrasound data may be greyscale stored as RGB, but the calculation intentionally remains three-channel so future colour RGB images follow the same contract. Enabling input normalisation requires exactly three source channels; one- and four-channel training data are rejected rather than collapsed to a single statistic. This option is separate from `--normalisation`, which selects internal CNN normalisation layers such as batch or group normalisation.
 
-The enabled flag, three means and three standard deviations are stored under `metadata.preprocessing.normalisation` in each checkpoint. The same values are applied to training, validation and standalone inference inputs. `--normalise-inputs false` leaves inputs in the existing float32 `[0, 1]` range.
+The enabled flag, three means and three standard deviations are stored under `metadata.preprocessing.normalisation` in each checkpoint. The same values are applied to training, validation and standalone inference inputs. `--normalise-inputs false` uses per-image min-max scaled float32 `[0, 1]` content, with zero padding. This scaling is now shared by every model.
 
 ## Optimisation settings
 
@@ -533,7 +543,7 @@ The main options are:
 --positive-weight
 --weight-decay
 --momentum
---lr-schedule none|step|plateau
+--lr-schedule none|step|plateau|cosine|linear|exponential
 --lr-step-size
 --lr-gamma
 --early-stop-patience
@@ -560,7 +570,7 @@ validation-export and cumulative epoch timings, together with the termination re
 
 Training stops immediately with a clear error when a reported loss or endpoint-error metric becomes NaN or infinite.
 
-Validation loss is primarily an internal control signal for learning-rate scheduling, early stopping, and best-checkpoint selection within one run. Cross-model validation
+Validation loss is primarily an internal control signal for early stopping and best-loss checkpoint selection within one run. Cross-model validation
 losses must not be compared. Architecture-specific objectives can differ even when the exported final-heatmap endpoint errors use the same calculation.
 
 ## Model settings
@@ -572,13 +582,13 @@ unet_basic
 hrnet
 stacked_hourglass
 vitpose
+vit-medsam
 ```
 
 Every architecture produces one full-resolution heatmap per configured landmark and can be selected through `--network-name` without changing the training, validation,
 checkpoint, or export workflow.
 
-These are native PyTorch implementations for this package. They preserve the main design of the cited architectures but do not copy the authors' official repositories or
-bundle pretrained weights.
+The CNNs are native PyTorch implementations. ViTPose uses a checkpoint-compatible ViT-B backbone; MedSAM bundles its original image encoder with its licence and ViTDet attribution. Pretrained weights are supplied separately. Neither model requires installing ViTPose, timm, mmcv, MedSAM or segment_anything.
 
 ### U-Net
 
@@ -627,28 +637,51 @@ supervision while retaining stack-to-stack feature feedback.
 
 For `stacked_hourglass`, both training loss and validation loss are the final-stack heatmap loss plus `auxiliary_loss_weight` multiplied by the mean loss from all non-final
 stacks. Other architectures report only their final-output loss. This is why validation-loss values must not be compared across architectures. The combined validation
-loss is used only within that stacked-hourglass run for the plateau scheduler, early stopping, and best-checkpoint selection; exported predictions and endpoint errors use
+loss is used within that stacked-hourglass run for early stopping and best-loss checkpoint selection; the plateau scheduler uses pixel error; exported predictions and endpoint errors use
 the final stack only.
 
-### ViTPose
+### ViTPose and MedSAM
 
-`vitpose` divides the image into patches, embeds them as tokens, applies a plain Vision Transformer to model long-range relationships, and uses a lightweight
-transposed-convolution decoder to reconstruct landmark heatmaps. The implementation is based
-on [ViTPose: Simple Vision Transformer Baselines for Human Pose Estimation](https://arxiv.org/abs/2204.12484).
+`vitpose` loads the backbone from the **standard ViTPose-B COCO 256x192 pose checkpoint** supplied via `--pretrained-checkpoint`. Its 12-block, 768-wide, 12-head encoder uses 16-pixel patches. The original human-pose head is discarded; a new projection and full-resolution landmark decoder are trained. The official backbone layout, patch padding, positional-token addition and stochastic-depth schedule are retained. The 16x12 spatial position grid is interpolated onto the configured square canvas; incompatible checkpoint keys/shapes fail explicitly. MAE-only, ViTPose+, other sizes and older custom ViTPose checkpoints are not accepted by this loader.
+
+`vit-medsam` uses the bundled MedSAM ViT-B image encoder and the same landmark decoder. Supply original `medsam_vit_b.pth` through `--pretrained-checkpoint`. No prompts or segmentation decoder are used. See [MEDSAM.md](MEDSAM.md) for encoder provenance and positional adaptation.
+
+Both models accept one `--image-size SIZE >=16`, fixed for the run. Internal patch-alignment padding is cropped from the output. Their launchers default to **512**, with **sigma 8**. Larger canvases substantially increase ViTPose attention memory. Greyscale is replicated to three channels; content is min-max scaled to [0,1]. ViTPose additionally applies the fixed ImageNet mean/std from its source configuration inside the model; MedSAM receives min-max values. Dataset standardisation is disabled for both.
+
+Use `run_vitpose.ps1` / `.sh` or `run_vit_medsam.ps1` / `.sh` after editing paths and activating your Python environment. The scripts run the package from its source directory. No pretrained weights are downloaded automatically; inference/resume use the self-contained landmark checkpoint.
+
+### Shared staged training and schedulers
+
+Every model uses the same trainer, data pipeline, optional constraints, checkpoint selection and export code. CNNs train all parameters from epoch one. The two pretrained ViTs first train their landmark decoder (including ViTPose's newly initialised projection). The backbone stays frozen until both conditions hold:
+
+- At least `--freeze-encoder-epochs` epochs have run (default 5).
+- Validation pixel error has plateaued for `--decoder-plateau-patience` epochs (10), using `--decoder-plateau-min-delta` pixels (0.1).
+
+The next epoch restores the best pixel checkpoint and starts joint training, clearing optimiser state and restarting the scheduler. The decoder LR is multiplied by `--finetune-decoder-lr-factor` (0.5); encoder LR defaults to 1e-5. `--finetune-last-blocks` defaults to 4 in the CLI; 12 includes patch/position embeddings. MedSAM's pretrained neck is fine-tuned with its encoder. Early stopping monitors loss and starts in the joint stage. The maximum epoch budget still applies if the decoder never plateaus; joint training is not forced.
+
+ViT CLI defaults: AdamW, decoder LR 1e-4, weight decay 1e-4, maximum 300 epochs, early-stop patience 30, gradient checkpointing enabled. Both require supplied pretrained weights for fresh training.
+
+All models support `none`, `step`, `plateau`, `cosine`, `linear` and `exponential` schedulers. Plateau monitors **validation pixel error**, with `--lr-plateau-patience`, `--lr-gamma` and `--lr-min-factor`. Cosine/linear use `--lr-decay-epochs` and `--lr-min-factor`; exponential uses gamma and the same floor; step uses `--lr-step-size` and gamma. CNNs support AdamW or SGD. Full training state, stage transitions and RNG state are restored on resume.
+
+### Optional anatomical losses
+
+Constraints are disabled unless `--landmark-constraint-loss TYPE` is supplied. All architectures support:
+
+- `prostate_taus`: four points ordered top, right, bottom, left. Penalises angles outside 90 +/-20 degrees between P1-P3 and P4-P2, and points falling on the wrong sides of those axes.
+- `prostate-saus`: two points, encouraging P1 above P2 only.
+
+`prostate-taus` and `prostate_saus` are accepted spellings. Differentiable softmax coordinates exclude padding, reverse letterboxing, and apply the exact inverse augmentation matrix before geometry is evaluated. This accounts for rotation, shear and scaling. `--constraint-angle-weight` and `--constraint-side-weight` default to 0.01, `--constraint-temperature` to 0.05, and `--constraint-margin` to 0.02 of the original image diagonal. The total reported loss includes the constraints; hourglass auxiliary heatmaps also receive their usual heatmap supervision. These are soft penalties, not guarantees on final argmax coordinates.
+
+Add base objectives to `HEATMAP_LOSSES` in `Heatmaps/heatmap_losses.py`: a factory accepts the training config and returns an elementwise criterion. Padding masking/reduction is shared. Add geometry functions to `LANDMARK_CONSTRAINTS` as `(landmark_count, callable)` returning angle and side terms from restored, diagonal-normalised coordinates.
+
+### Validation progress images
 
 ```text
---network-name vitpose
---vit-patch-size
---vit-embed-dim
---vit-depth
---vit-heads
---vit-mlp-ratio
---vit-dropout
---vit-decoder-channels
+--visualise-validation-progress-images 5
+--visualise-validation-progress-epochs 5
 ```
 
-`--vit-patch-size` must be a power of two. `--vit-heads` must divide `--vit-embed-dim` exactly. ViTPose is normally the most memory-intensive option and is particularly
-dependent on dataset size or suitable pretraining; this package currently trains it from scratch.
+Both values must be positive. If either is omitted or zero, no progress images are generated. A local seeded sampler chooses up to the requested number of validation images at the start; their IDs are saved in the resume state and checked on continuation. Every requested interval, those same images run through both best checkpoints. Outputs are saved under `validation_progress/epoch_NNNN/best_validation_loss/` and `best_validation_pixel_error/`, with heatmap overlays, point overlays and `selection.json` identifying the observed epoch, checkpoint epoch and sample IDs. Rendering restores model and RNG state and does not alter subsequent training. It adds inference and image-writing time.
 
 ### Shared CNN and output settings
 
@@ -679,7 +712,7 @@ Validation export is enabled by default:
 --save-validation-predictions true
 ```
 
-After training, the best checkpoint is reloaded when available; otherwise the last checkpoint is used. Heatmap maxima are selected only within image content, padding offsets are removed, and coordinates are
+After training, both the best-loss and best-pixel checkpoints are reloaded and exported separately, even if their best epochs coincide. Heatmap maxima are selected only within image content, padding offsets are removed, and coordinates are
 scaled back into original-image pixels before endpoint errors are calculated.
 
 Set the option to `false` to skip the complete validation export.
@@ -696,12 +729,13 @@ Typical outputs are:
 
 ```text
 model_best_validation_loss.pth
+model_best_validation_pixel_error.pth
 model_last_epoch.pth
 validation_checkpoint_summary.json
 training_validation_log.csv
 training_validation_plot.png
 run_info.json
-validation_results/
+validation_best_loss/  # validation_best_pixel_error/ has the same contents
   validation_summary.xlsx
   validation_image_summary.csv
   validation_endpoints.csv
@@ -849,3 +883,8 @@ With `--normalise-inputs true`, statistics are calculated from the converted
 training inputs, giving identical means and standard deviations across channels.
 The setting is saved in checkpoints and applied automatically at inference.
 Checkpoints must declare this policy; earlier checkpoints are unsupported.
+
+
+## MedSAM landmark model
+
+The `vit-medsam` encoder is documented in [MEDSAM.md](MEDSAM.md). All architectures use the shared advanced training workflow above. Version remains `0.1`; earlier checkpoint layouts and retired custom ViTPose constructor flags are not supported. Start fresh runs after this refactor.

@@ -36,11 +36,6 @@ class StandaloneInferenceTests(unittest.TestCase):
             hourglass_stacks=1,
             hourglass_depth=1,
             hourglass_blocks=1,
-            vit_patch_size=8,
-            vit_embed_dim=16,
-            vit_depth=1,
-            vit_heads=2,
-            vit_decoder_channels=16,
         )
 
     def write_checkpoint(self, root, network_name, input_channels=None, normalisation=None):
@@ -71,6 +66,7 @@ class StandaloneInferenceTests(unittest.TestCase):
                 'image_size': self.image_size, 'resize': dict(LETTERBOX_POLICY),
                 'input_channels': input_channels, 'enforce_greyscale': False,
                 'normalisation': normalisation,
+                'model_input_values': 'three_channel_standardised' if normalisation['enabled'] else 'per_image_minmax_0_to_1_content_only',
             },
             'inference': {'heatmap_to_point': 'argmax', 'scale_back_to_original': True},
             'checkpoint': {'type': 'best_validation_loss'},
@@ -101,7 +97,7 @@ class StandaloneInferenceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary_dir:
             root = Path(temporary_dir)
 
-            for network_name in ('unet_basic', 'hrnet', 'stacked_hourglass', 'vitpose'):
+            for network_name in ('unet_basic', 'hrnet', 'stacked_hourglass'):
                 with self.subTest(network_name=network_name):
                     checkpoint_path = self.write_checkpoint(root, network_name)
                     loaded = load_model_from_checkpoint(checkpoint_path, device='cpu')
