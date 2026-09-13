@@ -1,0 +1,14 @@
+{
+  "image_encoder.py": {
+    "url": "https://raw.githubusercontent.com/bowang-lab/MedSAM/main/segment_anything/modeling/image_encoder.py",
+    "sha256": "afd56922b0c2903f0ddcc75ea2819b42c534c6a830082794f8b93028a2d0c19c"
+  },
+  "common.py": {
+    "url": "https://raw.githubusercontent.com/bowang-lab/MedSAM/main/segment_anything/modeling/common.py",
+    "sha256": "77581b8217e25c9ace51f7356fccd1a07ed2962d0f74aae2491f1001750565f1"
+  },
+  "LICENSE": {
+    "url": "https://raw.githubusercontent.com/bowang-lab/MedSAM/main/LICENSE",
+    "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+  }
+}
