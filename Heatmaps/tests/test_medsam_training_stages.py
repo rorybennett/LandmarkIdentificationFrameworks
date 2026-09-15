@@ -100,7 +100,7 @@ def test_resume_matches_uninterrupted_across_unfreeze(tmp_path, pretrained, sche
     actual = torch.load(tmp_path / 'resumed/model_last_epoch.pth', weights_only=False)
     for name, value in expected['state_dict'].items():
         torch.testing.assert_close(value, actual['state_dict'][name], rtol=0, atol=0)
-    for name in ('training_loss', 'validation_loss', 'training_error_px', 'validation_error_px', 'lr'):
+    for name in ('training_loss', 'validation_loss', 'training_error_px', 'validation_error_px', 'lr', 'lr_2', 'training_loss_component_heatmap'):
         assert expected['training_state']['history'][name] == actual['training_state']['history'][name]
     assert not torch.equal(actual['state_dict']['image_encoder.neck.weight'], original_weights['image_encoder.neck.weight'])
     groups = actual['optimiser_state_dict']['param_groups']

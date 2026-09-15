@@ -299,6 +299,7 @@ class TrainModel:
                 epoch_start = time.perf_counter()
                 print(f"\t{dt.datetime.now().strftime('%d/%m/%Y %H:%M:%S')} - Epoch {epoch}/{self.train_config.max_training_epochs}", flush=True)
                 epoch_lr = self.get_current_lr(optimiser)
+                epoch_lrs = [float(group['lr']) for group in optimiser.param_groups]
 
                 self.synchronise_device()
                 training_start = time.perf_counter()
@@ -345,7 +346,7 @@ class TrainModel:
                                     training_metrics=training_metrics, validation_metrics=validation_metrics,
                                     training_duration_seconds=training_duration_seconds,
                                     validation_duration_seconds=validation_duration_seconds,
-                                    epoch_duration_seconds=epoch_duration_seconds)
+                                    epoch_duration_seconds=epoch_duration_seconds, epoch_lrs=epoch_lrs)
                 self.history = history
                 self.update_current_training_session(status=epoch_termination_reason, completed_epoch=epoch)
                 training_state = self.build_training_state(completed_epoch=epoch, history=history, best_epoch=best_epoch,
@@ -435,6 +436,7 @@ class TrainModel:
         """Train for one epoch."""
         model.train()
         total_loss = 0.0
+        component_totals = {}
         total_error_px = 0.0
         total_points = 0
 
@@ -448,22 +450,28 @@ class TrainModel:
             with torch.amp.autocast('cuda', enabled=self.train_config.use_amp and self.device.type == 'cuda'):
                 model_output = model(images)
                 outputs, auxiliary_outputs = unpack_heatmap_output(model_output)
-                loss = self.calculate_model_loss(outputs=outputs, auxiliary_outputs=auxiliary_outputs, targets=targets, criterion=criterion, valid_mask=batch['valid_mask'].to(self.device), constraint_batch=batch)
+                loss, components = self.calculate_model_loss(outputs=outputs, auxiliary_outputs=auxiliary_outputs, targets=targets, criterion=criterion, valid_mask=batch['valid_mask'].to(self.device), constraint_batch=batch, return_components=True)
 
             scaler.scale(loss).backward()
             scaler.step(optimiser)
             scaler.update()
             batch_error = self.calculate_batch_error(outputs=outputs.detach(), points_original=points_original, original_size=original_size)
             total_loss += loss.item() * images.size(0)
+            for name, value in components.items():
+                component_totals[name] = component_totals.get(name, 0.0) + value.detach().item() * images.size(0)
             total_error_px += batch_error.sum().item()
             total_points += batch_error.numel()
 
-        return self.format_metrics(loss=total_loss / max(len(loader.dataset), 1), error_px=total_error_px / max(total_points, 1))
+        metrics = self.format_metrics(loss=total_loss / max(len(loader.dataset), 1), error_px=total_error_px / max(total_points, 1))
+        metrics.update({f'loss_component_{name}': value / max(len(loader.dataset), 1)
+                        for name, value in component_totals.items()})
+        return metrics
 
     def validate(self, model, loader, criterion):
         """Evaluate on the validation split."""
         model.eval()
         total_loss = 0.0
+        component_totals = {}
         total_error_px = 0.0
         total_points = 0
 
@@ -475,13 +483,18 @@ class TrainModel:
                 original_size = batch['original_size'].to(self.device, non_blocking=True)
                 model_output = model(images)
                 outputs, auxiliary_outputs = unpack_heatmap_output(model_output)
-                loss = self.calculate_model_loss(outputs=outputs, auxiliary_outputs=auxiliary_outputs, targets=targets, criterion=criterion, valid_mask=batch['valid_mask'].to(self.device), constraint_batch=batch)
+                loss, components = self.calculate_model_loss(outputs=outputs, auxiliary_outputs=auxiliary_outputs, targets=targets, criterion=criterion, valid_mask=batch['valid_mask'].to(self.device), constraint_batch=batch, return_components=True)
                 batch_error = self.calculate_batch_error(outputs=outputs, points_original=points_original, original_size=original_size)
                 total_loss += loss.item() * images.size(0)
+                for name, value in components.items():
+                    component_totals[name] = component_totals.get(name, 0.0) + value.detach().item() * images.size(0)
                 total_error_px += batch_error.sum().item()
                 total_points += batch_error.numel()
 
-        return self.format_metrics(loss=total_loss / max(len(loader.dataset), 1), error_px=total_error_px / max(total_points, 1))
+        metrics = self.format_metrics(loss=total_loss / max(len(loader.dataset), 1), error_px=total_error_px / max(total_points, 1))
+        metrics.update({f'loss_component_{name}': value / max(len(loader.dataset), 1)
+                        for name, value in component_totals.items()})
+        return metrics
 
     def save_validation_predictions(self, model, validation_loader, checkpoint_path):
         """Save validation endpoint predictions using an IPV-like output layout."""
@@ -685,7 +698,7 @@ class TrainModel:
                                     input_channels=int(self.data_config.input_channels), image_size=self.data_config.image_size, pretrained_checkpoint=self.train_config.pretrained_checkpoint, initialise_pretrained=not self.resume_training, **model_kwargs)
         return model.to(self.device)
 
-    def calculate_model_loss(self, outputs, auxiliary_outputs, targets, criterion, valid_mask, constraint_batch=None):
+    def calculate_model_loss(self, outputs, auxiliary_outputs, targets, criterion, valid_mask, constraint_batch=None, return_components=False):
         """Average valid pixels per image, then images; apply the same rule to every head."""
         mask = valid_mask.to(device=outputs.device, dtype=torch.bool).expand_as(targets)
         counts = mask.sum(dim=(1, 2, 3))
@@ -698,8 +711,13 @@ class TrainModel:
             return (values.masked_fill(~mask, 0).sum(dim=(1, 2, 3)) / counts).mean()
 
         loss = masked_loss(outputs)
+        components = {'heatmap': loss}
         if auxiliary_outputs and float(self.model_config.auxiliary_loss_weight) > 0:
-            loss = loss + float(self.model_config.auxiliary_loss_weight) * torch.stack([masked_loss(value) for value in auxiliary_outputs]).mean()
+            auxiliary_losses = torch.stack([masked_loss(value) for value in auxiliary_outputs])
+            weight = float(self.model_config.auxiliary_loss_weight)
+            loss = loss + weight * auxiliary_losses.mean()
+            for index, value in enumerate(auxiliary_losses, start=1):
+                components[f'auxiliary_{index}'] = weight * value / len(auxiliary_outputs)
         if self.train_config.landmark_constraint_loss is not None:
             if constraint_batch is None:
                 raise ValueError('Constraint loss requires original sizes and inverse augmentation matrices.')
@@ -710,7 +728,11 @@ class TrainModel:
                     constraint_batch['inverse_augmentation'].to(outputs.device),
                     self.train_config.constraint_temperature, self.train_config.constraint_margin, self.train_config.landmark_constraint_loss)
             loss = loss + self.train_config.constraint_angle_weight * angle + self.train_config.constraint_side_weight * sides
-        return loss
+            if self.train_config.constraint_angle_weight > 0 and self.train_config.landmark_constraint_loss != 'prostate-saus':
+                components['constraint_angle'] = self.train_config.constraint_angle_weight * angle
+            if self.train_config.constraint_side_weight > 0:
+                components['constraint_side'] = self.train_config.constraint_side_weight * sides
+        return (loss, components) if return_components else loss
 
     def build_criterion(self):
         from .heatmap_losses import build_heatmap_loss
@@ -1715,7 +1737,7 @@ class TrainModel:
 
     @staticmethod
     def update_history(history, epoch, epoch_started_at, epoch_completed_at, epoch_lr, training_metrics, validation_metrics,
-                       training_duration_seconds, validation_duration_seconds, epoch_duration_seconds):
+                       training_duration_seconds, validation_duration_seconds, epoch_duration_seconds, epoch_lrs=None):
         """Append one epoch to the training history."""
         values = {
             'epoch': int(epoch),
@@ -1731,8 +1753,16 @@ class TrainModel:
             'epoch_duration_seconds': float(epoch_duration_seconds),
         }
 
-        for field_name in HISTORY_FIELDS:
-            history[field_name].append(values[field_name])
+        if epoch_lrs is not None and len(epoch_lrs) > 1:
+            values['lr_2'] = float(epoch_lrs[1])
+        for phase, metrics in (('training', training_metrics), ('validation', validation_metrics)):
+            values.update({f'{phase}_{name}': float(value) for name, value in metrics.items()
+                           if name.startswith('loss_component_')})
+        previous_epochs = len(history['epoch'])
+        for field_name in values:
+            history.setdefault(field_name, [None] * previous_epochs)
+        for field_name in history:
+            history[field_name].append(values.get(field_name))
 
     def write_history_log(self, history):
         """Atomically rebuild the CSV from checkpoint-backed history."""
@@ -1741,11 +1771,11 @@ class TrainModel:
 
         try:
             with open(temporary_path, 'w', newline='', encoding='utf-8') as log_file:
-                writer = csv.DictWriter(log_file, fieldnames=list(HISTORY_FIELDS))
+                writer = csv.DictWriter(log_file, fieldnames=list(history))
                 writer.writeheader()
 
                 for row_index in range(len(history['epoch'])):
-                    writer.writerow({field_name: history[field_name][row_index] for field_name in HISTORY_FIELDS})
+                    writer.writerow({field_name: history[field_name][row_index] for field_name in history})
 
             os.replace(temporary_path, log_path)
         finally:
@@ -1763,7 +1793,7 @@ class TrainModel:
         if missing_fields:
             raise ValueError(f'Resume checkpoint history is missing fields: {missing_fields}.')
 
-        lengths = {field_name: len(history[field_name]) for field_name in HISTORY_FIELDS}
+        lengths = {field_name: len(column) for field_name, column in history.items()}
 
         if len(set(lengths.values())) != 1:
             raise ValueError(f'Resume checkpoint history columns have inconsistent lengths: {lengths}.')
@@ -1777,6 +1807,10 @@ class TrainModel:
 
         for field_name in numeric_fields:
             if not all(np.isfinite(value) for value in history[field_name]):
+                raise ValueError(f'Resume checkpoint history contains a non-finite value in {field_name}.')
+
+        for field_name in set(history) - set(HISTORY_FIELDS):
+            if not all(value is None or np.isfinite(value) for value in history[field_name]):
                 raise ValueError(f'Resume checkpoint history contains a non-finite value in {field_name}.')
 
         for field_name in ('training_duration_seconds', 'validation_duration_seconds', 'epoch_duration_seconds'):
@@ -1803,6 +1837,52 @@ class TrainModel:
         loss_axis.legend(loss_lines + error_lines, loss_labels + error_labels, loc='best')
         figure.tight_layout()
         figure.savefig(self.get_plot_path())
+        plt.close(figure)
+        self.save_diagnostic_plots(history)
+
+    def save_diagnostic_plots(self, history):
+        """Plot recorded weighted contributions and rates used at each epoch start."""
+        component_names = sorted({name.split('_loss_component_', 1)[1] for name in history
+                                  if '_loss_component_' in name})
+        if component_names:
+            figure, axis = plt.subplots(figsize=(11, 6))
+            for index, name in enumerate(component_names):
+                for phase, style in (('training', '-'), ('validation', '--')):
+                    values = history.get(f'{phase}_loss_component_{name}', [])
+                    if not any(value is not None for value in values):
+                        continue
+                    axis.plot(history['epoch'], [np.nan if value is None else value for value in values],
+                              color=f'C{index % 10}', linestyle=style, marker='.' if len(history['epoch']) == 1 else None,
+                              label=f'{name.replace("_", " ").capitalize()} ({phase})')
+            axis.set(xlabel='Epoch', ylabel='Weighted contribution to total loss',
+                     title='Individual losses - training (solid), validation (dashed)')
+            axis.grid(alpha=0.25)
+            axis.legend(loc='upper left', bbox_to_anchor=(1.02, 1))
+            figure.tight_layout()
+            figure.savefig(self.output_path / 'individual_loss_plot.png')
+            plt.close(figure)
+
+        figure, left = plt.subplots(figsize=(9, 5))
+        axes = [left]
+        if any(value is not None for value in history.get('lr_2', [])):
+            axes.append(left.twinx())
+        for index, axis in enumerate(axes):
+            key = 'lr' if index == 0 else 'lr_2'
+            label = ('Decoder learning rate' if len(axes) == 2 and index == 0 else
+                     'Encoder learning rate (configured; frozen during warm-up)' if index == 1 else
+                     'Learning rate')
+            axis.step(history['epoch'], [np.nan if value is None else value for value in history[key]],
+                      where='post', color=f'C{index}', label=label, linestyle='-' if index == 0 else '--',
+                      marker='.' if len(history['epoch']) == 1 else None)
+            axis.set_ylabel('Learning rate' if len(axes) == 1 else ('Decoder learning rate' if index == 0 else 'Encoder learning rate'), color=f'C{index}')
+            axis.tick_params(axis='y', labelcolor=f'C{index}')
+            axis.ticklabel_format(axis='y', style='sci', scilimits=(0, 0))
+        left.set(xlabel='Epoch', title='Learning rates at epoch start')
+        left.grid(alpha=0.25)
+        lines = [line for axis in axes for line in axis.get_lines()]
+        left.legend(lines, [line.get_label() for line in lines], loc='best', fontsize=8)
+        figure.tight_layout()
+        figure.savefig(self.output_path / 'learning_rate_plot.png')
         plt.close(figure)
 
     def get_validation_output_path(self):

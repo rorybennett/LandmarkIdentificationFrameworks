@@ -888,3 +888,13 @@ Checkpoints must declare this policy; earlier checkpoints are unsupported.
 ## MedSAM landmark model
 
 The `vit-medsam` encoder is documented in [MEDSAM.md](MEDSAM.md). All architectures use the shared advanced training workflow above. Version remains `0.1`; earlier checkpoint layouts and retired custom ViTPose constructor flags are not supported. Start fresh runs after this refactor.
+
+### Training diagnostic plots
+
+Heatmap training updates three PNGs after each epoch and rebuilds them when resuming:
+
+- `training_validation_plot.png`: the existing combined total-loss and pixel-error plot.
+- `individual_loss_plot.png`: each recorded loss contribution, with matching colours for training (solid) and validation (dashed). Values include configured weights; auxiliary heads each include their share of the auxiliary average. Disabled contributions and the sagittal constraint's unused angle term are omitted. Enabled terms remain visible even when their value is zero.
+- `learning_rate_plot.png`: optimiser learning rates at the start of each epoch, before the scheduler advances. Single-rate models use the left axis. Pretrained models use the left axis for the decoder and the right axis for the encoder; the encoder rate is its configured rate, including while its parameters are frozen during warm-up.
+
+Component values and the second learning rate are also saved in the training CSV and checkpoint history. History formats without these optional columns are supported: unrecorded values are blank in the CSV and gaps in the plots, rather than reconstructed estimates. The existing strict resume signature still requires identical source code and run settings, so checkpoints created before this code update cannot be resumed with the updated implementation. An individual-loss plot is generated once component history is available.
