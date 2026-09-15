@@ -38,6 +38,17 @@ $EARLY_STOP_WARMUP_EPOCHS = 10
 $USE_AMP = "false"
 $NORMALISE_INPUTS = "false"
 $SAVE_VALIDATION_RESULTS = "true"
+# Optional training controls (progress and geometry are disabled by default).
+$VISUALISE_VALIDATION_PROGRESS_IMAGES = 0
+$VISUALISE_VALIDATION_PROGRESS_EPOCHS = 0
+$LANDMARK_CONSTRAINT_LOSS = "none"
+$CONSTRAINT_ANGLE_WEIGHT = 0.01
+$CONSTRAINT_SIDE_WEIGHT = 0.01
+$CONSTRAINT_TEMPERATURE = 1.0
+$CONSTRAINT_MARGIN = 0.02
+$LR_PLATEAU_PATIENCE = 5
+$LR_DECAY_EPOCHS = 50
+$LR_MIN_FACTOR = 0.01
 $VALIDATION_INFERENCE_BATCH_SIZE = 2048
 $VALIDATION_VOTE_SMOOTHING_SIGMA = 7.0
 $VALIDATION_USE_PROBABILITY_WEIGHTS = "true"
@@ -82,6 +93,16 @@ ipv-train $REPETITION $FOLD $TASK_NAME $CREATE_DATA $TRAIN_MODEL $COPY_FILES $DE
     --use-amp $USE_AMP `
     --normalise-inputs $NORMALISE_INPUTS `
     --save-validation-results $SAVE_VALIDATION_RESULTS `
+    --visualise-validation-progress-images $VISUALISE_VALIDATION_PROGRESS_IMAGES `
+    --visualise-validation-progress-epochs $VISUALISE_VALIDATION_PROGRESS_EPOCHS `
+    --landmark-constraint-loss $LANDMARK_CONSTRAINT_LOSS `
+    --constraint-angle-weight $CONSTRAINT_ANGLE_WEIGHT `
+    --constraint-side-weight $CONSTRAINT_SIDE_WEIGHT `
+    --constraint-temperature $CONSTRAINT_TEMPERATURE `
+    --constraint-margin $CONSTRAINT_MARGIN `
+    --lr-plateau-patience $LR_PLATEAU_PATIENCE `
+    --lr-decay-epochs $LR_DECAY_EPOCHS `
+    --lr-min-factor $LR_MIN_FACTOR `
     --validation-inference-batch-size $VALIDATION_INFERENCE_BATCH_SIZE `
     --validation-vote-smoothing-sigma $VALIDATION_VOTE_SMOOTHING_SIGMA `
     --validation-use-probability-weights $VALIDATION_USE_PROBABILITY_WEIGHTS `

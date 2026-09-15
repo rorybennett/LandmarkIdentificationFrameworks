@@ -147,12 +147,12 @@ The enabled flag, source, three means and three standard deviations are stored u
 --optimiser-name adamw|sgd
 --weight-decay
 --momentum
---lr-schedule none|step|plateau
+--lr-schedule none|step|plateau|cosine|linear|exponential
 --lr-step-size
 --lr-gamma
 ```
 
-The plateau scheduler and early stopping use validation classification loss. Best-checkpoint selection uses the lowest validation loss; endpoint error is recorded alongside it.
+The plateau scheduler and early stopping use total validation loss (classification plus optional weighted geometry terms). Separate checkpoints track the lowest validation loss and lowest endpoint error.
 
 ### Resuming
 
@@ -184,11 +184,14 @@ Training outputs match the Heatmaps repetition/fold hierarchy:
 ```text
 RUN_DIR/TRAINING_RESULTS/TASK_NAME/RUN_NAME/repetition_N/fold_N_OR_all/
   model_best_validation_loss.pth
+  model_best_validation_pixel_error.pth
   model_last_epoch.pth
   validation_checkpoint_summary.json
   training_validation_log.csv
   training_validation_plot.png
   run_info.json
+  validation_progress/                # Optional fixed-image progress exports
+  validation_best_pixel_error/         # Same export layout as validation_results
   validation_results/
     validation_summary.xlsx
     validation_image_summary.csv
@@ -218,6 +221,12 @@ validation_error_px
 training_duration_seconds
 validation_duration_seconds
 epoch_duration_seconds
+training_loss_component_classification
+training_loss_component_constraint_angle
+training_loss_component_constraint_side
+validation_loss_component_classification
+validation_loss_component_constraint_angle
+validation_loss_component_constraint_side
 ```
 
 Automatic run names contain the repetition/fold counts, data and model labels, plus a configuration fingerprint. The fingerprint includes the SHA-256 digest of every active split list and every result-affecting training, validation and model option.
@@ -267,11 +276,11 @@ green, cyan, magenta, orange and purple, repeating after eight landmarks. Each
 response is scaled by its own positive maximum, with negative values clipped to
 zero; overlapping colours are added and clipped. Heatmap endpoint labels use the
 same landmark colours. Point-only overlays retain green ground truth and red
-predictions. Colours identify landmarks, not comparable confidence scores.
+predictions. All point markers have larger white backing crosses for visibility. Colours identify landmarks, not comparable confidence scores.
 
 Training plots use a single loss panel and a second axis for mean endpoint error
 in original-image pixels. Heatmaps also plots training endpoint error; IPV retains
-classification accuracy in its CSV log. Losses remain framework-specific.
+classification accuracy in its CSV log. IPV adds a weighted loss-component panel when geometry contributes to the loss. Losses remain framework-specific.
 
 From the repository root, run the cross-framework output checks with:
 `python -m unittest discover -s tests -v`.
@@ -298,3 +307,82 @@ Checkpoints must declare this policy; earlier checkpoints are unsupported.
 Recreate generated patches when changing this setting. Enforced greyscale uses
 training-patch statistics even for pretrained models, rather than unequal
 ImageNet RGB constants.
+
+
+## Training features shared with Heatmaps
+
+### Fixed validation progress images
+
+Add these arguments to an existing training command to export one fixed,
+seeded subset every five epochs:
+
+```bash
+--visualise-validation-progress-images 10 --visualise-validation-progress-epochs 5
+```
+
+Both options default to `0` (disabled). Progress is independent of
+`--save-validation-results`: disabling final exports does not disable progress.
+Each interval runs full-image grid inference for the best-validation-loss and
+best-validation-pixel-error checkpoints. Outputs are under
+`validation_progress/epoch_NNNN/<checkpoint_type>/`, including vote-map overlays,
+white-backed point markers, metrics and `selection.json` recording the selected
+images and checkpoint epoch. The model, RNGs and data-loader generators are
+restored afterwards. Full-image voting adds runtime when enabled.
+
+### Optional geometry loss
+
+```bash
+# Transverse: P1 top, P2 right, P3 bottom, P4 left.
+--landmark-constraint-loss prostate_taus
+
+# Sagittal: P1 above P2.
+--landmark-constraint-loss prostate-saus
+```
+
+The default is `none`. Transverse geometry penalises axes more than 20 degrees
+from perpendicular, incorrect sides and collapsed axes. Sagittal geometry
+penalises reversed vertical ordering. These require four and two landmarks,
+respectively, in the stated order. Names and penalty definitions match Heatmaps.
+
+IPV uses differentiable expected polar offsets from each patch's distance and
+angle probabilities. This is a per-patch surrogate for geometry, not a penalty
+on the final hard-voted endpoint. Angles follow IPV's landmark-to-centre convention;
+positions are scaled by the source image diagonal. Existing patch generation
+uses the original image frame without spatial augmentation. No Heatmaps package
+installation is required.
+
+Controls: `--constraint-angle-weight 0.01`, `--constraint-side-weight 0.01`,
+`--constraint-margin 0.02` and `--constraint-temperature 1.0`. The temperature
+default is suited to classification logits and differs from Heatmaps' heatmap
+soft-argmax default. Weights and temperature should be tuned for IPV. Disabling
+the option preserves the original mean cross-entropy objective exactly.
+Training and validation logs and plots show classification and weighted geometry
+contributions separately; early stopping uses their total validation loss.
+
+### Checkpoints, schedules and reproducibility
+
+- `model_best_validation_pixel_error.pth` is now tracked independently of
+  `model_best_validation_loss.pth`. The last-epoch checkpoint contains both best
+  model snapshots and restores the pixel-error checkpoint when resuming.
+- Final exports keep the existing `validation_results/` directory for the
+  best-loss model and add `validation_best_pixel_error/` for the best-pixel model.
+  `--save-validation-results false` skips both while retaining validation and
+  early stopping.
+- `--lr-schedule` also accepts `cosine`, `linear` and `exponential`.
+  `--lr-decay-epochs 50` sets the cosine/linear horizon;
+  `--lr-min-factor 0.01` sets the LR floor for those schedules, exponential and
+  plateau. `--lr-plateau-patience 5` replaces the previous hard-coded patience.
+  Plateau continues to monitor IPV validation loss.
+- Configuration fingerprints include these options, selected progress images
+  and source dimensions used by geometry. Source/config compatibility checks
+  intentionally prevent resuming training checkpoints from the older code;
+  existing inference checkpoints remain loadable.
+- The shell and PowerShell launchers expose the new settings with progress and
+  geometry disabled. The HPC IPV job also skips final exports for repetition 3,
+  fold `all`. `JobScripts` is Git-ignored and must be copied separately or
+  explicitly tracked for deployment.
+
+Heatmaps-only architecture features (dense heatmap losses, auxiliary heatmap
+heads, letterboxing and staged MedSAM encoder/decoder training) are not applied
+to IPV's patch classifier. Patch voting, backbone selection, fold handling,
+normalisation and existing early stopping remain IPV-specific.

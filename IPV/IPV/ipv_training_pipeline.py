@@ -15,6 +15,7 @@ from . import parameters as pms
 from .data_creator import DataCreator
 from .model_registry import get_available_model_names
 from .train_model import TrainModel, TrainConfig, QuadrupletConfig
+from .training_options import DEFAULTS, add_training_arguments, validate_training_options
 from .utils.fold_utils import (ALL_FOLD_NAME, calculate_fold_collection_sha256, get_split_file_path,
                                is_all_fold, normalise_fold, validate_repeated_kfold_lists)
 
@@ -290,6 +291,8 @@ class IPVTrainingPipeline:
             'model_best_validation_loss.pth', 'model_last_epoch.pth', 'validation_checkpoint_summary.json',
             'training_validation_log.csv', 'training_validation_plot.png', 'run_info.json', 'validation_results',
             '.validation_results.tmp', '.validation_results.backup',
+            'model_best_validation_pixel_error.pth', 'validation_progress', 'validation_best_pixel_error',
+            '.validation_best_pixel_error.tmp', '.validation_best_pixel_error.backup',
         }
 
         for target in [path for path in self.run_results_path.iterdir() if path.name in managed_names or path.name.startswith('.model_')]:
@@ -811,7 +814,7 @@ def parse_args():
     parser.add_argument('--optimiser-name', choices=['adamw', 'sgd'], default='adamw', help='Optimiser.')
     parser.add_argument('--weight-decay', type=float, default=1e-4, help='Optimiser weight decay.')
     parser.add_argument('--momentum', type=float, default=0.9, help='SGD momentum.')
-    parser.add_argument('--lr-schedule', choices=['none', 'step', 'plateau'], default='plateau', help='Epoch-level learning-rate schedule.')
+    parser.add_argument('--lr-schedule', choices=['none', 'step', 'plateau', 'cosine', 'linear', 'exponential'], default='plateau', help='Epoch-level learning-rate schedule.')
     parser.add_argument('--lr-step-size', type=int, default=20, help='StepLR epoch interval.')
     parser.add_argument('--lr-gamma', type=float, default=0.5, help='Learning-rate reduction factor.')
     parser.add_argument('--early-stop-patience', type=int, default=15, help='Validation epochs without sufficient loss improvement before stopping.')
@@ -844,12 +847,14 @@ def parse_args():
                         help='Number of pretrained ResNet stages to freeze. Use 0 for untrained networks, small_cnn, and non-conventional ResNet networks.')
     parser.add_argument('--small-input-stem', type=str_to_bool, required=True, help='Whether to use the small-input ResNet stem. Use false for small_cnn.')
 
+    add_training_arguments(parser)
     return parser.parse_args()
 
 
 def validate_args(args, num_of_repetitions, num_of_folds):
     """Validate numeric, path, training, and model terminal arguments."""
     normalise_save_dir(args)
+    validate_training_options(args, args.num_points)
 
     if not any((args.create_data, args.train_model, args.copy_files, args.delete_files)):
         raise ValueError('At least one action must be enabled.')
@@ -1082,6 +1087,7 @@ def build_run_name(args, num_of_repetitions, num_of_folds, fold_collection_sha25
         'network_name': args.network_name, 'branch_features': args.branch_features,
         'frozen_stages': args.frozen_stages, 'small_input_stem': args.small_input_stem,
     }
+    fingerprint_payload['advanced_training'] = {name: getattr(args, name, default) for name, default in DEFAULTS.items()}
     fingerprint = hashlib.sha256(json.dumps(fingerprint_payload, sort_keys=True, separators=(',', ':'), default=str)
                                  .encode('utf-8')).hexdigest()[:12]
     parts = [
@@ -1177,6 +1183,7 @@ def build_configs(args):
     )
 
     train_config = TrainConfig(
+        **{name: getattr(args, name) for name in DEFAULTS},
         batch_size=args.batch_size,
         learning_rate=args.learning_rate,
         max_training_epochs=args.max_training_epochs,

@@ -4,6 +4,7 @@ import copy
 import datetime as dt
 import hashlib
 import json
+import math
 import os
 import random
 import shutil
@@ -18,10 +19,11 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import numpy as np
+from PIL import Image
 import torch
 from torch import nn
 from torch.optim import AdamW, SGD
-from torch.optim.lr_scheduler import ReduceLROnPlateau, StepLR
+from torch.optim.lr_scheduler import ReduceLROnPlateau, StepLR, LambdaLR
 from torch.utils.data import DataLoader
 
 from .custom_dataset import CustomDataset, ToTensor
@@ -43,6 +45,9 @@ HISTORY_FIELDS = (
     'epoch', 'epoch_started_at', 'epoch_completed_at', 'lr', 'training_loss', 'training_accuracy',
     'validation_loss', 'validation_accuracy', 'validation_error_px', 'training_duration_seconds',
     'validation_duration_seconds', 'epoch_duration_seconds',
+    'training_loss_component_classification', 'training_loss_component_constraint_angle',
+    'training_loss_component_constraint_side', 'validation_loss_component_classification',
+    'validation_loss_component_constraint_angle', 'validation_loss_component_constraint_side',
 )
 
 
@@ -76,6 +81,16 @@ class TrainConfig:
     lr_schedule: str = 'plateau'
     lr_step_size: int = 20
     lr_gamma: float = 0.5
+    lr_plateau_patience: int = 5
+    lr_decay_epochs: int = 50
+    lr_min_factor: float = 0.01
+    visualise_validation_progress_images: int = 0
+    visualise_validation_progress_epochs: int = 0
+    landmark_constraint_loss: str | None = None
+    constraint_angle_weight: float = 0.01
+    constraint_side_weight: float = 0.01
+    constraint_temperature: float = 1.0
+    constraint_margin: float = 0.02
     early_stop_patience: int = 15
     early_stop_min_delta: float = 1e-4
     early_stop_warmup_epochs: int = 10
@@ -130,6 +145,9 @@ class TrainModel:
         self.training_generator = None
         self.validation_generator = None
         self.history = self.empty_history()
+        self.best_pixel_checkpoint = None
+        self.validation_progress = None
+        self.constraint_image_sizes = {}
         self.validate_configs()
 
     def train(self, on_dataset_validated=None, on_training_state_ready=None):
@@ -146,6 +164,10 @@ class TrainModel:
             train_loader, val_loader = self.build_data_loaders()
             self.input_channels = self.resolve_input_channels(train_loader.dataset, val_loader.dataset)
             self.configure_input_normalisation(train_loader.dataset, val_loader.dataset)
+            if self.train_config.landmark_constraint_loss is not None:
+                names = {str(group.iloc[0, 2]) for dataset in (train_loader.dataset, val_loader.dataset)
+                         for group in dataset.patch_groups}
+                self.get_constraint_image_sizes(sorted(names))
             self.dataset_validation_duration_seconds = time.perf_counter() - validation_start
             self.training_status = 'dataset_validated'
 
@@ -158,6 +180,8 @@ class TrainModel:
             optimiser = self.build_optimiser(model)
             scheduler = self.build_scheduler(optimiser)
             scaler = torch.amp.GradScaler('cuda', enabled=self.train_config.use_amp and self.device.type == 'cuda')
+            from .validation_progress import ValidationProgress
+            self.validation_progress = ValidationProgress(self)
             resume_signature = self.build_resume_signature(train_loader, val_loader)
             history = self.empty_history()
             best_epoch = None
@@ -261,11 +285,13 @@ class TrainModel:
                     best_checkpoint_path = self.save_checkpoint(model, optimiser, scheduler, scaler, 'best_validation_loss',
                                                                 epoch, validation_metrics, None, resume_signature, None)
 
+                self.save_best_pixel_checkpoint(model, epoch, validation_metrics)
                 last_checkpoint_path = self.save_checkpoint(model, optimiser, scheduler, scaler, 'last_epoch', epoch,
                                                             validation_metrics, training_state, resume_signature,
                                                             best_model_state_dict)
                 self.write_history_log(history)
                 self.save_history_plot(history)
+                self.validation_progress.render(self, model, epoch)
 
                 if is_new_best:
                     print(f"\tNew best model saved from epoch {epoch} with validation_loss={validation_metrics['loss']:.6f} "
@@ -283,6 +309,8 @@ class TrainModel:
             if self.train_config.save_validation_results:
                 export_start = time.perf_counter()
                 validation_results_path = self.run_validation_inference(model, best_checkpoint_path, last_checkpoint_path)
+                self.run_validation_inference(model, self.get_checkpoint_path('best_validation_pixel_error'),
+                                              export_label='best_validation_pixel_error')
                 self.validation_export_duration_seconds = time.perf_counter() - export_start
 
             self.training_status = 'completed'
@@ -299,24 +327,37 @@ class TrainModel:
             plt.clf()
             raise
 
-    def run_validation_inference(self, model, best_checkpoint_path=None, last_checkpoint_path=None):
+    def run_validation_inference(self, model, best_checkpoint_path=None, last_checkpoint_path=None, export_label=None):
         """Run full-image inference on validation images and save overlays and Excel metrics."""
         checkpoint_path = best_checkpoint_path or last_checkpoint_path
-        checkpoint_type = 'best_validation_loss' if best_checkpoint_path is not None else 'last_epoch'
+        checkpoint_type = export_label or ('best_validation_loss' if best_checkpoint_path is not None else 'last_epoch')
         loaded_checkpoint = None
 
         if checkpoint_path is not None:
             loaded_checkpoint = self.load_checkpoint_state(model=model, checkpoint_path=checkpoint_path)
 
+        # Each checkpoint gets an independent, atomic export directory.
+        self.validation_export_label = export_label
+        try:
+            self.prepare_validation_staging_path()
+            config = self.build_validation_inference_config(self.get_validation_staging_path(), checkpoint_path,
+                                                            checkpoint_type, loaded_checkpoint)
+            print(f'\tRunning validation image inference with {checkpoint_type} checkpoint...', flush=True)
+            run_validation_inference_for_trained_model(model=model, config=config, device=self.device)
+            self.commit_validation_output()
+            return self.get_validation_output_path()
+        finally:
+            self.validation_export_label = None
+
+    def build_validation_inference_config(self, output_dir, checkpoint_path=None, checkpoint_type=None, loaded_checkpoint=None):
+        """Use identical preprocessing and voting for final exports and progress images."""
         data_metadata = self.read_data_creation_metadata()
-        validation_output_path = self.get_validation_staging_path()
-        self.prepare_validation_staging_path()
-        config = LandmarkInferenceConfig(
+        return LandmarkInferenceConfig(
             repetition=int(self.repetition),
             fold=self.fold,
             task_name=str(data_metadata.get('task_name') or ''),
             data_save_path=self.train_path,
-            output_dir=validation_output_path,
+            output_dir=output_dir,
             mark_list_file=Path(self.require_metadata_value(data_metadata, 'mark_list_file')),
             image_data_dir=Path(self.require_metadata_value(data_metadata, 'image_data_dir')),
             num_points=int(self.num_of_points),
@@ -329,6 +370,7 @@ class TrainModel:
             smoothing_sigma=float(self.train_config.validation_vote_smoothing_sigma),
             use_probability_weights=bool(self.train_config.validation_use_probability_weights),
             save_raw_vote_maps=bool(self.train_config.validation_save_raw_vote_maps),
+            run_label='validation',
             checkpoint_path=checkpoint_path,
             checkpoint_type=checkpoint_type,
             network_name=self.quadruplet_config.network_name,
@@ -336,12 +378,6 @@ class TrainModel:
             normalisation_std=self.normalisation_std,
             checkpoint_metadata=None if loaded_checkpoint is None else loaded_checkpoint.get('metadata')
         )
-
-        print(f'	Running validation image inference with {checkpoint_type} checkpoint...', flush=True)
-        run_validation_inference_for_trained_model(model=model, config=config, device=self.device)
-        self.commit_validation_output()
-        print(f'	Validation image inference outputs saved to {self.get_validation_output_path()}', flush=True)
-        return self.get_validation_output_path()
 
     @staticmethod
     def load_checkpoint_state(model, checkpoint_path):
@@ -578,8 +614,17 @@ class TrainModel:
         if schedule == 'step':
             return StepLR(optimiser, step_size=self.train_config.lr_step_size, gamma=self.train_config.lr_gamma)
         if schedule == 'plateau':
-            return ReduceLROnPlateau(optimiser, mode='min', factor=self.train_config.lr_gamma, patience=5)
+            return ReduceLROnPlateau(optimiser, mode='min', factor=self.train_config.lr_gamma, patience=self.train_config.lr_plateau_patience,
+                                     min_lr=[group['lr'] * self.train_config.lr_min_factor for group in optimiser.param_groups])
 
+        if schedule in ('cosine', 'linear', 'exponential'):
+            def factor(epoch):
+                if schedule == 'exponential':
+                    return max(self.train_config.lr_min_factor, self.train_config.lr_gamma ** epoch)
+                progress = min(epoch / self.train_config.lr_decay_epochs, 1.0)
+                decay = (1 + math.cos(math.pi * progress)) / 2 if schedule == 'cosine' else 1 - progress
+                return self.train_config.lr_min_factor + (1 - self.train_config.lr_min_factor) * decay
+            return LambdaLR(optimiser, factor)
         raise ValueError(f'Unknown lr_schedule: {self.train_config.lr_schedule}')
 
     def train_epoch(self, model, train_loader, criterion, optimiser, scaler):
@@ -588,6 +633,7 @@ class TrainModel:
         epoch_loss = 0.0
         epoch_correct = 0
         epoch_predictions = 0
+        component_totals = {}
 
         for data in train_loader:
             images = data['image'].to(self.device, non_blocking=True)
@@ -597,7 +643,7 @@ class TrainModel:
 
             with torch.amp.autocast('cuda', enabled=self.train_config.use_amp and self.device.type == 'cuda'):
                 outputs = model(images)
-                train_loss = self.calculate_loss(outputs, labels, criterion)
+                train_loss, components = self.calculate_loss(outputs, labels, criterion, data, return_components=True)
 
             scaler.scale(train_loss).backward()
             scaler.step(optimiser)
@@ -605,12 +651,15 @@ class TrainModel:
 
             batch_correct = self.count_correct(outputs, labels)
             batch_predictions = batch_size * len(outputs)
+            for name, value in components.items():
+                component_totals[name] = component_totals.get(name, 0.0) + value.item() * batch_size
             epoch_loss += train_loss.item() * batch_size
             epoch_correct += batch_correct
             epoch_predictions += batch_predictions
 
         return {'loss': epoch_loss / max(len(train_loader.dataset), 1),
-                'accuracy': epoch_correct / max(epoch_predictions, 1)}
+                'accuracy': epoch_correct / max(epoch_predictions, 1),
+                **{f'loss_component_{name}': value / max(len(train_loader.dataset), 1) for name, value in component_totals.items()}}
 
     def validate(self, model, val_loader, criterion):
         """Evaluate classification metrics and reconstruct validation endpoints by voting."""
@@ -619,6 +668,7 @@ class TrainModel:
         total_samples = 0
         total_correct = 0
         total_predictions = 0
+        component_totals = {}
         vote_records = {}
 
         with torch.inference_mode():
@@ -629,8 +679,10 @@ class TrainModel:
 
                 with torch.amp.autocast('cuda', enabled=self.train_config.use_amp and self.device.type == 'cuda'):
                     outputs = model(images)
-                    loss = self.calculate_loss(outputs, labels, criterion)
+                    loss, components = self.calculate_loss(outputs, labels, criterion, data, return_components=True)
 
+                for name, value in components.items():
+                    component_totals[name] = component_totals.get(name, 0.0) + value.item() * batch_size
                 total_loss += loss.item() * batch_size
                 total_samples += batch_size
                 total_correct += self.count_correct(outputs, labels)
@@ -662,7 +714,8 @@ class TrainModel:
         validation_error = self.calculate_validation_endpoint_error(vote_records)
         return {'loss': total_loss / max(total_samples, 1),
                 'accuracy': total_correct / max(total_predictions, 1),
-                'error_px': validation_error}
+                'error_px': validation_error,
+                **{f'loss_component_{name}': value / max(total_samples, 1) for name, value in component_totals.items()}}
 
     def calculate_validation_endpoint_error(self, vote_records):
         """Convert one validation pass into a mean original-image endpoint error."""
@@ -697,14 +750,46 @@ class TrainModel:
 
         return float(np.mean(errors))
 
-    def calculate_loss(self, outputs, labels, criterion):
+    def calculate_loss(self, outputs, labels, criterion, data=None, return_components=False):
         """Calculate average loss across all output heads."""
         loss = 0.0
 
         for output_index, output in enumerate(outputs):
             loss += criterion(output, labels[:, output_index])
 
-        return loss / len(outputs)
+        loss = loss / len(outputs)
+        components = {'classification': loss}
+        if self.train_config.landmark_constraint_loss is not None:
+            if data is None:
+                raise ValueError('Geometry loss requires the batch sample names or original sizes.')
+            from .landmark_losses import constraint_terms
+            sizes = data.get('original_size')
+            if sizes is None:
+                sizes = self.get_constraint_image_sizes(data['sample_name'])
+            with torch.autocast(device_type=outputs[0].device.type, enabled=False):
+                angle, sides = constraint_terms(outputs, self.tasks_classes, sizes,
+                    self.train_config.constraint_temperature, self.train_config.constraint_margin,
+                    self.train_config.landmark_constraint_loss)
+            components['constraint_angle'] = self.train_config.constraint_angle_weight * angle
+            components['constraint_side'] = self.train_config.constraint_side_weight * sides
+            loss = sum(components.values())
+        return (loss, components) if return_components else loss
+
+    def get_constraint_image_sizes(self, sample_names):
+        """Read and cache source-image dimensions without decoding pixels."""
+        missing = set(map(str, sample_names)) - self.constraint_image_sizes.keys()
+        if missing:
+            metadata = self.read_data_creation_metadata()
+            records = read_mark_list(Path(self.require_metadata_value(metadata, 'mark_list_file')),
+                                     expected_points=self.num_of_points, selected_sample_names=missing)
+            image_dir = Path(self.require_metadata_value(metadata, 'image_data_dir'))
+            for name in missing:
+                if name not in records:
+                    raise ValueError(f'Geometry-loss sample {name} has no source image in the mark list.')
+                with Image.open(image_dir / records[name][0]) as image:
+                    self.constraint_image_sizes[name] = (image.height, image.width)
+        return torch.tensor([self.constraint_image_sizes[str(name)] for name in sample_names], dtype=torch.float32)
+
 
     def count_correct(self, outputs, labels):
         """Count correct predictions across all output heads."""
@@ -729,6 +814,10 @@ class TrainModel:
             'validation_duration_seconds': float(validation_duration_seconds), 'epoch_duration_seconds': float(epoch_duration_seconds),
         }
 
+        for phase, metrics in (('training', training_metrics), ('validation', validation_metrics)):
+            for component in ('classification', 'constraint_angle', 'constraint_side'):
+                name = f'loss_component_{component}'
+                values[f'{phase}_{name}'] = float(metrics.get(name, metrics['loss'] if component == 'classification' else 0.0))
         for field_name in HISTORY_FIELDS:
             history[field_name].append(values[field_name])
 
@@ -739,10 +828,10 @@ class TrainModel:
 
         try:
             with open(temporary_path, 'w', newline='', encoding='utf-8') as output:
-                writer = csv.DictWriter(output, fieldnames=list(HISTORY_FIELDS))
+                writer = csv.DictWriter(output, fieldnames=list(history))
                 writer.writeheader()
                 for row_index in range(len(history['epoch'])):
-                    writer.writerow({field_name: history[field_name][row_index] for field_name in HISTORY_FIELDS})
+                    writer.writerow({field_name: history[field_name][row_index] for field_name in history})
             os.replace(temporary_path, log_path)
         finally:
             if temporary_path.exists():
@@ -781,18 +870,41 @@ class TrainModel:
                 'rng_state': self.capture_rng_state(),
                 'data_loader_generator_states': self.capture_data_loader_generator_states(),
                 'best_model_state_dict': best_model_state_dict,
+                'best_pixel_checkpoint': self.best_pixel_checkpoint,
                 'resume_signature': resume_signature,
             })
 
         self.atomic_torch_save(checkpoint, checkpoint_path)
         return checkpoint_path
 
+    def save_best_pixel_checkpoint(self, model, epoch, metrics):
+        """Track endpoint accuracy independently of validation classification loss."""
+        if self.best_pixel_checkpoint is not None and metrics['error_px'] >= self.best_pixel_checkpoint['validation_metrics']['validation_error_px']:
+            return
+        kind = 'best_validation_pixel_error'
+        self.best_pixel_checkpoint = {
+            'format_version': CHECKPOINT_FORMAT_VERSION, 'schema': 'ipv_training_checkpoint',
+            'schema_version': CHECKPOINT_SCHEMA_VERSION, 'created_at': utc_now_iso(),
+            'checkpoint_type': kind, 'epoch': int(epoch), 'next_epoch': int(epoch) + 1,
+            'resume_capable': False, 'state_dict': self.clone_state_dict_to_cpu(model.state_dict()),
+            'validation_metrics': self.label_validation_metrics(metrics),
+            'metadata': self.build_checkpoint_metadata(checkpoint_type=kind, epoch=epoch, metrics=metrics),
+        }
+        self.atomic_torch_save(self.best_pixel_checkpoint, self.get_checkpoint_path(kind))
+
     def save_history_plot(self, history):
         """Save loss and endpoint-error traces in the training plot."""
         if not history['epoch']:
             return
 
-        figure, loss_axis = plt.subplots(figsize=(9, 5))
+        component_names = [name for name in history if '_loss_component_' in name]
+        has_geometry = any('constraint_' in name and any(value != 0 for value in history[name])
+                           for name in component_names)
+        if has_geometry:
+            figure, (loss_axis, component_axis) = plt.subplots(2, 1, figsize=(10, 9))
+        else:
+            figure, loss_axis = plt.subplots(figsize=(9, 5))
+            component_axis = None
         error_axis = loss_axis.twinx()
         loss_axis.plot(history['epoch'], history['training_loss'], label='training_loss')
         loss_axis.plot(history['epoch'], history['validation_loss'], label='validation_loss')
@@ -803,6 +915,14 @@ class TrainModel:
         loss_lines, loss_labels = loss_axis.get_legend_handles_labels()
         error_lines, error_labels = error_axis.get_legend_handles_labels()
         loss_axis.legend(loss_lines + error_lines, loss_labels + error_labels, loc='best')
+        if component_axis is not None:
+            for name in component_names:
+                phase, component = name.split('_loss_component_', 1)
+                component_axis.plot(history['epoch'], history[name], label=f'{phase} {component}',
+                                    linestyle='--' if phase == 'validation' else '-')
+            component_axis.set_xlabel('Epoch')
+            component_axis.set_ylabel('Weighted loss contribution')
+            component_axis.legend(loc='best', fontsize='small')
         figure.tight_layout()
         figure.savefig(self.get_plot_path())
         plt.close(figure)
@@ -1084,6 +1204,13 @@ class TrainModel:
                     'path': str(last_checkpoint_path) if last_checkpoint_path is not None else None
                 }
             },
+            'best_pixel_checkpoint': None if self.best_pixel_checkpoint is None else {
+                'path': str(self.get_checkpoint_path('best_validation_pixel_error')),
+                'epoch': self.best_pixel_checkpoint['epoch'],
+                'validation_metrics': self.best_pixel_checkpoint['validation_metrics'],
+            },
+            'validation_progress_samples': [] if self.validation_progress is None else self.validation_progress.sample_names,
+            'validation_best_pixel_error_path': str(self.output_path / 'validation_best_pixel_error') if validation_results_path is not None else None,
             'validation_inference': {
                 'enabled': bool(self.train_config.save_validation_results),
                 'path': str(validation_results_path) if validation_results_path is not None else None
@@ -1125,6 +1252,8 @@ class TrainModel:
                 'training_patches_sha256': self.sha256_dataset_patches(training_loader.dataset),
                 'validation_patches_sha256': self.sha256_dataset_patches(validation_loader.dataset),
             },
+            'constraint_image_sizes': self.constraint_image_sizes,
+            'validation_progress_samples': self.validation_progress.sample_names,
             'training': self.serialise(asdict(self.train_config)),
             'model': self.serialise(asdict(self.quadruplet_config)),
             'normalisation': self.build_normalisation_metadata(),
@@ -1177,6 +1306,8 @@ class TrainModel:
         self.training_sessions = copy.deepcopy(training_state['training_sessions'])
         self.restore_data_loader_generator_states(checkpoint['data_loader_generator_states'])
         self.restore_rng_state(checkpoint['rng_state'])
+        self.best_pixel_checkpoint = checkpoint['best_pixel_checkpoint']
+        self.atomic_torch_save(self.best_pixel_checkpoint, self.get_checkpoint_path('best_validation_pixel_error'))
         self.resume_state_validated = True
 
         return {
@@ -1211,7 +1342,7 @@ class TrainModel:
 
         required = {'epoch', 'next_epoch', 'validation_metrics', 'state_dict', 'optimiser_state_dict',
                     'scheduler_state_dict', 'grad_scaler_state_dict', 'training_state', 'rng_state',
-                    'data_loader_generator_states', 'best_model_state_dict', 'resume_signature'}
+                    'data_loader_generator_states', 'best_model_state_dict', 'best_pixel_checkpoint', 'resume_signature'}
         missing = sorted(required - set(checkpoint))
         if missing:
             raise ValueError(f'Resume checkpoint is incomplete; missing fields: {missing}. Existing outputs were left untouched.')
@@ -1255,6 +1386,17 @@ class TrainModel:
             raise ValueError(f'Resume checkpoint completed epoch {completed_epoch}, but max_training_epochs is {self.train_config.max_training_epochs}.')
 
         self.validate_history(state['history'], completed_epoch)
+        pixel = checkpoint['best_pixel_checkpoint']
+        if not isinstance(pixel, dict) or pixel.get('checkpoint_type') != 'best_validation_pixel_error':
+            raise ValueError('Resume checkpoint has no valid best-pixel snapshot.')
+        if not 1 <= int(pixel.get('epoch', 0)) <= completed_epoch:
+            raise ValueError('Best-pixel checkpoint epoch is outside the completed training history.')
+        self.validate_state_dict_snapshot(checkpoint['state_dict'], pixel.get('state_dict'))
+        expected_error = min(state['history']['validation_error_px'])
+        if pixel.get('validation_metrics', {}).get('validation_error_px') != expected_error:
+            raise ValueError('Best-pixel checkpoint does not match the minimum validation error in history.')
+        if state['history']['validation_error_px'][int(pixel['epoch']) - 1] != expected_error:
+            raise ValueError('Best-pixel checkpoint epoch does not match the selected validation error.')
 
     def ensure_best_checkpoint(self, checkpoint_path, best_epoch, best_metrics, best_model_state_dict):
         """Recover the exact committed best checkpoint when its sibling is missing or stale."""
@@ -1472,12 +1614,14 @@ class TrainModel:
             raise ValueError('learning_rate must be positive; weight_decay and momentum must be non-negative.')
         if str(self.train_config.optimiser_name).lower() not in ('adamw', 'sgd'):
             raise ValueError('optimiser_name must be adamw or sgd.')
-        if str(self.train_config.lr_schedule).lower() not in ('none', 'step', 'plateau'):
-            raise ValueError('lr_schedule must be none, step, or plateau.')
+        if str(self.train_config.lr_schedule).lower() not in ('none', 'step', 'plateau', 'cosine', 'linear', 'exponential'):
+            raise ValueError('lr_schedule must be none, step, plateau, cosine, linear, or exponential.')
         if self.train_config.lr_step_size < 1 or self.train_config.lr_gamma <= 0:
             raise ValueError('lr_step_size must be at least 1 and lr_gamma must be positive.')
         if self.train_config.early_stop_patience < 1 or self.train_config.early_stop_min_delta < 0 or self.train_config.early_stop_warmup_epochs < 0:
             raise ValueError('Early-stopping patience must be positive; min_delta and warmup must be non-negative.')
+        from .training_options import validate_training_options
+        validate_training_options(self.train_config, self.num_of_points)
         if self.train_config.validation_inference_batch_size < 1:
             raise ValueError('validation_inference_batch_size must be at least 1.')
         if self.train_config.validation_vote_smoothing_sigma < 0:
@@ -1683,15 +1827,15 @@ class TrainModel:
 
     def get_validation_output_path(self):
         """Return the validation-image inference output directory."""
-        return self.output_path / 'validation_results'
+        return self.output_path / ('validation_best_pixel_error' if getattr(self, 'validation_export_label', None) else 'validation_results')
 
     def get_validation_staging_path(self):
         """Return the same-volume staging path for validation outputs."""
-        return self.output_path / '.validation_results.tmp'
+        return self.get_validation_output_path().with_name('.' + self.get_validation_output_path().name + '.tmp')
 
     def get_validation_backup_path(self):
         """Return the temporary backup path used while committing validation outputs."""
-        return self.output_path / '.validation_results.backup'
+        return self.get_validation_output_path().with_name('.' + self.get_validation_output_path().name + '.backup')
 
     def prepare_validation_staging_path(self):
         """Recover any committed backup and clear incomplete staging data."""

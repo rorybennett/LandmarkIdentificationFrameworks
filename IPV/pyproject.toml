@@ -16,6 +16,7 @@ dependencies = [
     "torch>=2.4",
     "torchvision",
     "pandas",
+    "Pillow",
     "scikit-image",
     "opencv-python",
     "scipy",

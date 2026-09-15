@@ -967,6 +967,9 @@ def draw_points(image, points, colour, prefix):
     """Draw labelled endpoints onto an image."""
     for point_index, (x, y) in enumerate(points, start=1):
         centre = (int(round(x)), int(round(y)))
+        cv2.drawMarker(image, centre, (255, 255, 255), markerType=cv2.MARKER_TILTED_CROSS,
+                       markerSize=POINT_MARKER_SIZE + 4, thickness=POINT_MARKER_THICKNESS + 2,
+                       line_type=cv2.LINE_AA)
         cv2.drawMarker(image, centre, colour, markerType=cv2.MARKER_TILTED_CROSS, markerSize=POINT_MARKER_SIZE, thickness=POINT_MARKER_THICKNESS, line_type=cv2.LINE_AA)
         cv2.putText(image, f'{prefix}{point_index}', (centre[0] + 6, centre[1] - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.5, colour, 1, cv2.LINE_AA)
 
@@ -976,6 +979,9 @@ def draw_points_with_point_colours(image, points, prefix):
     for point_index, (x, y) in enumerate(points, start=1):
         centre = (int(round(x)), int(round(y)))
         colour = get_point_colour(point_index)
+        cv2.drawMarker(image, centre, (255, 255, 255), markerType=cv2.MARKER_TILTED_CROSS,
+                       markerSize=POINT_MARKER_SIZE + 4, thickness=POINT_MARKER_THICKNESS + 2,
+                       line_type=cv2.LINE_AA)
         cv2.drawMarker(image, centre, colour, markerType=cv2.MARKER_TILTED_CROSS, markerSize=POINT_MARKER_SIZE, thickness=POINT_MARKER_THICKNESS, line_type=cv2.LINE_AA)
         cv2.putText(image, f'{prefix}{point_index}', (centre[0] + 6, centre[1] - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.5, colour, 1, cv2.LINE_AA)
 
