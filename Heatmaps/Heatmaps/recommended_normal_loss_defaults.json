@@ -1,0 +1,168 @@
+{
+  "purpose": "Recommended parameter reference: one preset per model for both views; merge common settings with the model-specific settings. This is not a training launch file.",
+  "basis": "6 October 2026 training report; recommendations prepared 7 October 2026.",
+  "common": {
+    "data_config": {
+      "image_size": 512,
+      "heatmap_sigma": 8.0,
+      "input_channels": 3,
+      "enforce_greyscale": true,
+      "oversampling_factor": 8
+    },
+    "model_config": {
+      "output_activation": "none",
+      "final_kernel_size": 1
+    },
+    "train_config": {
+      "optimiser_name": "adamw",
+      "loss_name": "weighted_mse",
+      "positive_weight": 20.0,
+      "weight_decay": 0.0001,
+      "max_training_epochs": 300,
+      "lr_schedule": "plateau",
+      "lr_gamma": 0.5,
+      "lr_plateau_patience": 3,
+      "lr_min_factor": 0.01,
+      "early_stop_patience": 30,
+      "early_stop_min_delta": 0.0001,
+      "early_stop_warmup_epochs": 10,
+      "use_amp": false,
+      "random_seed": 42,
+      "num_workers": 8,
+      "save_validation_predictions": true,
+      "landmark_constraint_loss": null,
+      "constraint_angle_weight": 0.0,
+      "constraint_side_weight": 0.0
+    },
+    "checkpoint_selection": "model_best_validation_pixel_error.pth"
+  },
+  "models": {
+    "unet_basic": {
+      "data_config": {
+        "normalise_inputs": true
+      },
+      "model_config": {
+        "network_name": "unet_basic",
+        "base_channels": 32,
+        "depth": 4,
+        "channel_multiplier": 2,
+        "max_channels": 512,
+        "normalisation": "batch",
+        "activation": "relu",
+        "dropout": 0.0,
+        "upsampling": "bilinear",
+        "padding_mode": "zeros"
+      },
+      "train_config": {
+        "batch_size": 32,
+        "learning_rate": 0.001
+      },
+      "source_example_run_info": "C:\\Storage\\LandmarkIdentification\\TRAINING_RESULTS_normalLoss\\prostate_sagittal\\unet_basic_of8_bs32_lr0.001_updated\\repetition_1\\fold_1\\run_info.json"
+    },
+    "hrnet": {
+      "data_config": {
+        "normalise_inputs": true
+      },
+      "model_config": {
+        "network_name": "hrnet",
+        "hrnet_width": 32,
+        "hrnet_modules": 3,
+        "hrnet_blocks": 2,
+        "normalisation": "batch",
+        "activation": "relu",
+        "dropout": 0.0,
+        "padding_mode": "zeros"
+      },
+      "train_config": {
+        "batch_size": 32,
+        "learning_rate": 0.001
+      },
+      "source_example_run_info": "C:\\Storage\\LandmarkIdentification\\TRAINING_RESULTS_normalLoss\\prostate_sagittal\\hrnet_of8_bs32_lr0.001_updated\\repetition_1\\fold_1\\run_info.json"
+    },
+    "stacked_hourglass": {
+      "data_config": {
+        "normalise_inputs": true
+      },
+      "model_config": {
+        "network_name": "stacked_hourglass",
+        "hourglass_features": 128,
+        "hourglass_stacks": 6,
+        "hourglass_depth": 4,
+        "hourglass_blocks": 1,
+        "auxiliary_loss_weight": 1.0,
+        "normalisation": "batch",
+        "activation": "relu",
+        "dropout": 0.0,
+        "padding_mode": "zeros"
+      },
+      "train_config": {
+        "batch_size": 32,
+        "learning_rate": 0.001
+      },
+      "source_example_run_info": "C:\\Storage\\LandmarkIdentification\\TRAINING_RESULTS_sweep\\prostate_sagittal\\stacked_hourglass_stacks6_of8_bs32_lr0.001_updated\\repetition_1\\fold_1\\run_info.json"
+    },
+    "vitpose": {
+      "data_config": {
+        "normalise_inputs": false
+      },
+      "model_config": {
+        "network_name": "vitpose",
+        "decoder_channels": 256,
+        "gradient_checkpointing": true
+      },
+      "train_config": {
+        "batch_size": 8,
+        "learning_rate": 0.0001,
+        "encoder_learning_rate": 1e-05,
+        "freeze_encoder_epochs": 5,
+        "finetune_last_blocks": 4,
+        "decoder_plateau_patience": 10,
+        "decoder_plateau_min_delta": 0.1,
+        "finetune_decoder_lr_factor": 0.5
+      },
+      "source_example_run_info": "C:\\Storage\\LandmarkIdentification\\TRAINING_RESULTS_normalLoss\\prostate_sagittal\\vitpose_of8_bs8_lr0.0001_updated\\repetition_1\\fold_1\\run_info.json",
+      "pretrained_asset": {
+        "filename": "vitpose-b.pth",
+        "sha256": "2e849e1f1dbb5b87191eda7171f1b16468d5d082a7380e93e94b7ce76a061679"
+      }
+    },
+    "vit-medsam": {
+      "data_config": {
+        "normalise_inputs": false
+      },
+      "model_config": {
+        "network_name": "vit-medsam",
+        "decoder_channels": 256,
+        "gradient_checkpointing": true
+      },
+      "train_config": {
+        "batch_size": 8,
+        "learning_rate": 0.0001,
+        "encoder_learning_rate": 1e-05,
+        "freeze_encoder_epochs": 5,
+        "finetune_last_blocks": 8,
+        "decoder_plateau_patience": 10,
+        "decoder_plateau_min_delta": 0.1,
+        "finetune_decoder_lr_factor": 0.5
+      },
+      "source_example_run_info": "C:\\Storage\\LandmarkIdentification\\TRAINING_RESULTS_sweep\\prostate_sagittal\\vit-medsam_lastblocks8_normal_of8_bs8_lr0.0001\\repetition_1\\fold_1\\run_info.json",
+      "pretrained_asset": {
+        "filename": "medsam_vit_b.pth",
+        "sha256": "34b34b78c1d18cb8c6bf84cf9c00e135d6d6c965699f3c0e31ef1bc9dcb5be74"
+      }
+    }
+  },
+  "notes": [
+    "No sagittal/transverse hyperparameter overrides. Dataset paths and the number/order of landmarks must still match the dataset.",
+    "CNN standardisation statistics are calculated from each training split, saved and reused for inference; do not hard-code statistics from an example fold.",
+    "The tested ViT pipeline uses per-image min-max scaling, enforce_greyscale=true and normalise_inputs=false.",
+    "For pretrained models, freeze_encoder_epochs=5 is the minimum decoder-only duration, not an automatic switch at epoch 5. Transition follows 10 plateau epochs without at least 0.1 px improvement; the best pixel checkpoint is restored.",
+    "At the ViT transition the optimiser state is cleared, decoder LR is reset to 0.00005 and encoder LR to 0.00001; the scheduler is restarted.",
+    "Plateau scheduling monitors validation pixel error; early stopping monitors validation loss. Select final validation checkpoints by pixel error for consistency with the report.",
+    "300 epochs is a ceiling. Do not turn fold_all training-set scores into independent validation evidence.",
+    "The saved experiments have geometric weights 0.01 but landmark_constraint_loss=null in normal-loss runs. Zero weights here explicitly reinforce that geometry is disabled; they are inactive when the selector is null.",
+    "Six hourglass stacks and eight MedSAM fine-tuned blocks are selected from sweeps. Other parameters retain tested values and were not all independently optimised.",
+    "Retain the existing augmentation/preprocessing implementation. Batch sizes and use_amp=false match the evaluated recipe; hardware-dependent changes need validation.",
+    "Supply a local pretrained_checkpoint path to the named asset for each ViT. File hashes identify the weights used by the experiments; assets are not bundled."
+  ]
+}
