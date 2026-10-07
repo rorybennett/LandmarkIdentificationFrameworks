@@ -105,7 +105,7 @@ or:
 python -m Heatmaps.infer_landmarks
 ```
 
-Set `MODEL_PATH` to `model_best_validation_loss.pth` (normally the checkpoint to use for prediction), `INPUT_PATH` to one supported image or a directory, and
+Set `MODEL_PATH` to `model_best_validation_pixel_error.pth` (recommended for landmark prediction), `INPUT_PATH` to one supported image or a directory, and
 `OUTPUT_DIR` to the result directory. `GROUND_TRUTH_MARK_LIST_PATH` is optional; when supplied, matching image stems receive pixel-error metrics and ground-truth points
 on their overlays. Directory searches can be made recursive with `RECURSIVE_IMAGE_SEARCH`.
 
@@ -282,7 +282,7 @@ loader, or test results.
 
 ## Choosing an image size
 
-`--image-size SIZE` is required and accepts one positive integer only. The longest
+`--image-size SIZE` defaults to 512 and accepts one positive integer only. The longest
 image edge is resized to SIZE, preserving aspect ratio up to integer rounding.
 The shorter dimension is rounded to the nearest integer (half upwards, minimum
 one pixel), then centred on a SIZE x SIZE canvas. Odd padding puts the extra pixel
@@ -363,18 +363,34 @@ heatmaps-train 1 1 prostate_transverse true false \
     --fold-lists-path "$HOME/DATA/folds" \
     --mark-list-file "$HOME/DATA/doctors_resampled_transverseMarkList.txt" \
     --image-data-dir "$HOME/DATA/TRANSVERSE" \
-    --image-size 512 \
-    --heatmap-sigma 8 \
-    --oversampling-factor 1 \
-    --normalise-inputs true \
-    --batch-size 4 \
-    --learning-rate 0.001 \
-    --max-training-epochs 80
+    --network-name unet_basic
 ```
 
 For sagittal prostate images, use `--num-points 2` with the sagittal mark list and image directory.
 
-The supplied `run_pipeline.sh` and `run_pipeline.ps1` files expose paths, actions, data settings, optimisation settings, and model settings as top-level variables.
+The supplied PowerShell and Bash launchers expose dataset paths, the selected network and run controls. All remaining settings use the selected model's defaults. Add deliberate overrides to `EXTRA_ARGS` (Bash) or `$ExtraArguments` (PowerShell), or pass options directly to `heatmaps-train`.
+
+### Recommended training defaults
+
+The CLI uses the bundled [recommended_normal_loss_defaults.json](Heatmaps/recommended_normal_loss_defaults.json), based on the 6 October 2026 report. Common settings are merged with the selected model's settings. The same recipe applies to sagittal and transverse views; dataset paths and landmark counts/order remain explicit.
+
+| Model | Batch size | Learning rate | Input standardisation | Model-specific selection |
+|---|---:|---:|---|---|
+| `unet_basic` | 32 | 0.001 | Training-split statistics | 32 base channels, depth 4 |
+| `hrnet` | 32 | 0.001 | Training-split statistics | Width 32, 3 modules, 2 blocks |
+| `stacked_hourglass` | 32 | 0.001 | Training-split statistics | 6 stacks, 128 features, depth 4 |
+| `vitpose` | 8 | 0.0001 | Disabled | Fine-tune the last 4 encoder blocks |
+| `vit-medsam` | 8 | 0.0001 | Disabled | Fine-tune the last 8 encoder blocks |
+
+All models default to a 512-pixel canvas, sigma 8, three replicated greyscale channels, oversampling factor 8, AdamW, weighted MSE with positive weight 20, weight decay 0.0001, and a maximum of 300 epochs. Plateau scheduling uses pixel error, gamma 0.5, patience 3 and a minimum LR factor of 0.01. Early stopping uses loss, patience 30, minimum delta 0.0001 and warm-up 10. AMP is disabled, the seed is 42, there are 8 data workers, and validation export is enabled. Anatomical constraints and their weights default to disabled/zero.
+
+Explicit options always override the recipe, including `false` and `0`. For example, add `--batch-size 16` or `--hourglass-stacks 4`. Use `heatmaps-train --network-name vit-medsam --help` to display that model's defaults. CNN normalisation statistics are still calculated from each training split; augmentation and preprocessing implementations are unchanged.
+
+Fresh ViT training still requires `--pretrained-checkpoint /path/to/vitpose-b.pth` or `/path/to/medsam_vit_b.pth`. The filenames and hashes in the reference identify the evaluated assets; weights are not bundled or downloaded. Both ViTs retain the existing decoder-plateau transition: at least 5 decoder-only epochs, then 10 plateau epochs with a 0.1 px improvement threshold; restore the best pixel checkpoint, clear optimiser state and restart the scheduler with decoder LR 0.00005 and encoder LR 0.00001.
+
+Select `model_best_validation_pixel_error.pth` for final landmark predictions; both best-loss and best-pixel checkpoints continue to be saved and exported. Scores from `fold_all` are training-set results, not independent validation evidence.
+
+The five standard heatmap jobs in `JobScripts` also use these defaults and retain their Slurm resource settings and full-data export policy. Their run names are generated from the resolved configuration unless overridden. Sweep scripts retain their explicit experimental settings. To resume an older run, supply its original run name and settings; existing strict source/configuration compatibility checks still apply.
 
 ## Training and copying actions
 
@@ -510,7 +526,7 @@ Press the space bar to select another marked image and resample the chosen trans
 
 ## Input channels
 
-Input channels are detected from all training and validation images in the selected fold. There is no public input-channel argument.
+By default, enforced greyscale produces three identical luminance channels for all models, including from greyscale or RGBA sources. There is no public input-channel argument. With `--enforce-greyscale false`, channels are detected from all training and validation images in the selected fold:
 
 | Source image type | Model input channels |
 |-------------------|---------------------:|
@@ -524,7 +540,7 @@ The resolved channel count configures the first network layer and is written to 
 
 `--normalise-inputs true` calculates a distinct population mean and standard deviation for each of the three channels using only the original images in the selected training split, after aspect-preserving resize and per-image content min-max scaling to float32 `[0, 1]`, excluding padding. Validation images and oversampled/augmented copies do not contribute to the statistics.
 
-The current ultrasound data may be greyscale stored as RGB, but the calculation intentionally remains three-channel so future colour RGB images follow the same contract. Enabling input normalisation requires exactly three source channels; one- and four-channel training data are rejected rather than collapsed to a single statistic. This option is separate from `--normalisation`, which selects internal CNN normalisation layers such as batch or group normalisation.
+The current ultrasound data may be greyscale stored as RGB, but the calculation intentionally remains three-channel so future colour RGB images follow the same contract. Input normalisation requires three channels after greyscale conversion. If enforced greyscale is disabled, one- and four-channel training data are rejected rather than collapsed to a single statistic. This option is separate from `--normalisation`, which selects internal CNN normalisation layers such as batch or group normalisation.
 
 The enabled flag, three means and three standard deviations are stored under `metadata.preprocessing.normalisation` in each checkpoint. The same values are applied to training, validation and standalone inference inputs. `--normalise-inputs false` uses per-image min-max scaled float32 `[0, 1]` content, with zero padding. This scaling is now shared by every model.
 
@@ -657,7 +673,7 @@ Every model uses the same trainer, data pipeline, optional constraints, checkpoi
 - At least `--freeze-encoder-epochs` epochs have run (default 5).
 - Validation pixel error has plateaued for `--decoder-plateau-patience` epochs (10), using `--decoder-plateau-min-delta` pixels (0.1).
 
-The next epoch restores the best pixel checkpoint and starts joint training, clearing optimiser state and restarting the scheduler. The decoder LR is multiplied by `--finetune-decoder-lr-factor` (0.5); encoder LR defaults to 1e-5. `--finetune-last-blocks` defaults to 4 in the CLI; 12 includes patch/position embeddings. MedSAM's pretrained neck is fine-tuned with its encoder. Early stopping monitors loss and starts in the joint stage. The maximum epoch budget still applies if the decoder never plateaus; joint training is not forced.
+The next epoch restores the best pixel checkpoint and starts joint training, clearing optimiser state and restarting the scheduler. The decoder LR is multiplied by `--finetune-decoder-lr-factor` (0.5); encoder LR defaults to 1e-5. `--finetune-last-blocks` defaults to 4 for ViTPose and 8 for MedSAM; 12 includes patch/position embeddings. MedSAM's pretrained neck is fine-tuned with its encoder. Early stopping monitors loss and starts in the joint stage. The maximum epoch budget still applies if the decoder never plateaus; joint training is not forced.
 
 ViT CLI defaults: AdamW, decoder LR 1e-4, weight decay 1e-4, maximum 300 epochs, early-stop patience 30, gradient checkpointing enabled. Both require supplied pretrained weights for fresh training.
 
@@ -670,9 +686,9 @@ Constraints are disabled unless `--landmark-constraint-loss TYPE` is supplied. A
 - `prostate_taus`: four points ordered top, right, bottom, left. Penalises angles outside 90 +/-20 degrees between P1-P3 and P4-P2, and points falling on the wrong sides of those axes.
 - `prostate-saus`: two points, encouraging P1 above P2 only.
 
-`prostate-taus` and `prostate_saus` are accepted spellings. Differentiable softmax coordinates exclude padding, reverse letterboxing, and apply the exact inverse augmentation matrix before geometry is evaluated. This accounts for rotation, shear and scaling. `--constraint-angle-weight` and `--constraint-side-weight` default to 0.01, `--constraint-temperature` to 0.05, and `--constraint-margin` to 0.02 of the original image diagonal. The total reported loss includes the constraints; hourglass auxiliary heatmaps also receive their usual heatmap supervision. These are soft penalties, not guarantees on final argmax coordinates.
+`prostate-taus` and `prostate_saus` are accepted spellings. Differentiable softmax coordinates exclude padding, reverse letterboxing, and apply the exact inverse augmentation matrix before geometry is evaluated. This accounts for rotation, shear and scaling. `--constraint-angle-weight` and `--constraint-side-weight` default to 0.0; set them explicitly (for example, both to 0.01) when enabling anatomical penalties. `--constraint-temperature` defaults to 0.05 and `--constraint-margin` to 0.02. The margin is a fraction of the original image diagonal. The total reported loss includes the constraints; hourglass auxiliary heatmaps also receive their usual heatmap supervision. These are soft penalties, not guarantees on final argmax coordinates.
 
-Add base objectives to `HEATMAP_LOSSES` in `Heatmaps/heatmap_losses.py`: a factory accepts the training config and returns an elementwise criterion. Padding masking/reduction is shared. Add geometry functions to `LANDMARK_CONSTRAINTS` as `(landmark_count, callable)` returning angle and side terms from restored, diagonal-normalised coordinates.
+Add base objectives to `HEATMAP_LOSSES` in `Heatmaps/heatmap_losses.py`: a factory accepts the training config and returns an elementwise criterion. Padding masking/reduction is shared. Add geometry functions to `LANDMARK_``CONSTRAINTS` as `(landmark_count, callable)` returning angle and side terms from restored, diagonal-normalised coordinates.
 
 ### Validation progress images
 
@@ -874,7 +890,7 @@ utility also accepts `gain`, `contrast` and `gamma` individually.
 ### Enforced greyscale
 
 Use `--enforce-greyscale true` to convert source images to three identical
-luminance channels before preprocessing (default: `false`). RGB uses
+luminance channels before preprocessing (default: `true`). RGB uses
 0.299 R + 0.587 G + 0.114 B; single-channel images are replicated and RGBA
 uses its RGB channels, ignoring alpha. This removes colour differences,
 not image annotations or watermarks.

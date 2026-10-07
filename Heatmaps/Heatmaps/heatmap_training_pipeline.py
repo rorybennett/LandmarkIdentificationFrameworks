@@ -590,10 +590,16 @@ def clean_task_name(task_name):
     return task_name
 
 
-def parse_args():
-    """Parse command-line arguments."""
+def parse_args(argv=None):
+    """Parse arguments using the selected model's defaults; explicit options win."""
+    model_parser = argparse.ArgumentParser(add_help=False)
+    model_parser.add_argument('--network-name', choices=get_available_model_names(), default='unet_basic', help='Model architecture.')
+    selected, _ = model_parser.parse_known_args(argv)
+    defaults = pms.get_training_defaults(selected.network_name)
     parser = argparse.ArgumentParser(description='Train a heatmap landmark model using fold lists and mark-list annotations.',
-                                     formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+                                     parents=[model_parser], formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+                                     epilog='Defaults follow the recommended normal-loss recipe for the selected network. '
+                                            'Use --network-name MODEL --help to see its defaults. Explicit options override them.')
 
     parser.add_argument('repetition', type=int, help='Repeated k-fold repetition number to train.')
     parser.add_argument('fold', type=parse_fold, help='Fold number within the selected repetition, or "all".')
@@ -612,39 +618,38 @@ def parse_args():
                         help='Root containing repetition_N directories with training_fN.txt and val_fN.txt files, plus optional training_fall.txt and val_fall.txt files.')
     parser.add_argument('--mark-list-file', type=Path, required=True, help='Landmark mark-list file.')
     parser.add_argument('--image-data-dir', type=Path, required=True, help='Directory containing source images.')
-    parser.add_argument('--image-size', type=int, required=True, metavar='SIZE',
+    parser.add_argument('--image-size', type=int, metavar='SIZE',
                         help='Longest edge and square padded canvas size in pixels; aspect ratio is preserved.')
-    parser.add_argument('--heatmap-sigma', type=float, default=pms.heatmap_sigma, help='Gaussian sigma for target heatmaps.')
-    parser.add_argument('--oversampling-factor', type=int, default=1,
+    parser.add_argument('--heatmap-sigma', type=float, help='Gaussian sigma for target heatmaps.')
+    parser.add_argument('--oversampling-factor', type=int,
                         help='Training-set multiplier. A value of 1 uses each image once; values above 1 add augmented copies using Heatmaps/Heatmaps/heatmap_transforms.py.')
     parser.add_argument('--recursive-image-search', type=str_to_bool, default=False, help='Search image-data-dir recursively.')
-    parser.add_argument('--enforce-greyscale', type=str_to_bool, default=False,
+    parser.add_argument('--enforce-greyscale', type=str_to_bool,
                         help='Convert source images to three identical luminance channels before preprocessing.')
-    parser.add_argument('--normalise-inputs', type=str_to_bool, default=False,
+    parser.add_argument('--normalise-inputs', type=str_to_bool,
                         help='Calculate three-channel mean and standard-deviation values from the training split and normalise model inputs.')
 
-    parser.add_argument('--batch-size', type=int, default=4, help='Training batch size.')
-    parser.add_argument('--learning-rate', type=float, default=1e-3, help='Initial learning rate.')
-    parser.add_argument('--max-training-epochs', type=int, default=80, help='Maximum training epochs.')
-    parser.add_argument('--train-workers', type=int, default=8, help='DataLoader worker count.')
-    parser.add_argument('--random-seed', type=int, default=42, help='Random seed used for Python, NumPy, PyTorch, and DataLoader workers.')
-    parser.add_argument('--optimiser-name', choices=['adamw', 'sgd'], default='adamw', help='Optimiser.')
+    parser.add_argument('--batch-size', type=int, help='Training batch size.')
+    parser.add_argument('--learning-rate', type=float, help='Initial learning rate.')
+    parser.add_argument('--max-training-epochs', type=int, help='Maximum training epochs.')
+    parser.add_argument('--train-workers', type=int, help='DataLoader worker count.')
+    parser.add_argument('--random-seed', type=int, help='Random seed used for Python, NumPy, PyTorch, and DataLoader workers.')
+    parser.add_argument('--optimiser-name', choices=['adamw', 'sgd'], help='Optimiser.')
     from .heatmap_losses import HEATMAP_LOSSES, LANDMARK_CONSTRAINTS
-    parser.add_argument('--loss-name', choices=tuple(HEATMAP_LOSSES), default='weighted_mse', help='Training loss.')
-    parser.add_argument('--positive-weight', type=float, default=20.0, help='Peak-region weight for weighted_mse.')
-    parser.add_argument('--weight-decay', type=float, default=1e-4, help='Weight decay.')
+    parser.add_argument('--loss-name', choices=tuple(HEATMAP_LOSSES), help='Training loss.')
+    parser.add_argument('--positive-weight', type=float, help='Peak-region weight for weighted_mse.')
+    parser.add_argument('--weight-decay', type=float, help='Weight decay.')
     parser.add_argument('--momentum', type=float, default=0.9, help='SGD momentum.')
-    parser.add_argument('--lr-schedule', choices=['none', 'step', 'plateau', 'cosine', 'linear', 'exponential'], default='plateau', help='Learning-rate schedule.')
+    parser.add_argument('--lr-schedule', choices=['none', 'step', 'plateau', 'cosine', 'linear', 'exponential'], help='Learning-rate schedule.')
     parser.add_argument('--lr-step-size', type=int, default=20, help='StepLR epoch interval.')
-    parser.add_argument('--lr-gamma', type=float, default=0.5, help='Learning-rate reduction factor.')
-    parser.add_argument('--early-stop-patience', type=int, default=15, help='Epochs without improvement before stopping.')
-    parser.add_argument('--early-stop-min-delta', type=float, default=1e-4, help='Minimum validation-loss improvement.')
-    parser.add_argument('--early-stop-warmup-epochs', type=int, default=10, help='Epochs before early stopping is enabled.')
-    parser.add_argument('--use-amp', type=str_to_bool, default=False, help='Use automatic mixed precision.')
+    parser.add_argument('--lr-gamma', type=float, help='Learning-rate reduction factor.')
+    parser.add_argument('--early-stop-patience', type=int, help='Epochs without improvement before stopping.')
+    parser.add_argument('--early-stop-min-delta', type=float, help='Minimum validation-loss improvement.')
+    parser.add_argument('--early-stop-warmup-epochs', type=int, help='Epochs before early stopping is enabled.')
+    parser.add_argument('--use-amp', type=str_to_bool, help='Use automatic mixed precision.')
 
-    parser.add_argument('--save-validation-predictions', type=str_to_bool, default=True, help='Save validation predictions, metrics, heatmap overlays, and point overlays.')
+    parser.add_argument('--save-validation-predictions', type=str_to_bool, help='Save validation predictions, metrics, heatmap overlays, and point overlays.')
 
-    parser.add_argument('--network-name', choices=get_available_model_names(), default='unet_basic', help='Model architecture.')
 
     parser.add_argument('--base-channels', type=int, default=32, help='First U-Net channel width.')
     parser.add_argument('--depth', type=int, default=4, help='Number of U-Net downsampling levels.')
@@ -666,38 +671,32 @@ def parse_args():
     parser.add_argument('--normalisation', choices=['batch', 'instance', 'group', 'none'], default='batch', help='CNN normalisation layer.')
     parser.add_argument('--activation', choices=['relu', 'leaky_relu', 'elu', 'gelu'], default='relu', help='CNN activation function.')
     parser.add_argument('--dropout', type=float, default=0.0, help='CNN dropout probability.')
-    parser.add_argument('--output-activation', choices=['none', 'sigmoid', 'softplus'], default='none', help='Final heatmap activation.')
+    parser.add_argument('--output-activation', choices=['none', 'sigmoid', 'softplus'], help='Final heatmap activation.')
     parser.add_argument('--padding-mode', choices=['zeros', 'reflect', 'replicate', 'circular'], default='zeros', help='CNN convolution padding mode.')
-    parser.add_argument('--final-kernel-size', type=int, choices=[1, 3], default=1, help='Final heatmap convolution kernel size.')
+    parser.add_argument('--final-kernel-size', type=int, choices=[1, 3], help='Final heatmap convolution kernel size.')
 
     parser.add_argument('--device', choices=['cuda','cpu','auto'], default='cuda', help='Training device.')
     parser.add_argument('--pretrained-checkpoint', default='')
     parser.add_argument('--encoder-learning-rate', type=float, default=1e-5)
     parser.add_argument('--freeze-encoder-epochs', type=int, default=5)
-    parser.add_argument('--finetune-last-blocks', type=int, choices=range(1,13), default=4)
+    parser.add_argument('--finetune-last-blocks', type=int, choices=range(1,13), default=4, help='Number of final encoder blocks to fine-tune.')
     parser.add_argument('--decoder-channels', type=int, default=256)
     parser.add_argument('--gradient-checkpointing', type=str_to_bool, default=True)
     parser.add_argument('--decoder-plateau-patience', type=int, default=10)
     parser.add_argument('--decoder-plateau-min-delta', type=float, default=0.1)
     parser.add_argument('--finetune-decoder-lr-factor', type=float, default=0.5)
-    parser.add_argument('--lr-plateau-patience', type=int, default=3)
+    parser.add_argument('--lr-plateau-patience', type=int)
     parser.add_argument('--lr-decay-epochs', type=int, default=50)
-    parser.add_argument('--lr-min-factor', type=float, default=0.01)
-    parser.add_argument('--landmark-constraint-loss', choices=tuple(LANDMARK_CONSTRAINTS) + ('prostate-taus', 'prostate_saus'), default=None)
-    parser.add_argument('--constraint-angle-weight', type=float, default=0.01)
-    parser.add_argument('--constraint-side-weight', type=float, default=0.01)
+    parser.add_argument('--lr-min-factor', type=float)
+    parser.add_argument('--landmark-constraint-loss', choices=tuple(LANDMARK_CONSTRAINTS) + ('prostate-taus', 'prostate_saus'))
+    parser.add_argument('--constraint-angle-weight', type=float)
+    parser.add_argument('--constraint-side-weight', type=float)
     parser.add_argument('--constraint-temperature', type=float, default=0.05)
     parser.add_argument('--constraint-margin', type=float, default=0.02)
     parser.add_argument('--visualise-validation-progress-images', type=int, default=0)
     parser.add_argument('--visualise-validation-progress-epochs', type=int, default=0)
-    args = parser.parse_args()
-    if args.network_name in ('vitpose', 'vit-medsam'):
-        import sys
-        supplied = {item.split('=')[0] for item in sys.argv[1:]}
-        for flag, value in {'learning_rate':1e-4, 'max_training_epochs':300, 'enforce_greyscale':True,
-                            'weight_decay':1e-4, 'early_stop_patience':30, 'lr_schedule':'plateau'}.items():
-            if '--'+flag.replace('_','-') not in supplied:
-                setattr(args, flag, value)
+    parser.set_defaults(**defaults)
+    args = parser.parse_args(argv)
     args.landmark_constraint_loss = {'prostate-taus':'prostate_taus', 'prostate_saus':'prostate-saus'}.get(args.landmark_constraint_loss, args.landmark_constraint_loss)
     return args
 
