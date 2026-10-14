@@ -97,7 +97,7 @@ ipv-train 1 1 prostate_transverse true true false false \
     --patches-per-training-sample 200 \
     --val-grid-spacing 10 \
     --batch-size 64 \
-    --max-training-epochs 80 \
+    --max-training-epochs 300 \
     --learning-rate 0.001 \
     --optimiser-name adamw \
     --weight-decay 0.0001 \
@@ -105,7 +105,7 @@ ipv-train 1 1 prostate_transverse true true false false \
     --lr-schedule plateau \
     --lr-step-size 20 \
     --lr-gamma 0.5 \
-    --early-stop-patience 15 \
+    --early-stop-patience 30 \
     --early-stop-min-delta 0.0001 \
     --early-stop-warmup-epochs 10 \
     --use-amp false \
@@ -152,7 +152,19 @@ The enabled flag, source, three means and three standard deviations are stored u
 --lr-gamma
 ```
 
-The plateau scheduler and early stopping use total validation loss (classification plus optional weighted geometry terms). Separate checkpoints track the lowest validation loss and lowest endpoint error.
+Training controls match the recommended Heatmaps CLI defaults: a maximum of 300 epochs,
+early-stop patience 30, minimum loss improvement 0.0001 and warm-up 10 epochs.
+The stopping reference includes warm-up losses; non-improving epochs start counting at
+epoch 10, matching ordinary Heatmaps training. A strict improvement greater than the
+minimum delta resets patience. Smaller loss improvements still update the best-loss
+checkpoint. Explicit command-line settings override the defaults.
+
+The plateau scheduler monitors mean validation endpoint error in original-image pixels,
+with patience 3, reduction factor 0.5 and a floor of 0.01 times the initial learning rate.
+As with Heatmaps/PyTorch, reduction occurs after more than 3 consecutive bad epochs.
+Early stopping monitors total validation loss (classification plus optional weighted
+geometry terms). Separate checkpoints track the absolute lowest validation loss and
+lowest endpoint error; ties retain the earlier epoch.
 
 ### Resuming
 
@@ -189,10 +201,12 @@ RUN_DIR/TRAINING_RESULTS/TASK_NAME/RUN_NAME/repetition_N/fold_N_OR_all/
   validation_checkpoint_summary.json
   training_validation_log.csv
   training_validation_plot.png
+  individual_loss_plot.png
+  learning_rate_plot.png
   run_info.json
   validation_progress/                # Optional fixed-image progress exports
-  validation_best_pixel_error/         # Same export layout as validation_results
-  validation_results/
+  validation_best_pixel_error/         # Same export layout as validation_best_loss
+  validation_best_loss/
     validation_summary.xlsx
     validation_image_summary.csv
     validation_endpoints.csv
@@ -203,6 +217,19 @@ RUN_DIR/TRAINING_RESULTS/TASK_NAME/RUN_NAME/repetition_N/fold_N_OR_all/
     validation_logs/
       validation_run_metadata.json
 ```
+
+Both export directories use the Heatmaps table filenames and workbook sheet names.
+The checkpoint summary lists all three choices under `checkpoints`, with their epoch,
+type, path and validation metrics, and both sets of table paths under `validation_exports`.
+The original IPV metadata fields remain available for existing readers.
+
+For model comparisons, use `validation_best_pixel_error/validation_endpoints.csv`
+(or `validation_predictions.csv`) for every model, with the same numbered folds,
+repetitions and landmark order. These contain original-image pixel errors and allow
+mean/median error, accuracy within 10 pixels and the larger-error tail to be calculated
+consistently. Keep `fold_all` results separate from held-out cross-validation results.
+Loss magnitudes and IPV classification accuracy are not comparable across model families.
+Existing runs are not renamed; their best-loss tables remain under `validation_results`.
 
 Every validation CSV row identifies `dataset_split`, `repetition` and `fold`. Common endpoint columns are `target_x`, `target_y`, `pred_x`, `pred_y` and `error_px`. IPV-specific aliases and diagnostics such as classification accuracy, vote peak, grid spacing and number of centres are retained.
 
@@ -228,6 +255,14 @@ validation_loss_component_classification
 validation_loss_component_constraint_angle
 validation_loss_component_constraint_side
 ```
+
+`training_validation_plot.png` shows total training/validation loss and validation
+endpoint error. IPV training patches do not form full-image predictions, so there is
+no training endpoint-error series. `individual_loss_plot.png` shows the weighted
+classification and non-zero geometry contributions with matching colours for each
+training/validation pair. Disabled geometry stays zero-filled in the CSV for
+compatibility. `learning_rate_plot.png` records the learning rate used at the start
+of each epoch; a reduction after validation first appears in the next epoch.
 
 Automatic run names contain the repetition/fold counts, data and model labels, plus a configuration fingerprint. The fingerprint includes the SHA-256 digest of every active split list and every result-affecting training, validation and model option.
 
@@ -364,15 +399,15 @@ contributions separately; early stopping uses their total validation loss.
 - `model_best_validation_pixel_error.pth` is now tracked independently of
   `model_best_validation_loss.pth`. The last-epoch checkpoint contains both best
   model snapshots and restores the pixel-error checkpoint when resuming.
-- Final exports keep the existing `validation_results/` directory for the
-  best-loss model and add `validation_best_pixel_error/` for the best-pixel model.
-  `--save-validation-results false` skips both while retaining validation and
-  early stopping.
+- Final exports use `validation_best_loss/` and `validation_best_pixel_error/`,
+  matching Heatmaps. `--save-validation-results false` (also accepted as
+  `--save-validation-predictions false`) skips both while retaining validation,
+  checkpoint selection, stopping and all three training plots.
 - `--lr-schedule` also accepts `cosine`, `linear` and `exponential`.
   `--lr-decay-epochs 50` sets the cosine/linear horizon;
   `--lr-min-factor 0.01` sets the LR floor for those schedules, exponential and
-  plateau. `--lr-plateau-patience 5` replaces the previous hard-coded patience.
-  Plateau continues to monitor IPV validation loss.
+  plateau. `--lr-plateau-patience 3` matches Heatmaps; plateau monitors validation
+  endpoint error, while stopping continues to monitor validation loss.
 - Configuration fingerprints include these options, selected progress images
   and source dimensions used by geometry. Source/config compatibility checks
   intentionally prevent resuming training checkpoints from the older code;
@@ -385,4 +420,5 @@ contributions separately; early stopping uses their total validation loss.
 Heatmaps-only architecture features (dense heatmap losses, auxiliary heatmap
 heads, letterboxing and staged MedSAM encoder/decoder training) are not applied
 to IPV's patch classifier. Patch voting, backbone selection, fold handling,
-normalisation and existing early stopping remain IPV-specific.
+and normalisation remain IPV-specific. Stopping defaults and comparison outputs
+follow Heatmaps; staged encoder/decoder stopping is specific to those architectures.

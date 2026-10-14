@@ -3,7 +3,7 @@ import math
 from .landmark_losses import LANDMARK_CONSTRAINTS
 
 DEFAULTS = {
-    'lr_plateau_patience': 5, 'lr_decay_epochs': 50, 'lr_min_factor': 0.01,
+    'lr_plateau_patience': 3, 'lr_decay_epochs': 50, 'lr_min_factor': 0.01,
     'visualise_validation_progress_images': 0, 'visualise_validation_progress_epochs': 0,
     'landmark_constraint_loss': None, 'constraint_angle_weight': 0.01,
     'constraint_side_weight': 0.01, 'constraint_temperature': 1.0, 'constraint_margin': 0.02,
@@ -17,7 +17,7 @@ def normalise_constraint(value):
 
 def add_training_arguments(parser):
     descriptions = {
-        'lr_plateau_patience': 'Epochs without validation-loss improvement before reducing LR.',
+        'lr_plateau_patience': 'Patience for reducing LR on validation endpoint error in original-image pixels (as in Heatmaps).',
         'lr_decay_epochs': 'Epochs over which cosine/linear LR decays to its floor.',
         'lr_min_factor': 'Minimum LR as a fraction of the initial LR for plateau/cosine/linear/exponential schedules.',
         'visualise_validation_progress_images': 'Fixed validation images to export per interval; 0 disables.',

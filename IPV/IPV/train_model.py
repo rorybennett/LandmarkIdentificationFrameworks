@@ -72,7 +72,7 @@ class QuadrupletConfig:
 class TrainConfig:
     batch_size: int
     learning_rate: float
-    max_training_epochs: int
+    max_training_epochs: int = 300
     num_workers: int = 8
     random_seed: int = 42
     optimiser_name: str = 'adamw'
@@ -81,7 +81,7 @@ class TrainConfig:
     lr_schedule: str = 'plateau'
     lr_step_size: int = 20
     lr_gamma: float = 0.5
-    lr_plateau_patience: int = 5
+    lr_plateau_patience: int = 3
     lr_decay_epochs: int = 50
     lr_min_factor: float = 0.01
     visualise_validation_progress_images: int = 0
@@ -91,7 +91,7 @@ class TrainConfig:
     constraint_side_weight: float = 0.01
     constraint_temperature: float = 1.0
     constraint_margin: float = 0.02
-    early_stop_patience: int = 15
+    early_stop_patience: int = 30
     early_stop_min_delta: float = 1e-4
     early_stop_warmup_epochs: int = 10
     use_amp: bool = False
@@ -252,7 +252,7 @@ class TrainModel:
                 self.validate_finite_metrics('validation', validation_metrics)
 
                 if scheduler is not None:
-                    scheduler.step(validation_metrics['loss']) if isinstance(scheduler, ReduceLROnPlateau) else scheduler.step()
+                    scheduler.step(validation_metrics['error_px']) if isinstance(scheduler, ReduceLROnPlateau) else scheduler.step()
 
                 is_new_best = best_metrics is None or validation_metrics['loss'] < best_metrics['loss']
                 is_early_stop_improvement = validation_metrics['loss'] < early_stop_best_validation_loss - self.train_config.early_stop_min_delta
@@ -304,19 +304,23 @@ class TrainModel:
             self.termination_reason = (saved_termination_reason if saved_termination_reason in ('early_stopping', 'max_epochs_reached') else
                                        ('early_stopping' if bad_epochs >= self.train_config.early_stop_patience
                                         and last_epoch >= self.train_config.early_stop_warmup_epochs else 'max_epochs_reached'))
-            validation_results_path = None
+            validation_output_paths = None
 
             if self.train_config.save_validation_results:
                 export_start = time.perf_counter()
-                validation_results_path = self.run_validation_inference(model, best_checkpoint_path, last_checkpoint_path)
-                self.run_validation_inference(model, self.get_checkpoint_path('best_validation_pixel_error'),
-                                              export_label='best_validation_pixel_error')
-                self.validation_export_duration_seconds = time.perf_counter() - export_start
+                validation_output_paths = {}
+                try:
+                    for kind, checkpoint_path in (('best_validation_loss', best_checkpoint_path),
+                                                  ('best_validation_pixel_error', self.get_checkpoint_path('best_validation_pixel_error'))):
+                        directory = self.run_validation_inference(model, checkpoint_path, export_label=kind)
+                        validation_output_paths[kind.replace('best_validation_', 'validation_best_')] = self.validation_export_paths(directory)
+                finally:
+                    self.validation_export_duration_seconds = time.perf_counter() - export_start
 
             self.training_status = 'completed'
             self.finish_workflow()
             self.write_checkpoint_summary(best_epoch, last_epoch, best_metrics, last_metrics, best_checkpoint_path,
-                                          last_checkpoint_path, validation_results_path)
+                                          last_checkpoint_path, validation_output_paths)
             plt.clf()
             return best_checkpoint_path or last_checkpoint_path
         except BaseException as error:
@@ -344,6 +348,15 @@ class TrainModel:
                                                             checkpoint_type, loaded_checkpoint)
             print(f'\tRunning validation image inference with {checkpoint_type} checkpoint...', flush=True)
             run_validation_inference_for_trained_model(model=model, config=config, device=self.device)
+            # The files are written in staging, but their metadata must name the committed paths.
+            metadata_path = self.get_validation_staging_path() / 'validation_logs' / 'validation_run_metadata.json'
+            metadata = json.loads(metadata_path.read_text(encoding='utf-8'))
+            metadata['config']['output_dir'] = str(self.get_validation_output_path())
+            metadata['output_paths'] = {
+                name: str(self.get_validation_output_path() / Path(path).relative_to(self.get_validation_staging_path()))
+                for name, path in metadata['output_paths'].items()
+            }
+            metadata_path.write_text(json.dumps(metadata, indent=4), encoding='utf-8')
             self.commit_validation_output()
             return self.get_validation_output_path()
         finally:
@@ -897,14 +910,7 @@ class TrainModel:
         if not history['epoch']:
             return
 
-        component_names = [name for name in history if '_loss_component_' in name]
-        has_geometry = any('constraint_' in name and any(value != 0 for value in history[name])
-                           for name in component_names)
-        if has_geometry:
-            figure, (loss_axis, component_axis) = plt.subplots(2, 1, figsize=(10, 9))
-        else:
-            figure, loss_axis = plt.subplots(figsize=(9, 5))
-            component_axis = None
+        figure, loss_axis = plt.subplots(figsize=(9, 5))
         error_axis = loss_axis.twinx()
         loss_axis.plot(history['epoch'], history['training_loss'], label='training_loss')
         loss_axis.plot(history['epoch'], history['validation_loss'], label='validation_loss')
@@ -915,17 +921,49 @@ class TrainModel:
         loss_lines, loss_labels = loss_axis.get_legend_handles_labels()
         error_lines, error_labels = error_axis.get_legend_handles_labels()
         loss_axis.legend(loss_lines + error_lines, loss_labels + error_labels, loc='best')
-        if component_axis is not None:
-            for name in component_names:
-                phase, component = name.split('_loss_component_', 1)
-                component_axis.plot(history['epoch'], history[name], label=f'{phase} {component}',
-                                    linestyle='--' if phase == 'validation' else '-')
-            component_axis.set_xlabel('Epoch')
-            component_axis.set_ylabel('Weighted loss contribution')
-            component_axis.legend(loc='best', fontsize='small')
         figure.tight_layout()
         figure.savefig(self.get_plot_path())
         plt.close(figure)
+
+        self.save_diagnostic_plots(history)
+
+    def save_diagnostic_plots(self, history):
+        """Save weighted loss contributions and rates used at epoch start, as in Heatmaps."""
+        component_names = sorted({name.split('_loss_component_', 1)[1] for name in history
+                                  if '_loss_component_' in name})
+        # Retain zero-filled CSV columns for compatibility, but omit inactive geometry from plots.
+        component_names = [name for name in component_names if not name.startswith('constraint_') or
+                           any(value not in (None, 0) for phase in ('training', 'validation')
+                               for value in history.get(f'{phase}_loss_component_{name}', []))]
+        if component_names:
+            figure, axis = plt.subplots(figsize=(11, 6))
+            for index, name in enumerate(component_names):
+                for phase, style in (('training', '-'), ('validation', '--')):
+                    values = history.get(f'{phase}_loss_component_{name}', [])
+                    if not any(value is not None for value in values):
+                        continue
+                    axis.plot(history['epoch'], [np.nan if value is None else value for value in values],
+                              color=f'C{index % 10}', linestyle=style, marker='.' if len(history['epoch']) == 1 else None,
+                              label=f'{name.replace("_", " ").capitalize()} ({phase})')
+            axis.set(xlabel='Epoch', ylabel='Weighted contribution to total loss',
+                     title='Individual losses - training (solid), validation (dashed)')
+            axis.grid(alpha=0.25)
+            axis.legend(loc='upper left', bbox_to_anchor=(1.02, 1))
+            figure.tight_layout()
+            figure.savefig(self.output_path / 'individual_loss_plot.png')
+            plt.close(figure)
+
+        if 'lr' in history:
+            figure, axis = plt.subplots(figsize=(9, 5))
+            axis.step(history['epoch'], history['lr'], where='post', label='Learning rate',
+                      marker='.' if len(history['epoch']) == 1 else None)
+            axis.set(xlabel='Epoch', ylabel='Learning rate', title='Learning rates at epoch start')
+            axis.ticklabel_format(axis='y', style='sci', scilimits=(0, 0))
+            axis.grid(alpha=0.25)
+            axis.legend(loc='best')
+            figure.tight_layout()
+            figure.savefig(self.output_path / 'learning_rate_plot.png')
+            plt.close(figure)
 
     def build_checkpoint_metadata(self, checkpoint_type=None, epoch=None, metrics=None, created_at=None):
         """Build the single metadata structure saved in every checkpoint."""
@@ -1048,6 +1086,7 @@ class TrainModel:
         batch_size = int(self.train_config.validation_inference_batch_size)
 
         return {
+            'output_coordinate_space': 'original_image_pixels',
             'grid_spacing': grid_spacing,
             'centre_grid': {
                 'x_start': 0,
@@ -1068,7 +1107,10 @@ class TrainModel:
         """Build training configuration metadata."""
         return {
             'train_config': asdict(self.train_config),
-            'quadruplet_config': asdict(self.quadruplet_config)
+            'quadruplet_config': asdict(self.quadruplet_config),
+            'early_stopping_monitor': 'validation_loss',
+            'lr_plateau_monitor': 'validation_error_px',
+            'recommended_comparison_checkpoint': 'best_validation_pixel_error',
         }
 
     def read_data_creation_metadata(self):
@@ -1168,9 +1210,14 @@ class TrainModel:
         return value
 
     def write_checkpoint_summary(self, best_epoch, last_epoch, best_metrics, last_metrics, best_checkpoint_path,
-                                 last_checkpoint_path, validation_results_path=None):
+                                 last_checkpoint_path, validation_output_paths=None):
         """Write a compact run-level checkpoint summary."""
         summary_path = self.get_checkpoint_summary_path()
+        best_loss_paths = (validation_output_paths or {}).get('validation_best_loss', {})
+        best_pixel_paths = (validation_output_paths or {}).get('validation_best_pixel_error', {})
+        validation_summary_path = best_loss_paths.get('validation_summary_xlsx')
+        validation_predictions_path = best_loss_paths.get('validation_predictions_csv')
+        validation_results_path = None if validation_summary_path is None else Path(validation_summary_path).parent
         metadata = self.build_checkpoint_metadata(checkpoint_type=None, epoch=None, metrics={})
         summary = {
             'format_version': CHECKPOINT_FORMAT_VERSION,
@@ -1188,21 +1235,17 @@ class TrainModel:
             'preprocessing': metadata['preprocessing'],
             'inference': metadata['inference'],
             'training': metadata['training'],
+            'task_name': metadata['task']['name'],
+            'num_of_points': self.num_of_points,
+            'metadata': metadata,
+            'validation_exports': self.serialise(validation_output_paths),
+            'validation_summary_path': None if validation_summary_path is None else str(validation_summary_path),
+            'validation_predictions_path': None if validation_predictions_path is None else str(validation_predictions_path),
             'checkpoints': {
-                'best_validation_loss': {
-                    'epoch': best_epoch,
-                    'validation_loss': None if best_metrics is None else best_metrics.get('loss'),
-                    'validation_accuracy': None if best_metrics is None else best_metrics.get('accuracy'),
-                    'validation_error_px': None if best_metrics is None else best_metrics.get('error_px'),
-                    'path': str(best_checkpoint_path) if best_checkpoint_path is not None else None
-                },
-                'last_epoch': {
-                    'epoch': last_epoch,
-                    'validation_loss': None if last_metrics is None else last_metrics.get('loss'),
-                    'validation_accuracy': None if last_metrics is None else last_metrics.get('accuracy'),
-                    'validation_error_px': None if last_metrics is None else last_metrics.get('error_px'),
-                    'path': str(last_checkpoint_path) if last_checkpoint_path is not None else None
-                }
+                'best_validation_loss': self.build_checkpoint_descriptor(
+                    best_checkpoint_path, 'best_validation_loss', best_epoch, best_metrics),
+                'last_epoch': self.build_checkpoint_descriptor(
+                    last_checkpoint_path, 'last_epoch', last_epoch, last_metrics),
             },
             'best_pixel_checkpoint': None if self.best_pixel_checkpoint is None else {
                 'path': str(self.get_checkpoint_path('best_validation_pixel_error')),
@@ -1210,7 +1253,7 @@ class TrainModel:
                 'validation_metrics': self.best_pixel_checkpoint['validation_metrics'],
             },
             'validation_progress_samples': [] if self.validation_progress is None else self.validation_progress.sample_names,
-            'validation_best_pixel_error_path': str(self.output_path / 'validation_best_pixel_error') if validation_results_path is not None else None,
+            'validation_best_pixel_error_path': str(Path(best_pixel_paths['validation_summary_xlsx']).parent) if best_pixel_paths else None,
             'validation_inference': {
                 'enabled': bool(self.train_config.save_validation_results),
                 'path': str(validation_results_path) if validation_results_path is not None else None
@@ -1219,8 +1262,28 @@ class TrainModel:
             'timing': self.get_timing_summary(),
         }
 
+        if self.best_pixel_checkpoint is not None:
+            summary['checkpoints']['best_validation_pixel_error'] = self.build_checkpoint_descriptor(
+                self.get_checkpoint_path('best_validation_pixel_error'), 'best_validation_pixel_error',
+                self.best_pixel_checkpoint['epoch'],
+                self.unlabel_validation_metrics(self.best_pixel_checkpoint['validation_metrics']))
+
         with open(summary_path, 'w', encoding='utf-8') as summary_file:
             json.dump(summary, summary_file, indent=4, default=str)
+
+    @staticmethod
+    def build_checkpoint_descriptor(path, checkpoint_type, epoch, validation_metrics):
+        """Use the common Heatmaps checkpoint descriptor, retaining IPV accuracy too."""
+        return {'path': None if path is None else str(path), 'type': checkpoint_type,
+                'epoch': None if epoch is None else int(epoch),
+                **(TrainModel.label_validation_metrics(validation_metrics) or {})}
+
+    @staticmethod
+    def validation_export_paths(directory):
+        """Describe the four shared validation tables using Heatmaps' export keys."""
+        return {f'validation_{name}_{extension}': Path(directory) / f'validation_{name}.{extension}'
+                for name, extension in (('summary', 'xlsx'), ('image_summary', 'csv'),
+                                        ('endpoints', 'csv'), ('predictions', 'csv'))}
 
     def build_resume_signature(self, training_loader, validation_loader):
         """Hash every trajectory-defining configuration and selected data input."""
@@ -1827,7 +1890,7 @@ class TrainModel:
 
     def get_validation_output_path(self):
         """Return the validation-image inference output directory."""
-        return self.output_path / ('validation_best_pixel_error' if getattr(self, 'validation_export_label', None) else 'validation_results')
+        return self.output_path / ('validation_best_pixel_error' if getattr(self, 'validation_export_label', None) == 'best_validation_pixel_error' else 'validation_best_loss')
 
     def get_validation_staging_path(self):
         """Return the same-volume staging path for validation outputs."""

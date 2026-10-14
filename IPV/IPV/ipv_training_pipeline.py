@@ -291,6 +291,8 @@ class IPVTrainingPipeline:
             'model_best_validation_loss.pth', 'model_last_epoch.pth', 'validation_checkpoint_summary.json',
             'training_validation_log.csv', 'training_validation_plot.png', 'run_info.json', 'validation_results',
             '.validation_results.tmp', '.validation_results.backup',
+            'validation_best_loss', '.validation_best_loss.tmp', '.validation_best_loss.backup',
+            'individual_loss_plot.png', 'learning_rate_plot.png',
             'model_best_validation_pixel_error.pth', 'validation_progress', 'validation_best_pixel_error',
             '.validation_best_pixel_error.tmp', '.validation_best_pixel_error.backup',
         }
@@ -687,7 +689,10 @@ class IPVTrainingPipeline:
         print(f'\t\tRandom seed: {self.data_config.random_seed}', flush=True)
         print(f'\t\tOptimiser: {self.train_config.optimiser_name}', flush=True)
         print(f'\t\tWeight decay: {self.train_config.weight_decay}', flush=True)
-        print(f'\t\tLR schedule: {self.train_config.lr_schedule}', flush=True)
+        print(f'\t\tLR schedule: {self.train_config.lr_schedule} (plateau monitors validation pixel error)', flush=True)
+        print(f'\t\tMaximum training epochs: {self.train_config.max_training_epochs}', flush=True)
+        print(f'\t\tEarly stopping: validation loss; patience={self.train_config.early_stop_patience}, '
+              f'min_delta={self.train_config.early_stop_min_delta:g}, warmup={self.train_config.early_stop_warmup_epochs}', flush=True)
         print(f'\t\tUse AMP: {self.train_config.use_amp}', flush=True)
         print(f'\t\tNormalise inputs: {self.train_config.normalise_inputs}', flush=True)
         print(f'\t\tNetwork: {self.quadruplet_config.network_name}', flush=True)
@@ -809,7 +814,7 @@ def parse_args():
     parser.add_argument('--keep-part-csvs', type=str_to_bool, required=True,
                         help='Whether to keep temporary per-sample CSV part files after merging. Accepted values: true/false, yes/no, 1/0.')
     parser.add_argument('--batch-size', type=int, required=True, help='Training batch size.')
-    parser.add_argument('--max-training-epochs', type=int, required=True, help='Maximum number of training epochs.')
+    parser.add_argument('--max-training-epochs', type=int, default=TrainConfig.max_training_epochs, help='Maximum number of training epochs.')
     parser.add_argument('--learning-rate', type=float, required=True, help='Initial optimiser learning rate.')
     parser.add_argument('--optimiser-name', choices=['adamw', 'sgd'], default='adamw', help='Optimiser.')
     parser.add_argument('--weight-decay', type=float, default=1e-4, help='Optimiser weight decay.')
@@ -817,7 +822,7 @@ def parse_args():
     parser.add_argument('--lr-schedule', choices=['none', 'step', 'plateau', 'cosine', 'linear', 'exponential'], default='plateau', help='Epoch-level learning-rate schedule.')
     parser.add_argument('--lr-step-size', type=int, default=20, help='StepLR epoch interval.')
     parser.add_argument('--lr-gamma', type=float, default=0.5, help='Learning-rate reduction factor.')
-    parser.add_argument('--early-stop-patience', type=int, default=15, help='Validation epochs without sufficient loss improvement before stopping.')
+    parser.add_argument('--early-stop-patience', type=int, default=TrainConfig.early_stop_patience, help='Validation epochs without sufficient loss improvement before stopping.')
     parser.add_argument('--early-stop-min-delta', type=float, default=1e-4, help='Minimum validation-loss improvement required to reset patience.')
     parser.add_argument('--early-stop-warmup-epochs', type=int, default=10, help='Initial epochs before early stopping is allowed.')
     parser.add_argument('--use-amp', type=str_to_bool, default=False, help='Use CUDA automatic mixed precision.')
@@ -825,8 +830,8 @@ def parse_args():
                         help='Convert source images to three identical luminance channels before preprocessing.')
     parser.add_argument('--normalise-inputs', type=str_to_bool, default=False,
                         help='Normalise each of the three input channels. Pretrained networks use ImageNet constants; other networks use training-split patch statistics.')
-    parser.add_argument('--save-validation-results', type=str_to_bool, default=True,
-                        help='Whether to run full validation-image inference after training and save overlays plus Excel error metrics.')
+    parser.add_argument('--save-validation-results', '--save-validation-predictions', type=str_to_bool, default=True,
+                        help='Export both best-loss and best-pixel-error validation predictions, overlays and error tables after training.')
     parser.add_argument('--validation-inference-batch-size', type=int, default=2048,
                         help='Batch size used when passing full validation image grids through the trained model.')
     parser.add_argument('--validation-vote-smoothing-sigma', type=float, default=7.0,
