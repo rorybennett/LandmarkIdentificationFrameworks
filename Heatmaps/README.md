@@ -134,6 +134,67 @@ inference_logs/
 The Excel workbook uses `image_summary` and `endpoints` sheets. CSV output includes both long endpoint rows and one wide, comparison-ready prediction row per image.
 Error fields are blank when no matching ground truth is available.
 
+## Peak-refinement validation comparison
+
+Edit the top-level switches in [`Heatmaps/infer_landmarks_peaks_refinement.py`](Heatmaps/infer_landmarks_peaks_refinement.py), then run from the outer `Heatmaps` directory:
+
+```bash
+python -m Heatmaps.infer_landmarks_peaks_refinement
+```
+
+This experiment reuses saved checkpoints and reruns their validation images. It changes coordinate decoding only. Architecture, training sigma/weight, input preprocessing, saved normalisation statistics and landmark order are reconstructed from each checkpoint; augmentation and stopping rules are unchanged.
+
+Set these switches before running:
+
+| Switch | Purpose |
+|---|---|
+| `MODEL_PATHS` | A list of checkpoint files or run directories. Directories are searched recursively for `CHECKPOINT_FILENAME`. Include both view-specific run roots for the initial study. |
+| `CHECKPOINT_FILENAME` | Defaults to `model_best_validation_pixel_error.pth`; select the same checkpoint type used by the comparison report. Explicit file paths use the supplied checkpoint. |
+| `OUTPUT_DIR` | A new or empty comparison directory. Existing results are never cleared. |
+| `EXPECTED_CHECKPOINT_COUNT` | Defaults to 30 numbered-fold checkpoints, after excluding `fold_all`. Change it, or use `None`, for another experiment. |
+| `IMAGE_DATA_DIR`, `FOLD_LISTS_PATH`, `MARK_LIST_FILE` | Optional replacements for paths saved in checkpoints. The fold root contains `repetition_N/val_fN.txt`. Only listed validation images are evaluated. |
+| `DATASET_OVERRIDES` | Per-task versions of those paths, keyed by saved task name, such as `prostate_sagittal` and `prostate_transverse`. These take precedence over the global overrides. |
+| `REQUIRED_TRAINING_SETTINGS` | Checks that the initial study uses six stacks, sigma 12, positive weight 10, 512-pixel input and weighted MSE without anatomical constraints. Set to `{}` to evaluate other model configurations. It does not alter any checkpoint or training defaults. |
+| `REFINE_NATIVE_HOURGLASS` | Defaults to `True`: capture the final hourglass head before enlargement. Other models use their returned canvas heatmaps. Set to `False` to refine the enlarged heatmaps for every architecture. |
+| `BLUR_KERNEL`, `BLUR_SIGMA`, `MAX_REFINEMENT_OFFSET` | Experimental decoder settings in pixels of the grid being refined. Defaults: kernel 3, OpenCV-derived sigma, maximum absolute offset 1 per axis. Kernel 1 disables smoothing. |
+| `ERROR_THRESHOLDS_PX`, `LARGE_ERROR_THRESHOLD_PX` | Accuracy thresholds (5, 10, 20) and large-error threshold (20), all in original-image pixels. |
+| `SAVE_OVERLAYS`, `SAVE_RAW_HEATMAPS` | Optional visual checks and compressed heatmap arrays; both default to `False`. |
+| `COMPARE_EXISTING_VALIDATION` | When available, audit rerun argmax against the matching checkpoint's existing `validation_best_loss` or `validation_best_pixel_error` export. Membership/ground-truth disagreements stop the run; coordinate differences are reported. |
+
+For example, use separate dataset overrides when the two views have different images and annotations:
+
+```python
+DATASET_OVERRIDES = {
+    'prostate_sagittal': {
+        'image_data_dir': r'C:\data\SAGITTAL',
+        'fold_lists_path': r'C:\data\folds',
+        'mark_list_file': r'C:\data\sagittal_marks.txt',
+    },
+    'prostate_transverse': {
+        'image_data_dir': r'C:\data\TRANSVERSE',
+        'fold_lists_path': r'C:\data\folds',
+        'mark_list_file': r'C:\data\transverse_marks.txt',
+    },
+}
+```
+
+Each batch runs through the model once. `argmax` uses the existing masked canvas decoder unchanged. `dark` estimates the local peak from the gradient and Hessian of the smoothed log heatmap, following the decoding idea in [Zhang et al., CVPR 2020](https://arxiv.org/abs/1910.06278). This is a guarded DARK-style adaptation; it does not reproduce the paper's training/encoding changes or imply improved performance on this dataset. For native hourglass decoding, `native_argmax` is also exported to separate the resolution change from the Taylor refinement. Native pixel centres map to canvas coordinates as `(coordinate + 0.5) * canvas_size / native_size - 0.5`, followed by the existing inverse letterbox transform.
+
+Padding is excluded from peak selection and smoothing. A peak too close to the content edge, a non-positive or flat response, an unstable/non-concave fit, or an excessive offset falls back to the existing **canvas argmax**. Per-endpoint status codes and status counts make these cases visible. Native decoding applies the model's configured output activation to the captured native head; the initial normal-loss study uses no output activation.
+
+For each checkpoint, the `argmax`, `dark` and optional `native_argmax` folders contain the existing validation CSV filenames and columns, plus `validation_summary.xlsx` with the same worksheet names as training exports. `comparison_metadata.json` records the checkpoint hash, original metadata, resolved paths, validation-list and annotation hashes, decoder parameters, resolution, fallback counts and saved-argmax audit. Original training results are preserved.
+
+At the comparison root:
+
+- `fold_decoder_summary.csv`: mean, median, 90th/95th percentiles, maximum, threshold accuracy and large-error metrics per checkpoint and decoder.
+- `aggregate_decoder_summary.csv`: pooled endpoint metrics and the mean of fold means, grouped separately by task, model run and checkpoint filename.
+- `paired_endpoints.csv`: both coordinates, both errors, their difference and the refinement status for each endpoint. Negative `error_change_px` favours refinement.
+- `paired_change_summary.csv`: improved/worsened/unchanged counts and the change within the fixed cohort of endpoints whose **baseline** error exceeds the large-error threshold.
+- `experiment.json`: settings, selected checkpoints, completion/failure state and completed checkpoint paths.
+
+Repeated evaluations across repetitions are not independent patients; the pooled metrics are descriptive. Compare models using the same validation memberships, annotations and checkpoint-selection rule. `fold_all` is excluded. Verify the saved-argmax audit before attributing differences from older reports solely to decoding. No full checkpoint experiment is launched until the path switches are filled in.
+
+
 ## Input data
 
 A training run requires:
